@@ -18,6 +18,7 @@ const highway = (() => {
     let lyrics = [];
     let ready = false;
     let showLyrics = true;
+    let _drawHooks = [];  // plugin draw callbacks: fn(ctx, W, H)
 
     // Rendering config
     const VISIBLE_SECONDS = 3.0;
@@ -123,6 +124,11 @@ const highway = (() => {
         drawChords(W, H);
         drawFretNumbers(W, H);
         if (showLyrics) drawLyrics(W, H);
+
+        // Plugin draw hooks
+        for (const hook of _drawHooks) {
+            try { hook(ctx, W, H); } catch (e) { /* ignore */ }
+        }
 
         } catch (e) {
             console.error('draw error:', e);
@@ -916,6 +922,10 @@ const highway = (() => {
             }
             return count > 0 ? 60 / (sum / count) : 120;
         },
+
+        getBeats() { return beats; },
+        getTime() { return currentTime; },
+        addDrawHook(fn) { _drawHooks.push(fn); },
 
         toggleLyrics() {
             showLyrics = !showLyrics;
