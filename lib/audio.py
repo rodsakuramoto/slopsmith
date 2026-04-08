@@ -28,7 +28,7 @@ def convert_wem(wem_path: str, output_base: str) -> str:
             if shutil.which("ffmpeg"):
                 mp3 = output_base + ".mp3"
                 r2 = subprocess.run(
-                    ["ffmpeg", "-y", "-i", wav, "-b:a", "128k", mp3],
+                    ["ffmpeg", "-y", "-i", wav, "-b:a", "192k", mp3],
                     capture_output=True,
                 )
                 if r2.returncode == 0 and os.path.exists(mp3):
@@ -40,7 +40,7 @@ def convert_wem(wem_path: str, output_base: str) -> str:
     if shutil.which("ffmpeg"):
         mp3 = output_base + ".mp3"
         r = subprocess.run(
-            ["ffmpeg", "-y", "-i", wem_path, "-b:a", "128k", mp3],
+            ["ffmpeg", "-y", "-i", wem_path, "-b:a", "192k", mp3],
             capture_output=True,
         )
         if r.returncode == 0 and os.path.exists(mp3) and os.path.getsize(mp3) > 0:

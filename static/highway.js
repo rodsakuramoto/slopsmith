@@ -882,10 +882,16 @@ const highway = (() => {
                         document.getElementById('hud-arrangement').textContent = msg.arrangement;
                         if (msg.audio_url) {
                             const audio = document.getElementById('audio');
-                            // Only reload audio if it's a different song
                             if (!audio.src || !audio.src.includes(msg.audio_url.split('/').pop())) {
                                 audio.src = msg.audio_url;
                                 audio.load();
+                                // Show buffering state until enough is loaded
+                                const playBtn = document.getElementById('btn-play');
+                                if (playBtn) playBtn.textContent = 'Buffering...';
+                                audio.addEventListener('canplaythrough', function _ready() {
+                                    audio.removeEventListener('canplaythrough', _ready);
+                                    if (playBtn) playBtn.textContent = '▶ Play';
+                                }, { once: true });
                             }
                         }
                         // Populate arrangement dropdown
