@@ -208,6 +208,9 @@ Routes are registered under `/api/plugins/{plugin_id}/` to avoid conflicts.
 | [Arrangement Editor](https://github.com/byrongamatos/slopsmith-plugin-editor) | DAW-like visual editor for creating and editing CDLC note charts | `git clone ...slopsmith-plugin-editor.git editor` |
 | [Profile Import](https://github.com/byrongamatos/slopsmith-plugin-profileimport) | Import play counts, favorites, and scores from Rocksmith profiles | `git clone ...slopsmith-plugin-profileimport.git profileimport` |
 | [MIDI Capo](https://github.com/masc0t/slopsmith-plugin-midi-capo) | MIDI capo control for real-time transposition | `git clone ...slopsmith-plugin-midi-capo.git midi_capo` |
+| [Note Detection](https://github.com/byrongamatos/slopsmith-plugin-notedetect) | Real-time pitch detection and scoring against highway notes | `git clone ...slopsmith-plugin-notedetect.git note_detect` |
+| [Find More CDLC](https://github.com/masc0t/slopsmith-plugin-find-more) | Search for more CDLC by the same artist | `git clone ...slopsmith-plugin-find-more.git find_more` |
+| [Invert Highway](https://github.com/masc0t/slopsmith-plugin-invert-highway) | Flip the highway note direction | `git clone ...slopsmith-plugin-invert-highway.git invert_highway` |
 
 Install any plugin by cloning it into your `plugins/` directory and restarting:
 
