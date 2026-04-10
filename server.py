@@ -929,25 +929,27 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
 
     tmp = None
     owns_tmp = False
-    try:
-        # Run extraction in background while sending keepalives every 5s
-        await websocket.send_json({"type": "loading", "stage": "Extracting..."})
+    _keepalive_active = True
 
-        loop = asyncio.get_event_loop()
-        extract_future = loop.run_in_executor(None, lambda: _get_or_extract(filename, psarc_path))
-
-        while not extract_future.done():
+    async def _send_keepalives():
+        while _keepalive_active:
             try:
-                tmp, song, owns_tmp = await asyncio.wait_for(asyncio.shield(extract_future), timeout=5.0)
+                await asyncio.sleep(3)
+                if _keepalive_active:
+                    await websocket.send_json({"type": "loading", "stage": "Loading..."})
+            except Exception:
                 break
-            except asyncio.TimeoutError:
-                try:
-                    await websocket.send_json({"type": "loading", "stage": "Still loading..."})
-                except Exception:
-                    break
 
-        if tmp is None:
-            tmp, song, owns_tmp = extract_future.result()
+    try:
+        await websocket.send_json({"type": "loading", "stage": "Extracting..."})
+        keepalive_task = asyncio.create_task(_send_keepalives())
+
+        try:
+            loop = asyncio.get_event_loop()
+            tmp, song, owns_tmp = await loop.run_in_executor(None, lambda: _get_or_extract(filename, psarc_path))
+        finally:
+            _keepalive_active = False
+            keepalive_task.cancel()
 
         if not song.arrangements:
             await websocket.send_json({"error": "No arrangements found"})
@@ -983,33 +985,34 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                     best = i
         arr = song.arrangements[best]
 
-        # Convert audio with unique filename
-        await websocket.send_json({"type": "loading", "stage": "Converting audio..."})
+        # Convert audio with unique filename (check cache first)
         audio_url = None
         audio_id = Path(filename).stem.replace(" ", "_")
-        wem_files = find_wem_files(tmp)
-        if wem_files:
-            try:
-                convert_future = loop.run_in_executor(None, lambda: convert_wem(wem_files[0], os.path.join(tmp, "audio")))
-                while not convert_future.done():
-                    try:
-                        audio_path = await asyncio.wait_for(asyncio.shield(convert_future), timeout=5.0)
-                        break
-                    except asyncio.TimeoutError:
-                        try:
-                            await websocket.send_json({"type": "loading", "stage": "Converting audio..."})
-                        except Exception:
-                            break
-                if not convert_future.done():
-                    audio_path = convert_future.result()
-                else:
-                    audio_path = convert_future.result()
-                ext = Path(audio_path).suffix  # .mp3, .ogg, or .wav
-                audio_dest = STATIC_DIR / f"audio_{audio_id}{ext}"
-                shutil.copy2(audio_path, audio_dest)
+        # Check if audio already cached
+        for ext in [".mp3", ".ogg", ".wav"]:
+            cached_audio = STATIC_DIR / f"audio_{audio_id}{ext}"
+            if cached_audio.exists() and cached_audio.stat().st_size > 1000:
                 audio_url = f"/static/audio_{audio_id}{ext}"
-            except Exception as e:
-                print(f"Audio conversion failed: {e}")
+                break
+
+        if not audio_url:
+            await websocket.send_json({"type": "loading", "stage": "Converting audio..."})
+            wem_files = find_wem_files(tmp)
+            if wem_files:
+                try:
+                    _keepalive_active = True
+                    keepalive_task2 = asyncio.create_task(_send_keepalives())
+                    try:
+                        audio_path = await loop.run_in_executor(None, lambda: convert_wem(wem_files[0], os.path.join(tmp, "audio")))
+                    finally:
+                        _keepalive_active = False
+                        keepalive_task2.cancel()
+                    ext = Path(audio_path).suffix
+                    audio_dest = STATIC_DIR / f"audio_{audio_id}{ext}"
+                    shutil.copy2(audio_path, audio_dest)
+                    audio_url = f"/static/audio_{audio_id}{ext}"
+                except Exception as e:
+                    print(f"Audio conversion failed: {e}")
 
         # Send song metadata
         arr_list = [{"index": i, "name": a.name, "notes": len(a.notes) + sum(len(c.notes) for c in a.chords)}
