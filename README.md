@@ -224,6 +224,7 @@ Routes are registered under `/api/plugins/{plugin_id}/` to avoid conflicts.
 | [Stems Mixer](https://github.com/topkoa/slopsmith-plugin-stems) | Per-stem mute/volume controls for .sloppak songs | `git clone ...slopsmith-plugin-stems.git stems` |
 | [Invert Highway](https://github.com/masc0t/slopsmith-plugin-invert-highway) | Flip the highway note direction | `git clone ...slopsmith-plugin-invert-highway.git invert_highway` |
 | [Jumping Tab](https://github.com/renanboni/slopsmith-plugin-jumpingtab) | Yousician-style 2D horizontal tab with trajectory arcs and hopping ball | `git clone ...slopsmith-plugin-jumpingtab.git jumpingtab` |
+| [Lyrics Sync](https://github.com/byrongamatos/slopsmith-plugin-lyrics-sync) | Generate synced LRC lyrics from text + vocals stem via Whisper alignment | `git clone ...slopsmith-plugin-lyrics-sync.git lyrics_sync` |
 
 Install any plugin by cloning it into your `plugins/` directory and restarting:
 
