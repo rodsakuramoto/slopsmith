@@ -514,12 +514,13 @@ async function rescanLibrary() {
         const sr = await fetch('/api/scan-status');
         const sd = await sr.json();
         if (sd.running) {
-            status.textContent = `${sd.done} / ${sd.total} scanned...`;
+            const cur = sd.current ? ` · ${sd.current}` : '';
+            status.textContent = `${sd.done} / ${sd.total} scanned${cur}...`;
         } else {
             clearInterval(poll);
             btn.disabled = false;
             btn.textContent = 'Rescan Library';
-            status.textContent = 'Done!';
+            status.textContent = sd.error ? `Error: ${sd.error}` : 'Done!';
             _treeStats = null;
             loadLibrary();
         }
@@ -540,12 +541,13 @@ async function fullRescanLibrary() {
         const sr = await fetch('/api/scan-status');
         const sd = await sr.json();
         if (sd.running) {
-            status.textContent = `${sd.done} / ${sd.total} scanned...`;
+            const cur = sd.current ? ` · ${sd.current}` : '';
+            status.textContent = `${sd.done} / ${sd.total} scanned${cur}...`;
         } else {
             clearInterval(poll);
             btn.disabled = false;
             btn.textContent = 'Full Rescan';
-            status.textContent = 'Done!';
+            status.textContent = sd.error ? `Error: ${sd.error}` : 'Done!';
             _treeStats = null;
             loadLibrary();
         }
@@ -1185,6 +1187,17 @@ async function pollScanStatus() {
     try {
         const resp = await fetch('/api/scan-status');
         const data = await resp.json();
+        if (data.stage === 'error' && data.error) {
+            // Surface the error in the banner and stop polling.
+            showScanBanner();
+            const file = document.getElementById('scan-file');
+            const prog = document.getElementById('scan-progress');
+            if (file) { file.textContent = 'Scan failed: ' + data.error; file.classList.add('text-red-400'); }
+            if (prog) prog.textContent = 'Error';
+            clearInterval(_scanPollId);
+            _scanPollId = null;
+            return;
+        }
         if (data.running) {
             showScanBanner();
             const pct = data.total > 0 ? Math.round(data.done / data.total * 100) : 0;
@@ -1194,8 +1207,8 @@ async function pollScanStatus() {
             if (bar) bar.style.width = pct + '%';
             if (prog) prog.textContent = `${data.done} / ${data.total} (${pct}%)`;
             if (file) {
-                const name = data.current.replace(/_p\.psarc$/i, '').replace(/_/g, ' ');
-                file.textContent = name || 'Processing...';
+                const name = (data.current || '').replace(/_p\.psarc$/i, '').replace(/_/g, ' ');
+                file.textContent = name || (data.stage === 'listing' ? 'Listing DLC folder...' : 'Processing...');
             }
         } else {
             if (document.getElementById('scan-banner')) {

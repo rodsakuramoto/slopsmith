@@ -493,25 +493,46 @@ def _extract_meta_for_file(psarc_path: Path) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-_scan_status = {"running": False, "total": 0, "done": 0, "current": ""}
+_SCAN_STATUS_INIT = {"running": False, "stage": "idle", "total": 0, "done": 0, "current": "", "error": None}
+_scan_status = dict(_SCAN_STATUS_INIT)
 
 
 def _background_scan():
     """Scan all PSARCs and cache metadata on startup. Uses thread pool for parallelism."""
     global _scan_status
+    _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "listing"}
+
     dlc = _get_dlc_dir()
     if not dlc:
-        _scan_status = {"running": False, "total": 0, "done": 0, "current": ""}
+        _scan_status = {**_SCAN_STATUS_INIT, "stage": "idle", "error": "DLC folder not configured"}
+        print("Scan: no DLC folder configured", flush=True)
         return
 
-    # Skip RS1 compatibility mega-PSARCs (multi-song, not individually playable)
-    psarcs = [f for f in sorted(dlc.rglob("*.psarc"))
-              if f.is_file()
-              and "rs1compatibility" not in f.name.lower()]
-    # Sloppaks: match both file (zip) and directory form by suffix.
-    sloppaks = [f for f in sorted(dlc.rglob("*.sloppak"))
-                if sloppak_mod.is_sloppak(f)]
+    # Listing can fail on macOS without Full Disk Access, or on Docker if the
+    # path isn't shared. Report the failure explicitly rather than silently
+    # appearing to scan nothing.
+    try:
+        # Skip RS1 compatibility mega-PSARCs (multi-song, not individually playable)
+        psarcs = [f for f in sorted(dlc.rglob("*.psarc"))
+                  if f.is_file()
+                  and "rs1compatibility" not in f.name.lower()]
+        # Sloppaks: match both file (zip) and directory form by suffix.
+        sloppaks = [f for f in sorted(dlc.rglob("*.sloppak"))
+                    if sloppak_mod.is_sloppak(f)]
+    except PermissionError as e:
+        msg = (f"Permission denied reading {dlc}. "
+               "On macOS: grant Full Disk Access to the app in System Settings → Privacy & Security. "
+               "With Docker: share this path in Docker Desktop → Settings → Resources → File Sharing.")
+        print(f"Scan failed: {msg} ({e})", flush=True)
+        _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": msg}
+        return
+    except OSError as e:
+        print(f"Scan failed listing {dlc}: {e}", flush=True)
+        _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": f"Unable to list {dlc}: {e}"}
+        return
+
     all_songs = psarcs + sloppaks
+    print(f"Scan: listed {len(psarcs)} PSARCs and {len(sloppaks)} sloppaks in {dlc}", flush=True)
 
     def _rel(f: Path) -> str:
         # Store the path relative to the DLC root so sub-folders (e.g.
@@ -528,7 +549,7 @@ def _background_scan():
     # Clean up stale DB entries
     stale = meta_db.delete_missing(current_files)
     if stale:
-        print(f"Removed {stale} stale DB entries")
+        print(f"Removed {stale} stale DB entries", flush=True)
 
     # Figure out which need scanning
     to_scan = []
@@ -538,14 +559,18 @@ def _background_scan():
             to_scan.append((f, stat))
 
     if not to_scan:
-        _scan_status = {"running": False, "total": 0, "done": 0, "current": ""}
+        _scan_status = {**_SCAN_STATUS_INIT, "stage": "complete"}
+        print(f"Scan: nothing new to scan ({len(all_songs)} songs, all cached)", flush=True)
         return
 
-    _scan_status = {"running": True, "total": len(to_scan), "done": 0, "current": ""}
-    print(f"Library: {len(psarcs)} PSARCs + {len(sloppaks)} sloppaks, {len(all_songs) - len(to_scan)} cached, {len(to_scan)} to scan")
+    _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "scanning", "total": len(to_scan)}
+    print(f"Library: {len(psarcs)} PSARCs + {len(sloppaks)} sloppaks, {len(all_songs) - len(to_scan)} cached, {len(to_scan)} to scan", flush=True)
 
     def _scan_one(item):
         f, stat = item
+        # Per-file log so users running the server / desktop can see live
+        # activity and distinguish a stuck scan from a slow one.
+        print(f"  scanning {f.name}", flush=True)
         meta = _extract_meta_for_file(f)
         return _rel(f), stat.st_mtime, stat.st_size, meta
 
@@ -557,12 +582,12 @@ def _background_scan():
                 name, mtime, size, meta = future.result()
                 meta_db.put(name, mtime, size, meta)
             except Exception as e:
-                print(f"  Failed: {fname}: {e}")
+                print(f"  Failed: {fname}: {e}", flush=True)
             _scan_status["done"] += 1
             _scan_status["current"] = fname
 
-    print(f"Scan complete: {len(to_scan)} songs cached")
-    _scan_status = {"running": False, "total": 0, "done": 0, "current": ""}
+    print(f"Scan complete: {len(to_scan)} songs cached", flush=True)
+    _scan_status = {**_SCAN_STATUS_INIT, "stage": "complete"}
 
 
 # ── Load plugins at import time (before app starts) ─────────────────────────
