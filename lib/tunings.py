@@ -44,4 +44,4 @@ def tuning_name(offsets: list[int]) -> str:
     if len(offsets) == 6 and tuple(offsets) in named:
         return named[tuple(offsets)]
 
-    return " ".join(str(o) for o in offsets)
+    return " ".join(str(o) for o in offsets) or "Unknown"

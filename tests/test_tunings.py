@@ -108,8 +108,11 @@ def test_five_string_falls_through_to_fallback():
 
 # ── Edge cases ───────────────────────────────────────────────────────────────
 
-def test_empty_list_falls_through_to_fallback():
-    assert tuning_name([]) == ""
+def test_empty_list_returns_unknown():
+    # Empty offsets is the one case where the numeric fallback is useless —
+    # `" ".join(str(o) for o in [])` is `""`, which used to flow downstream
+    # as a blank badge. `or "Unknown"` kicks in only for empty input.
+    assert tuning_name([]) == "Unknown"
 
 
 def test_too_short_list_falls_through_to_fallback():
