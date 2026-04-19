@@ -292,7 +292,7 @@ def extract_meta(path: Path) -> dict:
         "album": str(manifest.get("album", "")),
         "year": str(manifest.get("year", "") or ""),
         "duration": float(manifest.get("duration", 0) or 0),
-        "tuning_offsets": tuning_offsets,  # caller maps to a name via _tuning_name
+        "tuning_offsets": tuning_offsets,  # caller maps to a name via tunings.tuning_name
         "arrangements": arrangements,
         "has_lyrics": has_lyrics,
         "stem_count": stem_count,
