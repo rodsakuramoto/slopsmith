@@ -47,6 +47,8 @@ Plugins are the primary extension point. Each plugin lives in `plugins/<name>/` 
 
 All fields except `id` and `name` are optional. Plugins can have any combination of frontend (screen/script), backend (routes), and settings.
 
+`version` and `private` are advisory metadata — the plugin loader does not currently consume them, but plugins commonly include them for publishing/tooling purposes.
+
 **Backend routes** — `routes.py` must export a `setup(app, context)` function. The `context` dict provides:
 - `config_dir` — persistent config path
 - `get_dlc_dir()` — returns the DLC folder Path
@@ -184,7 +186,7 @@ The highway WebSocket at `/ws/highway/{filename}?arrangement={index}` streams th
 | Message | Shape | Description |
 |---------|-------|-------------|
 | `loading` | `{ type: 'loading', stage }` | Status/progress message during extraction or conversion |
-| `song_info` | `{ type, title, artist, arrangement, duration, tuning, capo }` | Song metadata. `tuning` is an array (6 for guitar, 4 for bass). |
+| `song_info` | `{ type, title, artist, arrangement, arrangement_index, arrangements, duration, tuning, capo, format, audio_url, audio_error?, stems? }` | Song metadata. `arrangements` is the full list for the switcher; `audio_error` only appears when audio conversion failed; `stems` only on sloppak songs with split stems. `tuning` is an array (6 for guitar, 4 for bass). |
 | `beats` | `{ type, data: [{ time, measure }] }` | Beat timestamps with measure numbers |
 | `sections` | `{ type, data: [{ time, name }] }` | Named sections (Intro, Verse, Chorus, etc.) |
 | `anchors` | `{ type, data: [{ time, fret, width }] }` | Fret zoom anchors |
