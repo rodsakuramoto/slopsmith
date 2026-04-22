@@ -240,6 +240,10 @@ git clone https://github.com/byrongamatos/slopsmith-plugin-ug.git ultimate_guita
 docker compose restart
 ```
 
+## AI Agent Guide
+
+This repo includes a [`CLAUDE.md`](CLAUDE.md) file with architecture overview, plugin conventions, and best practices for AI coding agents (Claude Code, etc.). If you're using AI tools to contribute, the guide is picked up automatically. If you're updating conventions or patterns, please keep `CLAUDE.md` in sync.
+
 ## Tech Stack
 
 - **Backend**: Python / FastAPI / SQLite / WebSocket
