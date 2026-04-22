@@ -226,6 +226,7 @@ Routes are registered under `/api/plugins/{plugin_id}/` to avoid conflicts.
 | [Stems Mixer](https://github.com/topkoa/slopsmith-plugin-stems) | Per-stem mute/volume controls for .sloppak songs | `git clone ...slopsmith-plugin-stems.git stems` |
 | [Invert Highway](https://github.com/masc0t/slopsmith-plugin-invert-highway) | Flip the highway note direction | `git clone ...slopsmith-plugin-invert-highway.git invert_highway` |
 | [Jumping Tab](https://github.com/renanboni/slopsmith-plugin-jumpingtab) | Yousician-style 2D horizontal tab with trajectory arcs and hopping ball | `git clone ...slopsmith-plugin-jumpingtab.git jumpingtab` |
+| [Step Mode](https://github.com/byrongamatos/slopsmith-plugin-stepmode) | Rocksmith-1-style practice mode — highway freezes at each note until played (via Note Detection) or Space | `git clone ...slopsmith-plugin-stepmode.git step_mode` |
 | [Lyrics Sync](https://github.com/byrongamatos/slopsmith-plugin-lyrics-sync) | Generate synced LRC lyrics from text + vocals stem via Whisper alignment | `git clone ...slopsmith-plugin-lyrics-sync.git lyrics_sync` |
 | [NAM Tone Engine](https://github.com/byrongamatos/slopsmith-plugin-nam-tone) | In-browser amp modeling with NAM WASM, cabinet IRs, tone auto-switching | `git clone ...slopsmith-plugin-nam-tone.git nam_tone` |
 | [Guitar Theory Lab](https://github.com/topkoa/slopsmith-plugin-guitar-theory) | Explore scales, chords, intervals, tunings, and voicings on a fully interactive fretboard  | `git clone ...slopsmith-plugin-nam-tone.git guitar-theory-lab` |
