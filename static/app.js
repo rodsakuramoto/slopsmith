@@ -991,6 +991,15 @@ async function _populateVizPicker(plugins) {
     if (savedMatches) {
         sel.value = saved;
         if (saved !== 'default') setViz(saved);
+    } else if (saved) {
+        // Saved selection references an option that no longer exists —
+        // plugin uninstalled since last session, renamed, or the plugin
+        // script failed to register its factory this time. Clear the
+        // stale value so we don't keep trying the same missing viz on
+        // every reload. The picker falls back to the built-in "default"
+        // option naturally.
+        try { localStorage.removeItem('vizSelection'); }
+        catch (_) { /* storage blocked; ignore */ }
     }
 }
 
