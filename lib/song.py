@@ -254,19 +254,42 @@ def phrase_from_wire(d: dict) -> Phrase:
 
 
 def arrangement_string_count(arr: Arrangement) -> int:
-    """Derive the active arrangement's string count from note data.
+    """Derive the active arrangement's string count.
 
-    The RS XML schema always emits 6 ``<tuning>`` slots, even for
-    bass — `string4` / `string5` get zero-padded but are unused —
-    so ``len(arr.tuning)`` is not a reliable signal. Scan notes +
-    chord-notes for the highest referenced string index instead;
-    add 1 to convert to a count.
+    Used by the server to emit ``stringCount`` in the song_info
+    WebSocket payload (slopsmith-plugin-3dhighway#7).
 
-    Returns:
-        Highest string index + 1, or 6 if the arrangement has no
-        notes (empty / placeholder file). Used by the server to
-        emit ``stringCount`` in the song_info WebSocket payload
-        (slopsmith-plugin-3dhighway#7).
+    The RS XML schema always emits 6 ``<tuning>`` slots regardless
+    of instrument (bass charts populate `string0`–`string3` and pad
+    `string4`/`string5` with zeros), so ``len(arr.tuning)`` is not
+    a reliable signal. Two independent signals get combined:
+
+    1. **Notes-derived lower bound.** The highest string index
+       referenced anywhere in notes + chord-notes, +1. A GP-imported
+       7-string guitar with notes on strings 0..6 reports 7 here.
+       But this is a LOWER BOUND only — a 6-string lead chart that
+       never plays string 5 reports 5, undercounting by 1.
+
+    2. **Name-based fallback.** Arrangements named "Bass" (case-
+       insensitive substring match) default to 4; everything else
+       defaults to 6. This catches the partial-string-usage case
+       where notes don't span all the instrument's strings.
+
+    The result is ``max(notes_count, name_based)``. Worked examples:
+
+    * RS XML 4-string bass with notes on strings 0..3 → max(4, 4) = 4
+    * RS XML 4-string bass with notes only on 0..2 → max(3, 4) = 4
+    * RS XML 6-string lead with notes on 0..5 → max(6, 6) = 6
+    * RS XML 6-string lead with notes only on 0..4 → max(5, 6) = 6
+    * GP 7-string guitar with notes on 0..6 → max(7, 6) = 7
+    * GP 5-string bass with notes on 0..4 → max(5, 4) = 5
+    * Empty arrangement named "Bass" → max(0, 4) = 4
+    * Empty arrangement named "Lead" → max(0, 6) = 6
+
+    Topkoa's issue argues plugins shouldn't do arrangement-name
+    matching; server-side fallback IS the right place for it
+    because it gives plugins a single reliable ``stringCount`` to
+    consume.
     """
     max_s = -1
     for n in arr.notes:
@@ -276,7 +299,9 @@ def arrangement_string_count(arr: Arrangement) -> int:
         for cn in ch.notes:
             if cn.string > max_s:
                 max_s = cn.string
-    return max_s + 1 if max_s >= 0 else 6
+    notes_count = max_s + 1 if max_s >= 0 else 0
+    name_based = 4 if "bass" in arr.name.lower() else 6
+    return max(notes_count, name_based)
 
 
 def arrangement_to_wire(arr: Arrangement) -> dict:

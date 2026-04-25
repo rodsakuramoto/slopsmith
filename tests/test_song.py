@@ -471,8 +471,8 @@ def test_chord_with_empty_notes_list_round_trips():
 
 # ── arrangement_string_count (slopsmith-plugin-3dhighway#7) ──────────────────
 
-def test_string_count_4_for_bass_arrangement():
-    # 4-string bass: notes only ever reference strings 0..3.
+def test_string_count_4_for_bass_arrangement_with_full_string_usage():
+    # 4-string bass: notes reference strings 0..3.
     arr = Arrangement(
         name="Bass",
         notes=[
@@ -484,11 +484,39 @@ def test_string_count_4_for_bass_arrangement():
     assert arrangement_string_count(arr) == 4
 
 
-def test_string_count_6_for_standard_guitar():
+def test_string_count_4_for_bass_with_sparse_string_usage():
+    # 4-string bass with notes only on strings 0..2. Notes-derived
+    # gives 3, but the name-based fallback bumps it to 4. This is
+    # the case codex flagged as broken under the pure notes-derived
+    # approach — a real-world bass line that doesn't touch the high
+    # G string still has 4 strings on the instrument.
+    arr = Arrangement(
+        name="Bass",
+        notes=[
+            Note(time=0.0, string=0, fret=3),
+            Note(time=1.0, string=1, fret=5),
+            Note(time=2.0, string=2, fret=0),
+        ],
+    )
+    assert arrangement_string_count(arr) == 4
+
+
+def test_string_count_6_for_standard_guitar_with_full_string_usage():
     # Notes spread across all 6 strings.
     arr = Arrangement(
         name="Lead",
         notes=[Note(time=float(i), string=i, fret=0) for i in range(6)],
+    )
+    assert arrangement_string_count(arr) == 6
+
+
+def test_string_count_6_for_guitar_with_sparse_string_usage():
+    # 6-string lead chart with notes only on strings 0..4 (never
+    # touches the low E string). Notes-derived gives 5; name-based
+    # fallback (anything-not-bass = 6) bumps to the correct 6.
+    arr = Arrangement(
+        name="Lead",
+        notes=[Note(time=float(i), string=i, fret=0) for i in range(5)],
     )
     assert arrangement_string_count(arr) == 6
 
@@ -506,21 +534,46 @@ def test_string_count_uses_chord_notes_when_higher_than_single_notes():
     assert arrangement_string_count(arr) == 6
 
 
-def test_string_count_falls_back_to_6_for_empty_arrangement():
-    # No notes / no chords — empty arrangement, default to 6 (the
-    # canonical guitar count).  An empty count would propagate as
-    # "0 strings" downstream which is meaningless.
-    arr = Arrangement(name="Empty")
+def test_string_count_empty_bass_arrangement_returns_4():
+    # Empty arrangement named "Bass" — name-based fallback wins.
+    arr = Arrangement(name="Bass")
+    assert arrangement_string_count(arr) == 4
+
+
+def test_string_count_empty_non_bass_arrangement_returns_6():
+    # Empty non-bass arrangement defaults to the canonical 6.
+    arr = Arrangement(name="Lead")
     assert arrangement_string_count(arr) == 6
 
 
 def test_string_count_7_for_extended_range_guitar():
-    # 7-string guitar (GP-imported sources may carry these). The
-    # XML parser only reads string0..string5 so RS XML caps at 6
-    # via that path, but the helper itself doesn't artificially
-    # cap — it just reports the highest referenced index + 1.
+    # 7-string guitar (GP-imported sources may carry these). Notes
+    # span 0..6, so the notes-derived count is 7. The name-based
+    # fallback gives 6, but max() picks the higher value — extended-
+    # range arrangements are correctly handled WITHOUT having to
+    # special-case "7-string" in the name.
     arr = Arrangement(
         name="Lead",
         notes=[Note(time=float(i), string=i, fret=0) for i in range(7)],
     )
     assert arrangement_string_count(arr) == 7
+
+
+def test_string_count_5_for_extended_range_bass():
+    # 5-string bass via GP import — notes span 0..4. Notes-derived
+    # gives 5; name-based gives 4; max picks 5. No special-casing
+    # for "5-string" in the arrangement name needed.
+    arr = Arrangement(
+        name="Bass",
+        notes=[Note(time=float(i), string=i, fret=0) for i in range(5)],
+    )
+    assert arrangement_string_count(arr) == 5
+
+
+def test_string_count_name_match_is_case_insensitive():
+    arr_lower = Arrangement(name="bass")
+    arr_upper = Arrangement(name="BASS")
+    arr_mixed = Arrangement(name="Combo Bass")  # substring match
+    assert arrangement_string_count(arr_lower) == 4
+    assert arrangement_string_count(arr_upper) == 4
+    assert arrangement_string_count(arr_mixed) == 4
