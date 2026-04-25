@@ -161,7 +161,7 @@ Plugins that add a layer on top of whichever visualization is active — HUDs, f
 
 - `highway.getTime()` / `highway.getBeats()` — current playback position
 - `highway.getNotes()` / `highway.getChords()` — difficulty-filter-aware arrays
-- `highway.getChordTemplates()` — chord shape lookup table; index by `chord.id` from `getChords()` to get `{ name, fingers, frets }`. Not filter-aware: templates are static metadata, every `chord_id` referenced by `getChords()` is guaranteed valid
+- `highway.getChordTemplates()` — chord shape lookup table; index by `chord.id` from `getChords()` to get `{ name, fingers, frets }`. `fingers` and `frets` are per-string arrays (length matches the tuning's string count); within `fingers`, `-1` = unused, `0` = open string, `n > 0` = finger number. RS XML sources populate real fingerings; GP imports currently emit all `-1` since pre-import sources don't carry finger data. Not filter-aware: templates are static metadata, every `chord_id` referenced by `getChords()` is guaranteed valid
 - `highway.getSongInfo()` — tuning, arrangement, capo
 - `highway.getLefty()` / `highway.getInverted()` — mirror + invert state
 

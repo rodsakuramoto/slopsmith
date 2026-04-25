@@ -1339,10 +1339,20 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         anchors = [{"time": a.time, "fret": a.fret, "width": a.width} for a in arr.anchors]
         await websocket.send_json({"type": "anchors", "data": anchors})
 
-        # Send chord templates
+        # Send chord templates. Include `fingers` alongside `name` /
+        # `frets` so plugin overlays consuming highway.getChordTemplates()
+        # can render full chord boxes (Rocksmith-style fingering
+        # diagrams), not just chord names. Each fingering entry is
+        # per-string: -1 = unused, 0 = open string, n > 0 = finger
+        # number. RS XML sources populate real values; GP imports
+        # currently emit all -1 (no finger data available pre-import).
         templates = []
         for ct in arr.chord_templates:
-            templates.append({"name": ct.name, "frets": ct.frets})
+            templates.append({
+                "name": ct.name,
+                "fingers": ct.fingers,
+                "frets": ct.frets,
+            })
         await websocket.send_json({"type": "chord_templates", "data": templates})
 
         # Send lyrics if available

@@ -1628,11 +1628,18 @@ function createHighway() {
         getChords() { return chords; },
         // Live reference to the chord-template lookup table —
         // `getChords()[i].id` is an index into this array. Each
-        // template carries `{ name, fingers, frets }`. Read-only:
-        // overlay plugins should NOT mutate the array or its
-        // entries. Not difficulty-filter-aware (templates are static
-        // metadata; every chord_id referenced by `getChords()` is
-        // guaranteed valid).
+        // template carries `{ name, fingers, frets }`:
+        //   - name:    chord name string ("Em", "Cmaj7", …)
+        //   - fingers: per-string finger numbers (length matches
+        //              the tuning's string count; -1 = unused, 0 =
+        //              open string, n > 0 = finger number). RS XML
+        //              sources populate real values; GP imports
+        //              currently emit all -1.
+        //   - frets:   per-string fret numbers, same indexing.
+        // Read-only: overlay plugins should NOT mutate the array or
+        // its entries. Not difficulty-filter-aware (templates are
+        // static metadata; every chord_id referenced by `getChords()`
+        // is guaranteed valid).
         getChordTemplates() { return chordTemplates; },
         getToneChanges() { return toneChanges; },
         getToneBase() { return toneBase; },
