@@ -1339,7 +1339,7 @@ function createHighway() {
             _resizeHandler = () => this.resize();
             window.addEventListener('resize', _resizeHandler);
             ready = false;
-            notes = []; chords = []; beats = []; sections = []; anchors = []; lyrics = []; toneChanges = []; toneBase = "";
+            notes = []; chords = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
             // Reset phrase ladder + filter (slopsmith#48). _mastery
             // persists across arrangement switches — the slider's
             // position stays put. Filter rebuilds on the next `ready`
@@ -1626,6 +1626,14 @@ function createHighway() {
         getTime() { return currentTime; },
         getNotes() { return notes; },
         getChords() { return chords; },
+        // Live reference to the chord-template lookup table —
+        // `getChords()[i].id` is an index into this array. Each
+        // template carries `{ name, fingers, frets }`. Read-only:
+        // overlay plugins should NOT mutate the array or its
+        // entries. Not difficulty-filter-aware (templates are static
+        // metadata; every chord_id referenced by `getChords()` is
+        // guaranteed valid).
+        getChordTemplates() { return chordTemplates; },
         getToneChanges() { return toneChanges; },
         getToneBase() { return toneBase; },
         getSections() { return sections; },
@@ -1655,7 +1663,7 @@ function createHighway() {
             // Close old WS but keep audio + animation running
             if (ws) { ws.close(); ws = null; }
             ready = false;
-            notes = []; chords = []; beats = []; sections = []; anchors = []; lyrics = []; toneChanges = []; toneBase = "";
+            notes = []; chords = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
             // Reset phrase ladder + filter (slopsmith#48). _mastery
             // persists across arrangement switches — the slider's
             // position stays put. Filter rebuilds on the next `ready`
