@@ -14,6 +14,7 @@ from song import (
     Phrase,
     PhraseLevel,
     arrangement_from_wire,
+    arrangement_string_count,
     arrangement_to_wire,
     chord_from_wire,
     chord_to_wire,
@@ -466,3 +467,60 @@ def test_chord_with_empty_notes_list_round_trips():
     # A chord with no notes (unusual but valid input) should survive round-trip.
     c = Chord(time=1.0, chord_id=3, notes=[])
     assert chord_from_wire(chord_to_wire(c)) == c
+
+
+# ── arrangement_string_count (slopsmith-plugin-3dhighway#7) ──────────────────
+
+def test_string_count_4_for_bass_arrangement():
+    # 4-string bass: notes only ever reference strings 0..3.
+    arr = Arrangement(
+        name="Bass",
+        notes=[
+            Note(time=0.0, string=0, fret=3),
+            Note(time=1.0, string=2, fret=5),
+            Note(time=2.0, string=3, fret=0),
+        ],
+    )
+    assert arrangement_string_count(arr) == 4
+
+
+def test_string_count_6_for_standard_guitar():
+    # Notes spread across all 6 strings.
+    arr = Arrangement(
+        name="Lead",
+        notes=[Note(time=float(i), string=i, fret=0) for i in range(6)],
+    )
+    assert arrangement_string_count(arr) == 6
+
+
+def test_string_count_uses_chord_notes_when_higher_than_single_notes():
+    # Single notes only touch strings 0–2; the chord touches string 5.
+    arr = Arrangement(
+        name="Rhythm",
+        notes=[Note(time=0.0, string=0, fret=0), Note(time=1.0, string=2, fret=3)],
+        chords=[Chord(time=2.0, chord_id=0, notes=[
+            Note(time=2.0, string=4, fret=0),
+            Note(time=2.0, string=5, fret=0),
+        ])],
+    )
+    assert arrangement_string_count(arr) == 6
+
+
+def test_string_count_falls_back_to_6_for_empty_arrangement():
+    # No notes / no chords — empty arrangement, default to 6 (the
+    # canonical guitar count).  An empty count would propagate as
+    # "0 strings" downstream which is meaningless.
+    arr = Arrangement(name="Empty")
+    assert arrangement_string_count(arr) == 6
+
+
+def test_string_count_7_for_extended_range_guitar():
+    # 7-string guitar (GP-imported sources may carry these). The
+    # XML parser only reads string0..string5 so RS XML caps at 6
+    # via that path, but the helper itself doesn't artificially
+    # cap — it just reports the highest referenced index + 1.
+    arr = Arrangement(
+        name="Lead",
+        notes=[Note(time=float(i), string=i, fret=0) for i in range(7)],
+    )
+    assert arrangement_string_count(arr) == 7

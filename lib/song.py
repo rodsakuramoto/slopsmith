@@ -253,6 +253,32 @@ def phrase_from_wire(d: dict) -> Phrase:
     )
 
 
+def arrangement_string_count(arr: Arrangement) -> int:
+    """Derive the active arrangement's string count from note data.
+
+    The RS XML schema always emits 6 ``<tuning>`` slots, even for
+    bass — `string4` / `string5` get zero-padded but are unused —
+    so ``len(arr.tuning)`` is not a reliable signal. Scan notes +
+    chord-notes for the highest referenced string index instead;
+    add 1 to convert to a count.
+
+    Returns:
+        Highest string index + 1, or 6 if the arrangement has no
+        notes (empty / placeholder file). Used by the server to
+        emit ``stringCount`` in the song_info WebSocket payload
+        (slopsmith-plugin-3dhighway#7).
+    """
+    max_s = -1
+    for n in arr.notes:
+        if n.string > max_s:
+            max_s = n.string
+    for ch in arr.chords:
+        for cn in ch.notes:
+            if cn.string > max_s:
+                max_s = cn.string
+    return max_s + 1 if max_s >= 0 else 6
+
+
 def arrangement_to_wire(arr: Arrangement) -> dict:
     """Serialize an Arrangement into a JSON-ready dict matching the wire format."""
     out = {
