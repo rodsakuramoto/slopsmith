@@ -275,16 +275,35 @@ def arrangement_string_count(arr: Arrangement) -> int:
        defaults to 6. This catches the partial-string-usage case
        where notes don't span all the instrument's strings.
 
-    The result is ``max(notes_count, name_based)``. Worked examples:
+    A third signal — ``len(arr.tuning)`` when it isn't the RS-XML
+    padded value of 6 — folds in for sloppak / GP-imported sources
+    where the tuning array is explicitly trimmed (4 for bass, 5 for
+    5-string bass, 7 for 7-string guitar, etc.). RS-XML / PSARC
+    sources always emit length 6 regardless of instrument, so we
+    deliberately ignore that exact value to avoid mis-classifying
+    bass arrangements as guitar. ``< 6`` and ``> 6`` are both
+    trustworthy signals.
 
-    * RS XML 4-string bass with notes on strings 0..3 → max(4, 4) = 4
-    * RS XML 4-string bass with notes only on 0..2 → max(3, 4) = 4
-    * RS XML 6-string lead with notes on 0..5 → max(6, 6) = 6
-    * RS XML 6-string lead with notes only on 0..4 → max(5, 6) = 6
-    * GP 7-string guitar with notes on 0..6 → max(7, 6) = 7
-    * GP 5-string bass with notes on 0..4 → max(5, 4) = 5
-    * Empty arrangement named "Bass" → max(0, 4) = 4
-    * Empty arrangement named "Lead" → max(0, 6) = 6
+    The result is ``max(notes_count, name_based, tuning_count)``
+    where ``tuning_count`` is ``len(arr.tuning)`` when ``!= 6``,
+    else 0. Worked examples:
+
+    * RS XML 4-string bass, full usage (tuning len 6, notes 0..3) →
+      max(4, 4, 0) = 4
+    * RS XML 4-string bass, sparse usage (tuning len 6, notes 0..2) →
+      max(3, 4, 0) = 4
+    * RS XML 6-string lead, full usage (tuning len 6, notes 0..5) →
+      max(6, 6, 0) = 6
+    * RS XML 6-string lead, sparse usage (tuning len 6, notes 0..4) →
+      max(5, 6, 0) = 6
+    * Sloppak 5-string bass, sparse usage (tuning len 5, notes 0..3) →
+      max(4, 4, 5) = 5
+    * GP 7-string guitar (tuning len 7, notes 0..6) → max(7, 6, 7) = 7
+    * GP 5-string bass (tuning len 5, notes 0..4) → max(5, 4, 5) = 5
+    * Empty arrangement named "Bass" (tuning len 6) →
+      max(0, 4, 0) = 4
+    * Empty arrangement named "Lead" (tuning len 6) →
+      max(0, 6, 0) = 6
 
     Topkoa's issue argues plugins shouldn't do arrangement-name
     matching; server-side fallback IS the right place for it
@@ -301,7 +320,12 @@ def arrangement_string_count(arr: Arrangement) -> int:
                 max_s = cn.string
     notes_count = max_s + 1 if max_s >= 0 else 0
     name_based = 4 if "bass" in arr.name.lower() else 6
-    return max(notes_count, name_based)
+    # Tuning-length signal — only trustworthy when NOT the RS-XML
+    # padded value of 6. Length 4/5 indicates explicit bass / 5-string
+    # bass; length 7/8 indicates an extended-range guitar from GP.
+    tuning_len = len(arr.tuning)
+    tuning_count = tuning_len if tuning_len != 6 else 0
+    return max(notes_count, name_based, tuning_count)
 
 
 def arrangement_to_wire(arr: Arrangement) -> dict:

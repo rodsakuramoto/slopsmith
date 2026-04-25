@@ -50,10 +50,6 @@ function createHighway() {
     let _drawHooks = [];  // plugin draw callbacks: fn(ctx, W, H)
     let _renderScale = parseFloat(localStorage.getItem('renderScale') || '1');  // 1 = full, 0.5 = half res
     let _inverted = localStorage.getItem('invertHighway') === 'true';
-    // String index mapper for inversion. Generalised to use the
-    // active arrangement's string count: bass (4 strings) inverts
-    // around index 3, 7-string guitars invert around 6.
-    function si(s) { return _inverted ? (stringCount - 1 - s) : s; }
     let _lefty = localStorage.getItem('lefty') === '1';
     let _lastChordOnFretLine = null;  // chord object currently shown on fret line
     let _chordFretLineNotes = [];  // notes to render on fret line
@@ -1811,13 +1807,26 @@ function createHighway() {
                         // updated lib/song.py); final fallback is 6 for
                         // safety so a missing/malformed payload doesn't
                         // surface as 0 strings.
+                        //
+                        // Clamp to [1, MAX_STRINGS] before storing —
+                        // stringCount drives loop bounds in drawStrings
+                        // and downstream plugins. A malformed payload
+                        // (huge or zero / negative) would otherwise hang
+                        // the UI or render no strings at all. 8 covers
+                        // every real-world instrument we ship colors
+                        // for; values above that fall back to '#888'
+                        // anyway via the STRING_COLORS lookup so
+                        // capping the loop bound costs nothing visible.
+                        const MAX_STRINGS = 8;
+                        let _sc;
                         if (typeof msg.stringCount === 'number' && msg.stringCount > 0) {
-                            stringCount = msg.stringCount;
+                            _sc = msg.stringCount;
                         } else if (Array.isArray(msg.tuning) && msg.tuning.length > 0) {
-                            stringCount = msg.tuning.length;
+                            _sc = msg.tuning.length;
                         } else {
-                            stringCount = 6;
+                            _sc = 6;
                         }
+                        stringCount = Math.max(1, Math.min(MAX_STRINGS, _sc | 0));
                         if (opts.onSongInfo) {
                             opts.onSongInfo(msg);
                         } else {

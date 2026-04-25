@@ -577,3 +577,44 @@ def test_string_count_name_match_is_case_insensitive():
     assert arrangement_string_count(arr_lower) == 4
     assert arrangement_string_count(arr_upper) == 4
     assert arrangement_string_count(arr_mixed) == 4
+
+
+def test_string_count_uses_tuning_length_for_sparse_extended_range_bass():
+    # A sloppak / GP-imported 5-string bass may encode the
+    # instrument range in tuning even if the chart never touches
+    # the highest string index. tuning_count (5) wins over
+    # notes_count (4) AND name_based (4) — extended-range bass
+    # without name-based hints still resolves correctly.
+    arr = Arrangement(
+        name="Bass",
+        tuning=[0, 0, 0, 0, 0],
+        notes=[Note(time=float(i), string=i, fret=0) for i in range(4)],
+    )
+    assert arrangement_string_count(arr) == 5
+
+
+def test_string_count_uses_tuning_length_for_sparse_7_string_guitar():
+    # 7-string GP-imported guitar where the chart only uses
+    # strings 0..5 (sparse top-string usage). tuning_count (7) is
+    # the only reliable signal; notes_count gives 6 and name_based
+    # gives 6.
+    arr = Arrangement(
+        name="Lead",
+        tuning=[0, 0, 0, 0, 0, 0, 0],
+        notes=[Note(time=float(i), string=i, fret=0) for i in range(6)],
+    )
+    assert arrangement_string_count(arr) == 7
+
+
+def test_string_count_ignores_rs_padded_tuning_for_bass():
+    # RS-XML bass: tuning is padded to length 6 with zeros at
+    # indices 4-5. Even though len(tuning) == 6, we MUST NOT use
+    # that as a 6-string signal (would mis-classify bass as
+    # guitar). arrangement_string_count's `tuning_count = 0 if
+    # tuning_len == 6 else tuning_len` rule takes care of this.
+    arr = Arrangement(
+        name="Bass",
+        tuning=[0, -5, -10, -15, 0, 0],  # bass with RS XML padding
+        notes=[Note(time=float(i), string=i, fret=0) for i in range(4)],
+    )
+    assert arrangement_string_count(arr) == 4
