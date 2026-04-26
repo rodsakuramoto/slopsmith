@@ -1826,7 +1826,15 @@ function createHighway() {
                         } else {
                             _sc = 6;
                         }
-                        stringCount = Math.max(1, Math.min(MAX_STRINGS, _sc | 0));
+                        // Math.trunc(_sc) (with finite check) instead of
+                        // `_sc | 0` — bitwise-OR forces 32-bit signed
+                        // conversion, so any value ≥ 2^31 wraps negative
+                        // and the Math.max(1, ...) clamp would land at
+                        // 1 string. Math.trunc preserves the magnitude;
+                        // the Math.min(MAX_STRINGS, ...) below caps it
+                        // safely.
+                        const _scTrunc = Number.isFinite(_sc) ? Math.trunc(_sc) : 1;
+                        stringCount = Math.max(1, Math.min(MAX_STRINGS, _scTrunc));
                         if (opts.onSongInfo) {
                             opts.onSongInfo(msg);
                         } else {

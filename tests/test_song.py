@@ -512,8 +512,9 @@ def test_string_count_6_for_standard_guitar_with_full_string_usage():
 
 def test_string_count_6_for_guitar_with_sparse_string_usage():
     # 6-string lead chart with notes only on strings 0..4 (never
-    # touches the low E string). Notes-derived gives 5; name-based
-    # fallback (anything-not-bass = 6) bumps to the correct 6.
+    # touches string 5, the highest-index string in RS indexing).
+    # Notes-derived gives 5; name-based fallback (anything-not-bass
+    # = 6) bumps to the correct 6.
     arr = Arrangement(
         name="Lead",
         notes=[Note(time=float(i), string=i, fret=0) for i in range(5)],
