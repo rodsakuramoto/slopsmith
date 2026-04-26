@@ -17,6 +17,12 @@ html { scroll-behavior: smooth; }
     background: #050508;
 }
 #highway { flex: 1; width: 100%; min-height: 0; }
+/* Establish a stacking context so absolutely-positioned overlays from viz
+   plugins (e.g. 3dhighway's WebGL wrap) can't paint over the controls.
+   Was previously set at runtime by the splitscreen plugin's injectBtn
+   hook; doing it in core means the picker stays visible before / without
+   splitscreen too. */
+#player-controls { position: relative; z-index: 10; }
 
 /* Song cards */
 .song-card {
