@@ -1,0 +1,48 @@
+name: Publish Docker image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout slopsmith core
+        uses: actions/checkout@v4
+
+      - name: Clone 3D highway plugin
+        run: git clone --depth 1 --branch feature/joel-visuals https://github.com/topkoa/slopsmith-plugin-3dhighway.git plugins/3dhighway
+
+      - name: Clone splitscreen plugin
+        run: git clone --depth 1 --branch main https://github.com/topkoa/slopsmith-plugin-splitscreen.git plugins/splitscreen
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/topkoa/slopsmith:latest
+            ghcr.io/topkoa/slopsmith:${{ steps.version.outputs.version }}
