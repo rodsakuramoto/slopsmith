@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Clone 3D highway plugin
-        run: git clone --depth 1 --branch feature/joel-visuals https://github.com/topkoa/slopsmith-plugin-3dhighway.git plugins/3dhighway
+        run: git clone --depth 1 --branch main https://github.com/topkoa/slopsmith-plugin-3dhighway.git plugins/3dhighway
 
       - name: Clone splitscreen plugin
         run: git clone --depth 1 --branch main https://github.com/topkoa/slopsmith-plugin-splitscreen.git plugins/splitscreen
