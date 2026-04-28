@@ -47,7 +47,8 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     # by codex review on PR for slopsmith#33. `.` is rejected in
     # `name` above; plugin_ids with `.` are degenerate (manifest
     # convention is identifier-shaped) so the format stays unique.
-    module_name = f"plugin_{plugin_id}.{name}"
+    parent_name = f"plugin_{plugin_id}"
+    module_name = f"{parent_name}.{name}"
     cached = sys.modules.get(module_name)
     if cached is not None:
         return cached
@@ -71,6 +72,39 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
             f"plugin {plugin_id!r}: no sibling module {name!r} at "
             f"{file_path} or {pkg_init}"
         )
+    # Mixed-migration reuse: if a bare `import {name}` already loaded
+    # THIS plugin's same file (via sys.path during the transition),
+    # reuse it instead of re-executing. The path equality check ensures
+    # we only reuse when it's actually our file — a bare import that
+    # resolved to a DIFFERENT plugin's same-named module (the original
+    # collision bug) will not match this path and we'll load our own
+    # under the namespaced key. Without this, load_sibling would
+    # double-exec the file and any module-level singletons / caches
+    # / registrations would split into two copies. Spotted by codex
+    # review on PR for slopsmith#33.
+    bare_cached = sys.modules.get(name)
+    if bare_cached is not None:
+        bare_file = getattr(bare_cached, "__file__", None)
+        try:
+            same_file = bool(bare_file) and Path(bare_file).resolve() == sibling_path.resolve()
+        except OSError:
+            same_file = False
+        if same_file:
+            sys.modules[module_name] = bare_cached
+            return bare_cached
+    # Register a synthetic parent package so relative imports inside
+    # a sibling package (`from .child import X`) and explicit lookups
+    # of submodules (`importlib.import_module('plugin_<id>.<name>.X')`)
+    # can resolve through the parent. The parent has an empty
+    # __path__: the plugin's dir is intentionally NOT on it, so that
+    # all sibling lookups continue to flow through this helper and
+    # don't accidentally pull in collision-prone names. Spotted by
+    # codex review on PR for slopsmith#33.
+    if parent_name not in sys.modules:
+        import types
+        parent = types.ModuleType(parent_name)
+        parent.__path__ = []
+        sys.modules[parent_name] = parent
     spec = importlib.util.spec_from_file_location(
         module_name,
         str(sibling_path),

@@ -195,6 +195,80 @@ def test_collision_warning_excludes_routes_and_dunders(tmp_path, reset_plugin_st
     assert "Module-name collision warning" not in out
 
 
+def test_load_sibling_package_relative_import_works(tmp_path, reset_plugin_state):
+    """A package-form sibling whose __init__.py uses `from .child
+    import X` must load. Without registering the synthetic parent
+    package `plugin_<id>` in sys.modules first, Python can't resolve
+    the relative import. Codex round 3 caught this."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "relpkg")
+    pkg_dir = plugin_dir / "extractor"
+    pkg_dir.mkdir()
+    (pkg_dir / "child.py").write_text("CHILD_VALUE = 99\n")
+    (pkg_dir / "__init__.py").write_text(
+        "from .child import CHILD_VALUE\n"
+        "RE_EXPORT = CHILD_VALUE\n"
+    )
+    extractor = plugins._load_plugin_sibling("relpkg", plugin_dir, "extractor")
+    assert extractor.RE_EXPORT == 99
+    # Parent package was registered as a synthetic ModuleType.
+    assert "plugin_relpkg" in sys.modules
+
+
+def test_load_sibling_reuses_bare_imported_same_file(tmp_path, reset_plugin_state):
+    """If a plugin still has bare `import util` somewhere AND also
+    calls `load_sibling('util')`, both should return the SAME module
+    object so module-level state isn't duplicated. The reuse check
+    is gated on path equality so a bare import of a DIFFERENT
+    plugin's same-named util.py is NOT mistakenly returned. Codex
+    round 3."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "mixmig")
+    util_path = plugin_dir / "util.py"
+    util_path.write_text("STATE = []\nSTATE.append('initial')\n")
+    # Simulate the bare-import path: load util.py under the bare
+    # name `util` first, the way `import util` would after sys.path
+    # insertion.
+    spec = importlib.util.spec_from_file_location("util", str(util_path))
+    bare_mod = importlib.util.module_from_spec(spec)
+    sys.modules["util"] = bare_mod
+    spec.loader.exec_module(bare_mod)
+    bare_mod.STATE.append("bare-only-mutation")
+    # Now invoke load_sibling for the same plugin's util.py.
+    via_helper = plugins._load_plugin_sibling("mixmig", plugin_dir, "util")
+    # Same module object — the helper detected the path match and
+    # reused the cached bare import instead of re-executing util.py.
+    assert via_helper is bare_mod
+    # The mutation done on the bare module is visible via the helper.
+    assert "bare-only-mutation" in via_helper.STATE
+    # The namespaced key now also points at the SAME object so future
+    # load_sibling calls hit the cache.
+    assert sys.modules["plugin_mixmig.util"] is bare_mod
+
+
+def test_load_sibling_does_not_reuse_other_plugins_bare_import(tmp_path, reset_plugin_state):
+    """If sys.path has already cached a util.py from PLUGIN A under
+    the bare name `util`, plugin B's load_sibling('util') must NOT
+    return plugin A's module — it has to load plugin B's own copy
+    under the namespaced key. This is the whole point of the
+    isolation fix; the reuse path can't accidentally undo it."""
+    plugins = reset_plugin_state
+    plugin_a = _make_plugin(tmp_path, "plug_a")
+    plugin_b = _make_plugin(tmp_path, "plug_b")
+    (plugin_a / "util.py").write_text("OWNER = 'a'\n")
+    (plugin_b / "util.py").write_text("OWNER = 'b'\n")
+    # Simulate plugin A's bare import landing in sys.modules['util'].
+    spec_a = importlib.util.spec_from_file_location("util", str(plugin_a / "util.py"))
+    bare_a = importlib.util.module_from_spec(spec_a)
+    sys.modules["util"] = bare_a
+    spec_a.loader.exec_module(bare_a)
+    assert bare_a.OWNER == "a"
+    # Plugin B's load_sibling must give plugin B's util, NOT plugin A's.
+    b_util = plugins._load_plugin_sibling("plug_b", plugin_b, "util")
+    assert b_util is not bare_a
+    assert b_util.OWNER == "b"
+
+
 def test_load_sibling_loads_package_form(tmp_path, reset_plugin_state):
     """A plugin shipping a sibling as a package directory
     (`extractor/__init__.py`) should be loadable through
