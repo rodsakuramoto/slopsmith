@@ -309,6 +309,36 @@ def test_load_sibling_rejects_empty_plugin_id(tmp_path, reset_plugin_state):
             plugins._load_plugin_sibling(bad, plugin_dir, "util")
 
 
+def test_load_sibling_exposes_child_as_parent_attribute(tmp_path, reset_plugin_state):
+    """After load_sibling caches a child, Python's package-style
+    relative imports (`from . import sibling`, `from .. import
+    sibling`) need to find the child as an ATTRIBUTE on the parent
+    package — not just in sys.modules. The standard import
+    machinery sets that attribute; load_sibling must mimic the
+    behavior. Codex round 9."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "expose")
+    (plugin_dir / "extractor.py").write_text("VAL = 'extr'\n")
+    # Another sibling does `from . import extractor` — pure
+    # attribute lookup on the synthetic parent.
+    (plugin_dir / "consumer.py").write_text(
+        "from . import extractor\n"
+        "GOT = extractor.VAL\n"
+    )
+    # Load the consumer first; while it's executing, the
+    # `from . import extractor` triggers extractor's import
+    # through the parent package's __path__. After it loads,
+    # extractor must be visible as an attribute on the parent.
+    consumer = plugins._load_plugin_sibling("expose", plugin_dir, "consumer")
+    assert consumer.GOT == "extr"
+    parent = sys.modules["plugin_expose"]
+    assert hasattr(parent, "extractor")
+    assert parent.extractor is sys.modules["plugin_expose.extractor"]
+    # And consumer is exposed on the parent the same way.
+    assert hasattr(parent, "consumer")
+    assert parent.consumer is consumer
+
+
 def test_load_sibling_supports_relative_imports_between_siblings(tmp_path, reset_plugin_state):
     """A sibling loaded via load_sibling that does `from .shared
     import X` (relative import to another top-level sibling) must

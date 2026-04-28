@@ -181,6 +181,18 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
             # retry doesn't return the broken object from cache.
             sys.modules.pop(module_name, None)
             raise
+        # Expose the loaded child as an attribute on the synthetic
+        # parent. Python's standard import machinery does this after
+        # `_find_and_load` so that `from . import sibling` and
+        # `from .. import sibling` work via attribute lookup. Without
+        # it, plugins that mix load_sibling with package-style
+        # relative imports get `ImportError: cannot import name
+        # 'sibling' from 'plugin_<id>'` even though sys.modules has
+        # the module. Spotted by codex review on PR for slopsmith#33
+        # round 9.
+        parent = sys.modules.get(parent_name)
+        if parent is not None:
+            setattr(parent, name, module)
         return module
 
 
