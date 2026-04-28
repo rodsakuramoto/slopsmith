@@ -458,6 +458,76 @@ def test_load_sibling_does_not_alias_bare_imported_file_module(tmp_path, reset_p
     assert via_helper.__package__ == "plugin_mixmig"
 
 
+def test_load_plugins_escapes_dotted_id_in_routes_module_name(tmp_path, reset_plugin_state):
+    """A plugin with a reverse-DNS id like `com.example.foo` must
+    have its routes module registered under a `.`-free name, or
+    Python would treat the cache key as a dotted package path and
+    set `__package__` to an unintended parent (relative imports in
+    routes.py would then resolve against something else entirely).
+    The same `_x2e_` escape used by load_sibling now applies to
+    routes too. Copilot review on PR #105 round 2."""
+    plugins = reset_plugin_state
+    plugin_dir = tmp_path / "rdns_routes"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "com.example.foo", "name": "rdns", "routes": "routes.py"})
+    )
+    (plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    app.state.routes_loaded = True\n"
+    )
+    fake_app = type("FakeApp", (), {})()
+    fake_app.state = type("State", (), {})()
+    _run_load_plugins(plugins, fake_app, tmp_path)
+    assert fake_app.state.routes_loaded is True
+    # Routes module is registered under the escaped name and is a
+    # single identifier-shaped key — NOT a dotted path that Python
+    # would try to resolve as a real package.
+    assert "plugin_com_x2e_example_x2e_foo_routes" in sys.modules
+    routes_mod = sys.modules["plugin_com_x2e_example_x2e_foo_routes"]
+    # __package__ is empty (top-level module), not a dotted parent.
+    assert (routes_mod.__package__ or "") == ""
+
+
+def test_load_sibling_parent_registration_is_atomic(tmp_path, reset_plugin_state):
+    """Two threads loading DIFFERENT siblings for the same plugin
+    must agree on the synthetic parent. If they each constructed a
+    fresh ModuleType and assigned to sys.modules[parent_name]
+    without coordination, the second assignment could replace the
+    first — and child attributes already attached to the
+    first parent would disappear, breaking `from . import sibling`.
+    setdefault makes the registration atomic. Copilot round 2."""
+    import threading
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "atomic")
+    # Two slow siblings so the threads have time to overlap.
+    (plugin_dir / "alpha.py").write_text("import time\ntime.sleep(0.05)\nVALUE = 'a'\n")
+    (plugin_dir / "beta.py").write_text("import time\ntime.sleep(0.05)\nVALUE = 'b'\n")
+    errors: list = []
+
+    def worker(name):
+        try:
+            plugins._load_plugin_sibling("atomic", plugin_dir, name)
+        except BaseException as e:  # pragma: no cover
+            errors.append(e)
+
+    threads = [
+        threading.Thread(target=worker, args=("alpha",)),
+        threading.Thread(target=worker, args=("beta",)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    parent = sys.modules["plugin_atomic"]
+    # Both children are exposed as attributes on the SAME parent —
+    # neither was lost to a parent-replacement race.
+    assert hasattr(parent, "alpha")
+    assert hasattr(parent, "beta")
+    assert parent.alpha.VALUE == "a"
+    assert parent.beta.VALUE == "b"
+
+
 def test_load_sibling_concurrent_first_call_returns_fully_initialized(tmp_path, reset_plugin_state):
     """Two threads racing on the same first-time load_sibling call
     should both receive a fully-initialized module object — neither

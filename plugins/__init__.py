@@ -36,6 +36,22 @@ def _get_sibling_lock(module_name: str) -> _threading.Lock:
         return lock
 
 
+def _safe_plugin_id_for_module_name(plugin_id: str) -> str:
+    """Escape `.` in a plugin_id for use as part of a Python module name.
+
+    Plugin ids are opaque manifest values that can take reverse-DNS
+    forms like `com.example.foo`. Python's import machinery treats
+    `.` as a package boundary, so a raw plugin_id in a module name
+    (`plugin_com.example.foo.<...>`) would set `__package__` to a
+    dotted path that has nothing to do with this plugin. Replace `.`
+    with `_x2e_` (the hex code for `.`) so the result is a single
+    unambiguous identifier-shaped token. Plugin ids that contain the
+    literal substring `_x2e_` would in theory collide with ids
+    containing `.`; that's vanishingly unlikely. See slopsmith#33.
+    """
+    return plugin_id.replace(".", "_x2e_") if "." in plugin_id else plugin_id
+
+
 def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     """Load a sibling module from a plugin's directory under a namespaced
     module name (`plugin_<plugin_id>.<name>`, with `.` in plugin_id
@@ -50,16 +66,7 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
         raise ValueError(
             f"load_sibling: plugin_id must be a non-empty string, got {plugin_id!r}"
         )
-    # Escape `.` in plugin_id when forming the synthetic parent
-    # package name. The cache key is `parent.name` and Python's
-    # import machinery treats `.` as a package boundary, so a raw
-    # plugin_id like 'foo.bar' would collide with the parent
-    # registration. Use `_x2e_` (the hex code for `.`) as a clearly
-    # marked, identifier-shaped substitution. Plugin ids containing
-    # the literal substring `_x2e_` would in theory collide with
-    # ids containing `.`; that's vanishingly unlikely. Spotted
-    # across multiple codex review rounds on PR for slopsmith#33.
-    safe_plugin_id = plugin_id.replace(".", "_x2e_") if "." in plugin_id else plugin_id
+    safe_plugin_id = _safe_plugin_id_for_module_name(plugin_id)
     if (
         not isinstance(name, str)
         or not name
@@ -133,11 +140,19 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     # Done BEFORE the bare-reuse check below so a mixed-migration
     # package sibling still ends up with its parent registered.
     # Spotted by codex review on PR for slopsmith#33.
-    if parent_name not in sys.modules:
-        import types
-        parent = types.ModuleType(parent_name)
-        parent.__path__ = [str(plugin_dir)]
-        sys.modules[parent_name] = parent
+    # Use setdefault so two threads loading different siblings for
+    # the same plugin can't both pass an `in sys.modules` check and
+    # then overwrite each other's parent registration. Without this,
+    # a losing thread's freshly-built parent would replace the
+    # winner's parent that already had child attributes attached
+    # via setattr below — `from . import sibling` lookups would
+    # then fail. setdefault is atomic under the GIL, so the loser's
+    # ModuleType is silently discarded. Spotted by Copilot review
+    # on PR #105 round 2.
+    import types
+    new_parent = types.ModuleType(parent_name)
+    new_parent.__path__ = [str(plugin_dir)]
+    sys.modules.setdefault(parent_name, new_parent)
     # NB: We DON'T reuse bare-imported same-named modules here. The
     # alias path looked attractive — module-level singletons stay
     # shared across `import sibling` and `load_sibling('sibling')` —
@@ -384,13 +399,17 @@ def load_plugins(app: FastAPI, context: dict):
         if plugin_dir_str not in sys.path:
             sys.path.insert(0, plugin_dir_str)
 
-        # Build a per-plugin context: shallow-copy the shared one
-        # (so plugin A can't mutate plugin B's view) and add a
-        # `load_sibling` closure scoped to THIS plugin's id + dir.
-        # The helper namespaces sibling modules as
-        # `plugin_<id>.<name>` (with `.` in plugin_id escaped to
-        # `_x2e_`) so two plugins shipping the same filename get
-        # distinct cached modules. See slopsmith#33.
+        # Build a per-plugin context: dict-copy the shared mapping
+        # so plugin A re-binding `ctx['x']` doesn't leak into plugin
+        # B's view, then add a `load_sibling` closure scoped to THIS
+        # plugin's id + dir. (Note: the COPY is shallow — values
+        # stored in context are still the same objects across
+        # plugins, so e.g. `ctx['meta_db']` mutations are still
+        # observable everywhere by design.) The helper namespaces
+        # sibling modules as `plugin_<id>.<name>` (with `.` in
+        # plugin_id escaped to `_x2e_`) so two plugins shipping the
+        # same filename get distinct cached modules. See
+        # slopsmith#33.
         plugin_context = dict(context)
         plugin_context["load_sibling"] = (
             lambda name, _pid=plugin_id, _pdir=plugin_dir:
@@ -401,7 +420,15 @@ def load_plugins(app: FastAPI, context: dict):
         routes_file = manifest.get("routes")
         if routes_file:
             try:
-                module_name = f"plugin_{plugin_id}_routes"
+                # Escape `.` in plugin_id the same way load_sibling
+                # does. Without it, a plugin id like
+                # `com.example.foo` would land at
+                # `plugin_com.example.foo_routes` — which Python
+                # parses as a dotted module path, sets
+                # `__package__` to `plugin_com.example`, and breaks
+                # any relative imports inside routes.py. Spotted by
+                # Copilot review on PR #105 round 2.
+                module_name = f"plugin_{_safe_plugin_id_for_module_name(plugin_id)}_routes"
                 spec = importlib.util.spec_from_file_location(
                     module_name, str(plugin_dir / routes_file))
                 routes_module = importlib.util.module_from_spec(spec)
