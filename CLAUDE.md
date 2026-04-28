@@ -60,11 +60,11 @@ All fields except `id` and `name` are optional. Plugins can have any combination
 - `extract_meta()` — metadata extraction callable
 - `meta_db` — shared MetadataDB instance
 - `get_sloppak_cache_dir()` — sloppak cache path
-- `load_sibling(name)` — loads a sibling `.py` file from this plugin's directory under a unique, namespaced module name. See "Sibling imports" below.
+- `load_sibling(name)` — loads a sibling module from this plugin's directory under a unique, namespaced module name. See "Sibling imports" below.
 
 **Sibling imports — use `load_sibling`, not bare imports** (slopsmith#33). The plugin loader inserts each plugin's directory onto `sys.path` so `from extractor import X` works, but Python caches imports by **module name** in `sys.modules`. Two plugins that each ship a top-level `extractor.py` (or any other generic name — `util.py`, `client.py`, `parser.py`, `config.py`, …) collide: whichever loads first wins, and the other plugin's `from extractor import X` either gets the wrong module or fails with `cannot import name 'X' from 'extractor'`.
 
-The fix is `context["load_sibling"](name)`, which loads the sibling under a namespaced module name (`plugin_<id>_<name>`) so each plugin gets its own copy:
+The fix is `context["load_sibling"](name)`, which loads the sibling under a namespaced module name (`plugin_<id>.<name>`, with `.` in plugin_id escaped to `_x2e_` so reverse-DNS-style ids like `com.example.foo` work) so each plugin gets its own copy:
 
 ```python
 def setup(app, context):
@@ -74,10 +74,12 @@ def setup(app, context):
 ```
 
 Notes:
-- `name` is a bare module name — no `.py` suffix, no slashes. The helper raises `ValueError` for path traversal attempts and `ImportError` for missing files.
-- Repeat calls return the cached module (same `sys.modules` entry).
-- The transitive case (a sibling that itself wants its own siblings) is not yet automatic — pass `load_sibling` down as a parameter, or rely on bare imports if the helper module names are already plugin-specific.
-- Bare `import sibling` from `routes.py` still works during the transition period, but the loader prints a startup warning when it detects two plugins shipping a same-named top-level `.py` file. Migrate to `load_sibling` to silence the warning and immunize your plugin from future ecosystem collisions.
+- `name` is a bare module name — no `.py` suffix, no slashes, no `.`. The helper raises `ValueError` for path traversal / format issues and `ImportError` for missing files.
+- Both single-file siblings (`extractor.py`) and package-form siblings (`extractor/__init__.py`) work. Package form wins when both exist (matches CPython's import-resolution precedence).
+- Relative imports between siblings work — `from .shared import X` in a top-level helper, `from ..shared import X` from inside a sibling package. The synthetic parent package `plugin_<id>` carries the plugin directory in its `__path__`.
+- `from . import sibling` (attribute-style) also resolves: loaded children are exposed as attributes on the parent package.
+- Repeat calls return the cached module. Concurrent first-time calls are serialized via per-module locks so no caller observes a half-initialized module.
+- Bare `import sibling` from `routes.py` still works during the transition period, but the loader prints a startup warning when it detects two plugins shipping a same-named top-level module — covering both `.py` files and package directories. Migrate to `load_sibling` to silence the warning and immunize your plugin from future ecosystem collisions. (Don't mix bare imports and `load_sibling` for the same module — they'd execute the file twice and split module-level state.)
 
 **Frontend scripts** — `screen.js` runs in the global scope via a `<script>` tag. It can access `window.playSong`, `window.showScreen`, `window.createHighway`, the `<audio>` element, and the `window.slopsmith` event emitter.
 

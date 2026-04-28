@@ -6,8 +6,9 @@ which made bare `import sibling` fall through Python's per-name cache
 in `sys.modules`. Two plugins shipping a same-named top-level module
 (`extractor.py`, `util.py`, …) would step on each other. The loader
 now exposes `context['load_sibling'](name)` that loads the sibling
-under a namespaced module name `plugin_{plugin_id}_{name}`, plus a
-warning at startup so existing plugins are visible.
+under a namespaced module name `plugin_<plugin_id>.<name>` (with `.`
+in plugin_id escaped to `_x2e_`), plus a warning at startup so
+existing colliding plugins are visible.
 """
 
 import importlib
@@ -17,29 +18,50 @@ import sys
 import pytest
 
 
+# Bare module names that this test module pre-populates into
+# sys.modules to simulate the bare-import path. Saved/restored by
+# the reset_plugin_state fixture so they don't leak to other test
+# files. Codex / Copilot review on PR for slopsmith#33.
+_BARE_NAMES_USED = ("util", "extractor")
+
+
 @pytest.fixture()
 def reset_plugin_state():
     """Clear loader module-level state and restore on teardown.
 
-    `plugins.LOADED_PLUGINS` and any `plugin_*` keys we add to
-    `sys.modules` would otherwise leak across tests within a session.
+    Saves and restores:
+      * `plugins.LOADED_PLUGINS`
+      * any `plugin_*` keys we add to `sys.modules`
+      * the bare names this module simulates (`util`, `extractor`)
+      * `sys.path` — `plugins.load_plugins()` mutates it
+      * `plugins._sibling_locks` — the per-module-name lock dict
+    so each test runs against a clean slate AND nothing leaks into
+    the rest of the suite.
     """
     plugins = importlib.import_module("plugins")
     saved_loaded = list(plugins.LOADED_PLUGINS)
     saved_modules = {k: v for k, v in sys.modules.items() if k.startswith("plugin_")}
+    saved_bare = {k: sys.modules[k] for k in _BARE_NAMES_USED if k in sys.modules}
+    saved_path = list(sys.path)
+    saved_locks = dict(plugins._sibling_locks)
     plugins.LOADED_PLUGINS.clear()
+    plugins._sibling_locks.clear()
     for k in list(sys.modules):
-        if k.startswith("plugin_"):
+        if k.startswith("plugin_") or k in _BARE_NAMES_USED:
             del sys.modules[k]
     try:
         yield plugins
     finally:
         plugins.LOADED_PLUGINS.clear()
         plugins.LOADED_PLUGINS.extend(saved_loaded)
+        plugins._sibling_locks.clear()
+        plugins._sibling_locks.update(saved_locks)
         for k in list(sys.modules):
-            if k.startswith("plugin_"):
+            if k.startswith("plugin_") or k in _BARE_NAMES_USED:
                 del sys.modules[k]
         sys.modules.update(saved_modules)
+        sys.modules.update(saved_bare)
+        sys.path[:] = saved_path
 
 
 def _make_plugin(plugin_root, plugin_id, *, sibling_files=None, routes_body=None):
@@ -198,9 +220,10 @@ def test_collision_warning_excludes_routes_and_dunders(tmp_path, reset_plugin_st
 def test_collision_warning_dedupes_per_plugin(tmp_path, reset_plugin_state, capsys):
     """A single plugin shipping BOTH `extractor.py` and
     `extractor/__init__.py` is a supported intra-plugin layout
-    (load_sibling deterministically prefers the file form). The
-    warning must NOT count it as a 2-plugin collision and emit a
-    bogus message listing the same plugin id twice. Codex round 5."""
+    (load_sibling deterministically prefers the package form,
+    matching CPython's import precedence). The warning must NOT
+    count it as a 2-plugin collision and emit a bogus message
+    listing the same plugin id twice. Codex round 5."""
     plugins = reset_plugin_state
     plugin_dir = _make_plugin(tmp_path, "lonely")
     (plugin_dir / "extractor.py").write_text("FROM = 'file'\n")

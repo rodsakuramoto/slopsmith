@@ -37,12 +37,15 @@ def _get_sibling_lock(module_name: str) -> _threading.Lock:
 
 
 def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
-    """Load a sibling .py file from a plugin's directory under a namespaced
-    module name (`plugin_{plugin_id}.{name}`). Mirrors the routes-loading
-    pattern at the top of `load_plugins()` and shares its `sys.modules`
-    cache, so two plugins that each ship `extractor.py` get distinct
-    cached modules instead of stomping each other through `sys.path`.
-    See slopsmith#33."""
+    """Load a sibling module from a plugin's directory under a namespaced
+    module name (`plugin_<plugin_id>.<name>`, with `.` in plugin_id
+    escaped to `_x2e_`). Both single-file siblings (`extractor.py`)
+    and package-form siblings (`extractor/__init__.py`) are supported;
+    package form wins when both exist (matches CPython's import
+    precedence). Mirrors the routes-loading pattern in `load_plugins()`
+    and shares its `sys.modules` cache, so two plugins that each ship
+    `extractor.py` get distinct cached modules instead of stomping each
+    other through `sys.path`. See slopsmith#33."""
     if not isinstance(plugin_id, str) or not plugin_id:
         raise ValueError(
             f"load_sibling: plugin_id must be a non-empty string, got {plugin_id!r}"
@@ -75,11 +78,11 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
         )
     # Use `.` as the separator between id and name so the cache key
     # is unambiguous when plugin_ids or names contain underscores —
-    # `f"plugin_{id}_{name}"` would collide when (id='a_b', name='c')
-    # and (id='a', name='b_c') both map to `plugin_a_b_c`. Spotted
-    # by codex review on PR for slopsmith#33. `.` is rejected in
-    # `name` above; plugin_ids with `.` are degenerate (manifest
-    # convention is identifier-shaped) so the format stays unique.
+    # an `_` separator would collide when (id='a_b', name='c') and
+    # (id='a', name='b_c') both map to `plugin_a_b_c`. `.` is
+    # rejected in `name` above; `.` in plugin_id is escaped via
+    # `safe_plugin_id` so the separator stays unambiguous. Spotted
+    # across multiple codex review rounds on PR for slopsmith#33.
     parent_name = f"plugin_{safe_plugin_id}"
     module_name = f"{parent_name}.{name}"
     # NB: no pre-lock cached lookup here. A concurrent first-time
@@ -219,9 +222,10 @@ def _warn_on_module_collisions(plugin_specs):
     # Map: module_name -> {plugin_id: set_of_kinds}.
     # Using a per-plugin nested dict deduplicates the case where ONE
     # plugin ships both `extractor.py` and `extractor/__init__.py`
-    # — that intra-plugin layout is supported by load_sibling (file
-    # form wins) and shouldn't trip a cross-plugin collision warning.
-    # Spotted by codex review on PR for slopsmith#33.
+    # — that intra-plugin layout is supported by load_sibling
+    # (package form wins, matching CPython precedence) and shouldn't
+    # trip a cross-plugin collision warning. Spotted by codex review
+    # on PR for slopsmith#33.
     by_name: dict[str, dict[str, set[str]]] = {}
     for plugin_id, plugin_dir in plugin_specs:
         try:
@@ -359,15 +363,15 @@ def load_plugins(app: FastAPI, context: dict):
                 print(f"[Plugin] Skipping duplicate '{plugin_id}' from {plugins_base_dir}")
                 continue
             loaded_ids.add(plugin_id)
-            plugin_load_specs.append((plugin_id, plugin_dir, manifest, plugins_base_dir))
+            plugin_load_specs.append((plugin_id, plugin_dir, manifest))
 
     # Warn before loading so authors see the message even if a colliding
     # plugin's setup itself blows up later in the loop.
     _warn_on_module_collisions(
-        [(plugin_id, plugin_dir) for plugin_id, plugin_dir, _, _ in plugin_load_specs]
+        [(plugin_id, plugin_dir) for plugin_id, plugin_dir, _ in plugin_load_specs]
     )
 
-    for plugin_id, plugin_dir, manifest, plugins_base_dir in plugin_load_specs:
+    for plugin_id, plugin_dir, manifest in plugin_load_specs:
         # Install plugin requirements if present
         _install_requirements(plugin_dir, plugin_id)
 
@@ -384,8 +388,9 @@ def load_plugins(app: FastAPI, context: dict):
         # (so plugin A can't mutate plugin B's view) and add a
         # `load_sibling` closure scoped to THIS plugin's id + dir.
         # The helper namespaces sibling modules as
-        # `plugin_{id}_{name}` so two plugins shipping the same
-        # filename get distinct cached modules. See slopsmith#33.
+        # `plugin_<id>.<name>` (with `.` in plugin_id escaped to
+        # `_x2e_`) so two plugins shipping the same filename get
+        # distinct cached modules. See slopsmith#33.
         plugin_context = dict(context)
         plugin_context["load_sibling"] = (
             lambda name, _pid=plugin_id, _pdir=plugin_dir:
