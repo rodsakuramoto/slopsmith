@@ -16,6 +16,25 @@ LOADED_PLUGINS = []
 # Persistent pip install location (survives container restarts)
 _PIP_TARGET = Path(os.environ.get("CONFIG_DIR", "/config")) / "pip_packages"
 
+# Per-module-name locks for `_load_plugin_sibling` so two threads
+# calling `ctx['load_sibling']('extractor')` concurrently don't both
+# see the half-initialized module after the first has registered it
+# in sys.modules but before exec_module finishes. Stored in a dict
+# guarded by an outer lock — a fresh per-name lock is created on
+# first contention. Spotted by codex review on PR for slopsmith#33.
+import threading as _threading
+_sibling_lock_dict_lock = _threading.Lock()
+_sibling_locks: dict[str, _threading.Lock] = {}
+
+
+def _get_sibling_lock(module_name: str) -> _threading.Lock:
+    with _sibling_lock_dict_lock:
+        lock = _sibling_locks.get(module_name)
+        if lock is None:
+            lock = _threading.Lock()
+            _sibling_locks[module_name] = lock
+        return lock
+
 
 def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     """Load a sibling .py file from a plugin's directory under a namespaced
@@ -63,9 +82,12 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     # convention is identifier-shaped) so the format stays unique.
     parent_name = f"plugin_{safe_plugin_id}"
     module_name = f"{parent_name}.{name}"
-    cached = sys.modules.get(module_name)
-    if cached is not None:
-        return cached
+    # NB: no pre-lock cached lookup here. A concurrent first-time
+    # caller can briefly observe a half-initialized module that the
+    # FIRST caller registered via `sys.modules[module_name] = module`
+    # before `exec_module` finished. The cached check happens inside
+    # the lock below so it serializes against the load. Spotted by
+    # codex review on PR for slopsmith#33 round 8.
     # Resolve `name` to either a top-level `.py` file (`extractor.py`)
     # or a package directory (`extractor/__init__.py`). Package form
     # is documented as a valid plugin layout (the collision-warning
@@ -113,62 +135,53 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
         parent = types.ModuleType(parent_name)
         parent.__path__ = [str(plugin_dir)]
         sys.modules[parent_name] = parent
-    # Mixed-migration reuse: if a bare `import {name}` already loaded
-    # THIS plugin's same file (via sys.path during the transition),
-    # reuse it instead of re-executing. The path equality check ensures
-    # we only reuse when it's actually our file — a bare import that
-    # resolved to a DIFFERENT plugin's same-named module (the original
-    # collision bug) will not match this path and we'll load our own
-    # under the namespaced key. Without this, load_sibling would
-    # double-exec the file and any module-level singletons / caches
-    # / registrations would split into two copies.
-    #
-    # Limited to FILE-form siblings: a package-form bare import keeps
-    # `__package__`, `__spec__.name`, and `__name__` set to the
-    # un-namespaced bare name, so lazy relative imports inside the
-    # package (`from .child import X` in a function body, or
-    # `importlib.import_module(__package__ + '.child')`) would keep
-    # resolving `extractor.child` through the global sys.path cache.
-    # Two plugins that both shipped `extractor/` could still
-    # cross-load submodules on the migration path. Re-executing the
-    # package under the namespaced spec is safer; the trade-off is
-    # that module-level state in the package-form sibling will exist
-    # under both `extractor` and `plugin_<id>.extractor` until the
-    # plugin removes its bare imports. Spotted by codex review on
+    # NB: We DON'T reuse bare-imported same-named modules here. The
+    # alias path looked attractive — module-level singletons stay
+    # shared across `import sibling` and `load_sibling('sibling')` —
+    # but the bare module's `__package__`/`__spec__.name`/`__name__`
+    # remain set to the un-namespaced bare name. Any relative import
+    # that runs after the alias (lazy `from .shared import X` inside
+    # a function, or `importlib.import_module(__package__ + '.X')`)
+    # then routes through the bare global cache, undoing the
+    # isolation. The right answer for plugins that mix bare imports
+    # with load_sibling on the SAME module is "stop mixing"; the
+    # transition cost is that the module's state exists under two
+    # cache keys until the bare imports are removed. Documented in
+    # CLAUDE.md / codex review on PR for slopsmith#33.
+
+    # Per-module lock so concurrent first-time callers of load_sibling
+    # serialize through exec_module — the second caller waits for the
+    # first to finish before observing the registered module instead
+    # of seeing a half-initialized object. Spotted by codex review on
     # PR for slopsmith#33.
-    if submodule_search is None:
-        bare_cached = sys.modules.get(name)
-        if bare_cached is not None:
-            bare_file = getattr(bare_cached, "__file__", None)
-            try:
-                same_file = bool(bare_file) and Path(bare_file).resolve() == sibling_path.resolve()
-            except OSError:
-                same_file = False
-            if same_file:
-                sys.modules[module_name] = bare_cached
-                return bare_cached
-    spec = importlib.util.spec_from_file_location(
-        module_name,
-        str(sibling_path),
-        submodule_search_locations=submodule_search,
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(
-            f"plugin {plugin_id!r}: could not build import spec for {name!r}"
+    with _get_sibling_lock(module_name):
+        cached = sys.modules.get(module_name)
+        if cached is not None:
+            return cached
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            str(sibling_path),
+            submodule_search_locations=submodule_search,
         )
-    module = importlib.util.module_from_spec(spec)
-    # Register before exec so the sibling can self-reference (e.g. for
-    # internal `import plugin_<id>_helper` patterns) without infinite
-    # recursion through this helper.
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        # On exec failure, drop the half-initialized module so a
-        # retry doesn't return the broken object from cache.
-        sys.modules.pop(module_name, None)
-        raise
-    return module
+        if spec is None or spec.loader is None:
+            raise ImportError(
+                f"plugin {plugin_id!r}: could not build import spec for {name!r}"
+            )
+        module = importlib.util.module_from_spec(spec)
+        # Register before exec so the sibling can self-reference (e.g.
+        # for internal `import plugin_<id>.helper` patterns) without
+        # infinite recursion through this helper. Concurrent callers
+        # don't observe this half-initialized state because they're
+        # blocked on the lock.
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            # On exec failure, drop the half-initialized module so a
+            # retry doesn't return the broken object from cache.
+            sys.modules.pop(module_name, None)
+            raise
+        return module
 
 
 def _warn_on_module_collisions(plugin_specs):

@@ -368,35 +368,86 @@ def test_load_sibling_package_relative_import_works(tmp_path, reset_plugin_state
     assert "plugin_relpkg" in sys.modules
 
 
-def test_load_sibling_reuses_bare_imported_same_file(tmp_path, reset_plugin_state):
-    """If a plugin still has bare `import util` somewhere AND also
-    calls `load_sibling('util')`, both should return the SAME module
-    object so module-level state isn't duplicated. The reuse check
-    is gated on path equality so a bare import of a DIFFERENT
-    plugin's same-named util.py is NOT mistakenly returned. Codex
-    round 3."""
+def test_load_sibling_does_not_alias_bare_imported_file_module(tmp_path, reset_plugin_state):
+    """Mixed migration: bare `import util` already cached this
+    plugin's util.py under the global `util` name. load_sibling
+    does NOT alias the bare module into the namespaced cache —
+    it re-executes under the namespaced spec. The bare module's
+    `__package__` / `__name__` / `__spec__` would otherwise stay
+    set to the un-namespaced bare name, and any later relative
+    import inside util.py (`from .shared import X` in a function
+    body) would route through the bare global cache, undoing the
+    isolation. Trade-off: module-level state in util splits across
+    two copies until the plugin removes its bare imports. Spotted
+    by codex review on PR for slopsmith#33 round 8."""
     plugins = reset_plugin_state
     plugin_dir = _make_plugin(tmp_path, "mixmig")
     util_path = plugin_dir / "util.py"
-    util_path.write_text("STATE = []\nSTATE.append('initial')\n")
-    # Simulate the bare-import path: load util.py under the bare
-    # name `util` first, the way `import util` would after sys.path
-    # insertion.
+    util_path.write_text("MARK = object()\n")
     spec = importlib.util.spec_from_file_location("util", str(util_path))
     bare_mod = importlib.util.module_from_spec(spec)
     sys.modules["util"] = bare_mod
     spec.loader.exec_module(bare_mod)
-    bare_mod.STATE.append("bare-only-mutation")
-    # Now invoke load_sibling for the same plugin's util.py.
+    bare_mark = bare_mod.MARK
     via_helper = plugins._load_plugin_sibling("mixmig", plugin_dir, "util")
-    # Same module object — the helper detected the path match and
-    # reused the cached bare import instead of re-executing util.py.
-    assert via_helper is bare_mod
-    # The mutation done on the bare module is visible via the helper.
-    assert "bare-only-mutation" in via_helper.STATE
-    # The namespaced key now also points at the SAME object so future
-    # load_sibling calls hit the cache.
-    assert sys.modules["plugin_mixmig.util"] is bare_mod
+    # Different module objects — the helper re-executed instead
+    # of aliasing.
+    assert via_helper is not bare_mod
+    assert via_helper.MARK is not bare_mark
+    # Namespaced key has the namespaced object; bare key still has
+    # the bare-imported object.
+    assert sys.modules["plugin_mixmig.util"] is via_helper
+    assert sys.modules["util"] is bare_mod
+    # Critically, via_helper has the correct namespaced metadata so
+    # later relative imports inside it would route through the
+    # synthetic parent.
+    assert via_helper.__name__ == "plugin_mixmig.util"
+    assert via_helper.__package__ == "plugin_mixmig"
+
+
+def test_load_sibling_concurrent_first_call_returns_fully_initialized(tmp_path, reset_plugin_state):
+    """Two threads racing on the same first-time load_sibling call
+    should both receive a fully-initialized module object — neither
+    can observe the half-built module that's briefly registered in
+    sys.modules between `module_from_spec` and the end of
+    `exec_module`. The per-module lock added in round 8 enforces
+    this."""
+    import threading
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "racy")
+    # The sibling's __init__ does meaningful work BEFORE setting
+    # `READY = True`, so a partially-initialized module would lack
+    # the attribute even though the module object exists in
+    # sys.modules.
+    (plugin_dir / "slow.py").write_text(
+        "import time\n"
+        "time.sleep(0.05)\n"
+        "READY = True\n"
+        "VALUE = 'done'\n"
+    )
+    results: list = []
+    errors: list = []
+
+    def worker():
+        try:
+            mod = plugins._load_plugin_sibling("racy", plugin_dir, "slow")
+            results.append((mod, getattr(mod, "READY", None), getattr(mod, "VALUE", None)))
+        except BaseException as e:  # pragma: no cover - bug path
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert len(results) == 8
+    # Every caller sees the same fully-initialized module.
+    first_mod, _, _ = results[0]
+    for mod, ready, value in results:
+        assert mod is first_mod
+        assert ready is True
+        assert value == "done"
 
 
 def test_load_sibling_does_not_reuse_other_plugins_bare_import(tmp_path, reset_plugin_state):
