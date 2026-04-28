@@ -37,19 +37,34 @@ def _get_sibling_lock(module_name: str) -> _threading.Lock:
 
 
 def _safe_plugin_id_for_module_name(plugin_id: str) -> str:
-    """Escape `.` in a plugin_id for use as part of a Python module name.
+    """Bijectively encode a plugin_id for safe use as part of a Python
+    module name.
 
     Plugin ids are opaque manifest values that can take reverse-DNS
-    forms like `com.example.foo`. Python's import machinery treats
-    `.` as a package boundary, so a raw plugin_id in a module name
-    (`plugin_com.example.foo.<...>`) would set `__package__` to a
-    dotted path that has nothing to do with this plugin. Replace `.`
-    with `_x2e_` (the hex code for `.`) so the result is a single
-    unambiguous identifier-shaped token. Plugin ids that contain the
-    literal substring `_x2e_` would in theory collide with ids
-    containing `.`; that's vanishingly unlikely. See slopsmith#33.
+    forms (`com.example.foo`) or contain other characters that
+    Python's import machinery interprets specially — most
+    importantly `.`, which it treats as a package boundary.
+
+    The encoding is **bijective** so distinct plugin_ids always map
+    to distinct encoded strings (otherwise two installed plugins
+    could share a cache-key prefix and reintroduce the cross-plugin
+    collision this PR is fixing). To make `_<hex>_` sequences in
+    the output ONLY appear as a result of intentional escapes, the
+    underscore is encoded first:
+
+      `_` → `_5f_`   (hex of `_`)
+      `.` → `_2e_`   (hex of `.`, applied after the `_` pass)
+
+    With this scheme:
+      `foo`            → `foo`
+      `foo_bar`        → `foo_5f_bar`
+      `foo.bar`        → `foo_2e_bar`
+      `foo_2e_bar`     → `foo_5f_2e_5f_bar`  (distinct from `foo.bar`)
+      `com.example.x`  → `com_2e_example_2e_x`
+
+    Spotted across multiple Copilot review rounds on PR #105.
     """
-    return plugin_id.replace(".", "_x2e_") if "." in plugin_id else plugin_id
+    return plugin_id.replace("_", "_5f_").replace(".", "_2e_")
 
 
 def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
@@ -355,9 +370,9 @@ def load_plugins(app: FastAPI, context: dict):
     loaded_ids = set()
     # Two-pass discovery so we can warn about cross-plugin module-name
     # collisions BEFORE any plugin's setup runs (slopsmith#33). The
-    # first pass collects (plugin_id, plugin_dir, manifest, base_dir)
-    # tuples in load order; the second pass actually executes each
-    # plugin's setup with a per-plugin context.
+    # first pass collects (plugin_id, plugin_dir, manifest) tuples in
+    # load order; the second pass actually executes each plugin's
+    # setup with a per-plugin context.
     plugin_load_specs = []
     for plugins_base_dir in plugin_dirs:
         for plugin_dir in sorted(plugins_base_dir.iterdir()):
@@ -373,6 +388,17 @@ def load_plugins(app: FastAPI, context: dict):
                 continue
             plugin_id = manifest.get("id")
             if not plugin_id:
+                continue
+            # Validate type explicitly. A malformed manifest with a
+            # non-string id (number, list, ...) would otherwise crash
+            # later when `.replace()` runs in
+            # `_safe_plugin_id_for_module_name`. Spotted by Copilot
+            # review on PR #105 round 3.
+            if not isinstance(plugin_id, str):
+                print(
+                    f"[Plugin] Skipping {manifest_path}: 'id' must be a string, "
+                    f"got {type(plugin_id).__name__} ({plugin_id!r})"
+                )
                 continue
             if plugin_id in loaded_ids:
                 print(f"[Plugin] Skipping duplicate '{plugin_id}' from {plugins_base_dir}")

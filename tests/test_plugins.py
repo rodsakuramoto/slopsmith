@@ -7,7 +7,8 @@ in `sys.modules`. Two plugins shipping a same-named top-level module
 (`extractor.py`, `util.py`, …) would step on each other. The loader
 now exposes `context['load_sibling'](name)` that loads the sibling
 under a namespaced module name `plugin_<plugin_id>.<name>` (with `.`
-in plugin_id escaped to `_x2e_`), plus a warning at startup so
+in plugin_id bijectively encoded — `_` -> `_5f_`, `.` -> `_2e_`),
+plus a warning at startup so
 existing colliding plugins are visible.
 """
 
@@ -316,10 +317,10 @@ def test_load_sibling_handles_dotted_plugin_id_via_escape(tmp_path, reset_plugin
     (plugin_dir / "util.py").write_text("VALUE = 'reverse-dns'\n")
     util = plugins._load_plugin_sibling("com.example.foo", plugin_dir, "util")
     assert util.VALUE == "reverse-dns"
-    # The cache key uses the escaped form so it doesn't fight with
-    # Python's package resolution.
-    assert "plugin_com_x2e_example_x2e_foo.util" in sys.modules
-    assert sys.modules["plugin_com_x2e_example_x2e_foo.util"] is util
+    # The cache key uses the bijectively-encoded form so it doesn't
+    # fight with Python's package resolution. `.` -> `_2e_`.
+    assert "plugin_com_2e_example_2e_foo.util" in sys.modules
+    assert sys.modules["plugin_com_2e_example_2e_foo.util"] is util
 
 
 def test_load_sibling_rejects_empty_plugin_id(tmp_path, reset_plugin_state):
@@ -458,14 +459,63 @@ def test_load_sibling_does_not_alias_bare_imported_file_module(tmp_path, reset_p
     assert via_helper.__package__ == "plugin_mixmig"
 
 
+def test_safe_plugin_id_encoding_is_collision_free(reset_plugin_state):
+    """Distinct plugin_ids must always map to distinct encoded
+    forms. The previous `.` -> `_x2e_` (only when `.` was present)
+    was not bijective: ids `foo.bar` and `foo_x2e_bar` both produced
+    `foo_x2e_bar`. With the bijective `_` -> `_5f_`, `.` -> `_2e_`
+    encoding (in that order), no two distinct plugin_ids map to the
+    same output. Copilot review on PR #105 round 3."""
+    plugins = reset_plugin_state
+    samples = [
+        "foo",
+        "foo_bar",
+        "foo.bar",
+        "foo_2e_bar",
+        "foo_5f_bar",
+        "foo_5f_2e_5f_bar",
+        "com.example.foo",
+        "com_example_foo",
+        "com_2e_example_2e_foo",
+        "",  # empty edge — empty maps to empty, distinct from all others
+        "_",
+        ".",
+        "._",
+        "_.",
+    ]
+    encoded = [plugins._safe_plugin_id_for_module_name(s) for s in samples]
+    # Bijective: distinct inputs -> distinct outputs.
+    assert len(set(encoded)) == len(samples), dict(zip(samples, encoded))
+
+
+def test_load_plugins_skips_non_string_id(tmp_path, reset_plugin_state, capsys):
+    """A malformed manifest with a non-string id (e.g. number) is
+    skipped with a clear message rather than crashing later inside
+    `_safe_plugin_id_for_module_name`'s `.replace()` call. Copilot
+    review on PR #105 round 3."""
+    plugins = reset_plugin_state
+    bad_dir = tmp_path / "bad"
+    bad_dir.mkdir()
+    (bad_dir / "plugin.json").write_text('{"id": 42, "name": "bad"}')
+    _make_plugin(tmp_path, "good", sibling_files={"util": "X = 1\n"})
+    fake_app = type("FakeApp", (), {})()
+    _run_load_plugins(plugins, fake_app, tmp_path)
+    out = capsys.readouterr().out
+    assert "must be a string" in out
+    assert "int" in out  # type name surfaced
+    loaded_ids = {p["id"] for p in plugins.LOADED_PLUGINS}
+    assert 42 not in loaded_ids
+    assert "good" in loaded_ids
+
+
 def test_load_plugins_escapes_dotted_id_in_routes_module_name(tmp_path, reset_plugin_state):
     """A plugin with a reverse-DNS id like `com.example.foo` must
     have its routes module registered under a `.`-free name, or
     Python would treat the cache key as a dotted package path and
     set `__package__` to an unintended parent (relative imports in
     routes.py would then resolve against something else entirely).
-    The same `_x2e_` escape used by load_sibling now applies to
-    routes too. Copilot review on PR #105 round 2."""
+    The same `.` -> `_2e_` encoding used by load_sibling now
+    applies to routes too. Copilot review on PR #105 round 2."""
     plugins = reset_plugin_state
     plugin_dir = tmp_path / "rdns_routes"
     plugin_dir.mkdir()
@@ -482,8 +532,8 @@ def test_load_plugins_escapes_dotted_id_in_routes_module_name(tmp_path, reset_pl
     # Routes module is registered under the escaped name and is a
     # single identifier-shaped key — NOT a dotted path that Python
     # would try to resolve as a real package.
-    assert "plugin_com_x2e_example_x2e_foo_routes" in sys.modules
-    routes_mod = sys.modules["plugin_com_x2e_example_x2e_foo_routes"]
+    assert "plugin_com_2e_example_2e_foo_routes" in sys.modules
+    routes_mod = sys.modules["plugin_com_2e_example_2e_foo_routes"]
     # __package__ is empty (top-level module), not a dotted parent.
     assert (routes_mod.__package__ or "") == ""
 
@@ -647,8 +697,9 @@ def test_load_sibling_missing_in_both_forms_raises_with_useful_message(tmp_path,
 
 def test_load_sibling_disambiguates_underscored_ids_and_names(tmp_path, reset_plugin_state):
     """`(plugin_id='a_b', name='c')` and `(plugin_id='a', name='b_c')`
-    must NOT collide in sys.modules. The `.` separator makes the cache
-    key unambiguous (the old `_` separator collapsed both to
+    must NOT collide in sys.modules. The `.` separator + bijective
+    `_` -> `_5f_` encoding of plugin_id make the cache key
+    unambiguous (the old `_` separator collapsed both to
     `plugin_a_b_c`). Codex review on PR for slopsmith#33."""
     plugins = reset_plugin_state
     p1 = _make_plugin(tmp_path, "a_b", sibling_files={"c": "WHO = 'a_b/c'\n"})
@@ -658,10 +709,16 @@ def test_load_sibling_disambiguates_underscored_ids_and_names(tmp_path, reset_pl
     assert m1 is not m2
     assert m1.WHO == "a_b/c"
     assert m2.WHO == "a/b_c"
-    # Both keys exist independently in sys.modules.
-    assert "plugin_a_b.c" in sys.modules
+    # Both keys exist independently in sys.modules. plugin_id `a_b`
+    # encodes to `a_5f_b` so the parent is `plugin_a_5f_b`. The
+    # NAME portion is not encoded (it's only the plugin_id that
+    # could be confused with the `.` separator). So:
+    #   id='a_b', name='c'   -> plugin_a_5f_b.c
+    #   id='a',   name='b_c' -> plugin_a.b_c
+    # The old `_` separator collapsed both to `plugin_a_b_c`.
+    assert "plugin_a_5f_b.c" in sys.modules
     assert "plugin_a.b_c" in sys.modules
-    assert sys.modules["plugin_a_b.c"] is m1
+    assert sys.modules["plugin_a_5f_b.c"] is m1
     assert sys.modules["plugin_a.b_c"] is m2
 
 
