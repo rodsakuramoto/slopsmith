@@ -68,16 +68,22 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     # is documented as a valid plugin layout (the collision-warning
     # scanner detects it) so it must be loadable here too. Spotted
     # by codex review on PR for slopsmith#33.
+    # Match CPython's import-resolution precedence: regular packages
+    # win over same-named `.py` modules. If a plugin ships both
+    # `extractor.py` and `extractor/__init__.py`, bare `import
+    # extractor` and `load_sibling('extractor')` must execute the
+    # same code path so plugins don't see split state. Spotted by
+    # codex review on PR for slopsmith#33.
     file_path = plugin_dir / f"{name}.py"
     pkg_init = plugin_dir / name / "__init__.py"
     submodule_search = None
-    if file_path.is_file():
-        sibling_path = file_path
-    elif pkg_init.is_file():
+    if pkg_init.is_file():
         sibling_path = pkg_init
         # Tell the import system that this is a package whose
         # submodules can be looked up under `plugin_{id}.{name}.X`.
         submodule_search = [str(pkg_init.parent)]
+    elif file_path.is_file():
+        sibling_path = file_path
     else:
         raise ImportError(
             f"plugin {plugin_id!r}: no sibling module {name!r} at "
@@ -314,6 +320,20 @@ def load_plugins(app: FastAPI, context: dict):
                 continue
             plugin_id = manifest.get("id")
             if not plugin_id:
+                continue
+            # Reject dotted ids at discovery so plugins don't load
+            # successfully and then blow up on the first
+            # `context['load_sibling'](...)` call. The helper's
+            # synthetic parent package machinery requires a
+            # `.`-free id; the manifest convention is identifier-
+            # shaped ids anyway. Spotted by codex review on PR for
+            # slopsmith#33.
+            if "." in plugin_id:
+                print(
+                    f"[Plugin] Refusing to load '{plugin_id}' from "
+                    f"{plugin_dir}: plugin id must not contain '.' "
+                    f"(slopsmith#33). Rename the id in plugin.json."
+                )
                 continue
             if plugin_id in loaded_ids:
                 print(f"[Plugin] Skipping duplicate '{plugin_id}' from {plugins_base_dir}")

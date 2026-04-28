@@ -195,6 +195,34 @@ def test_collision_warning_excludes_routes_and_dunders(tmp_path, reset_plugin_st
     assert "Module-name collision warning" not in out
 
 
+def test_load_plugins_rejects_dotted_ids_at_discovery(tmp_path, reset_plugin_state, capsys):
+    """A plugin whose manifest id contains `.` is refused at
+    discovery and skipped. The helper's synthetic-parent machinery
+    can't handle dotted ids — better to fail loudly at startup
+    than to silently register the plugin and have the first
+    `context['load_sibling'](...)` call blow up. Codex round 6."""
+    plugins = reset_plugin_state
+    _make_plugin(tmp_path, "valid_id", sibling_files={"util": "X = 1\n"})
+    # Manually craft a plugin with a dotted id — _make_plugin would
+    # also create the directory under that name; that's fine for the
+    # test as long as the loader sees the manifest and skips it.
+    bad_dir = tmp_path / "dotted"
+    bad_dir.mkdir()
+    (bad_dir / "plugin.json").write_text(
+        '{"id": "foo.bar", "name": "dotted"}'
+    )
+    (bad_dir / "routes.py").write_text("def setup(app, ctx): pass\n")
+    fake_app = type("FakeApp", (), {})()
+    _run_load_plugins(plugins, fake_app, tmp_path)
+    out = capsys.readouterr().out
+    # Bad plugin gets refused, valid_id loads.
+    assert "Refusing to load 'foo.bar'" in out
+    assert "must not contain '.'" in out
+    loaded_ids = {p["id"] for p in plugins.LOADED_PLUGINS}
+    assert "foo.bar" not in loaded_ids
+    assert "valid_id" in loaded_ids
+
+
 def test_collision_warning_dedupes_per_plugin(tmp_path, reset_plugin_state, capsys):
     """A single plugin shipping BOTH `extractor.py` and
     `extractor/__init__.py` is a supported intra-plugin layout
@@ -390,11 +418,12 @@ def test_load_sibling_loads_package_form(tmp_path, reset_plugin_state):
     assert child.CHILD_VALUE == 8
 
 
-def test_load_sibling_prefers_file_over_package_when_both_exist(tmp_path, reset_plugin_state):
+def test_load_sibling_prefers_package_over_file_when_both_exist(tmp_path, reset_plugin_state):
     """If a plugin ships BOTH `extractor.py` and `extractor/__init__.py`
-    in the same directory, the file form wins (matches Python's own
-    import precedence — namespace packages last). Documents the
-    deterministic behavior in case anyone hits this corner."""
+    in the same directory, the package form wins — matches CPython's
+    own import-resolution precedence so bare `import extractor` and
+    `load_sibling('extractor')` always run the same code path.
+    Spotted by codex review on PR for slopsmith#33."""
     plugins = reset_plugin_state
     plugin_dir = _make_plugin(tmp_path, "both")
     (plugin_dir / "extractor.py").write_text("FROM = 'file'\n")
@@ -402,7 +431,7 @@ def test_load_sibling_prefers_file_over_package_when_both_exist(tmp_path, reset_
     pkg_dir.mkdir()
     (pkg_dir / "__init__.py").write_text("FROM = 'package'\n")
     extractor = plugins._load_plugin_sibling("both", plugin_dir, "extractor")
-    assert extractor.FROM == "file"
+    assert extractor.FROM == "package"
 
 
 def test_load_sibling_missing_in_both_forms_raises_with_useful_message(tmp_path, reset_plugin_state):
