@@ -195,6 +195,53 @@ def test_collision_warning_excludes_routes_and_dunders(tmp_path, reset_plugin_st
     assert "Module-name collision warning" not in out
 
 
+def test_load_sibling_rejects_dotted_plugin_id(tmp_path, reset_plugin_state):
+    """A plugin_id containing `.` would make the namespaced key
+    ambiguous (Python would treat `plugin_foo.bar` as a real package
+    structure). Reject such ids with a clear error so the manifest
+    convention is enforced loudly. Codex round 4."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "valid_id", sibling_files={"util": "X = 1\n"})
+    with pytest.raises(ValueError, match="without '.'"):
+        plugins._load_plugin_sibling("foo.bar", plugin_dir, "util")
+    # And empty / non-string ids are rejected too.
+    for bad in ("", None, 123):
+        with pytest.raises((ValueError, TypeError)):
+            plugins._load_plugin_sibling(bad, plugin_dir, "util")
+
+
+def test_load_sibling_creates_parent_even_when_reusing_bare_package(tmp_path, reset_plugin_state):
+    """Mixed-migration corner: a plugin bare-imports a package
+    sibling first, then later calls load_sibling for the same
+    package. The reuse path used to short-circuit before creating
+    the synthetic parent, so submodule imports failed afterward.
+    Codex round 4."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "mixedpkg")
+    pkg_dir = plugin_dir / "extractor"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("ROOT = 'init'\n")
+    (pkg_dir / "child.py").write_text("CHILD = 'leaf'\n")
+    # Simulate bare `import extractor` resolving the package via
+    # sys.path during transition.
+    spec = importlib.util.spec_from_file_location(
+        "extractor",
+        str(pkg_dir / "__init__.py"),
+        submodule_search_locations=[str(pkg_dir)],
+    )
+    bare_pkg = importlib.util.module_from_spec(spec)
+    sys.modules["extractor"] = bare_pkg
+    spec.loader.exec_module(bare_pkg)
+    # Now switch to load_sibling.
+    via_helper = plugins._load_plugin_sibling("mixedpkg", plugin_dir, "extractor")
+    assert via_helper is bare_pkg
+    # The synthetic parent must exist so submodule imports through
+    # the namespaced key still work after the reuse.
+    assert "plugin_mixedpkg" in sys.modules
+    child = importlib.import_module("plugin_mixedpkg.extractor.child")
+    assert child.CHILD == "leaf"
+
+
 def test_load_sibling_package_relative_import_works(tmp_path, reset_plugin_state):
     """A package-form sibling whose __init__.py uses `from .child
     import X` must load. Without registering the synthetic parent

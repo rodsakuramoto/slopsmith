@@ -19,11 +19,22 @@ _PIP_TARGET = Path(os.environ.get("CONFIG_DIR", "/config")) / "pip_packages"
 
 def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     """Load a sibling .py file from a plugin's directory under a namespaced
-    module name (`plugin_{plugin_id}_{name}`). Mirrors the routes-loading
+    module name (`plugin_{plugin_id}.{name}`). Mirrors the routes-loading
     pattern at the top of `load_plugins()` and shares its `sys.modules`
     cache, so two plugins that each ship `extractor.py` get distinct
     cached modules instead of stomping each other through `sys.path`.
     See slopsmith#33."""
+    if not isinstance(plugin_id, str) or not plugin_id or "." in plugin_id:
+        # Plugin ids containing `.` would make the namespaced cache
+        # key (`plugin_<id>.<name>`) ambiguous AND would prevent
+        # building the synthetic parent package — Python would treat
+        # `foo.bar` as "module bar inside package foo" but there's no
+        # package `plugin_foo`. Manifest convention is identifier-
+        # shaped ids, so this just enforces the convention loudly.
+        # Spotted by codex review on PR for slopsmith#33.
+        raise ValueError(
+            f"load_sibling: plugin_id must be a non-empty string without '.', got {plugin_id!r}"
+        )
     if (
         not isinstance(name, str)
         or not name
@@ -72,6 +83,21 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
             f"plugin {plugin_id!r}: no sibling module {name!r} at "
             f"{file_path} or {pkg_init}"
         )
+    # Register a synthetic parent package so relative imports inside
+    # a sibling package (`from .child import X`) and explicit lookups
+    # of submodules (`importlib.import_module('plugin_<id>.<name>.X')`)
+    # can resolve through the parent. The parent has an empty
+    # __path__: the plugin's dir is intentionally NOT on it, so that
+    # all sibling lookups continue to flow through this helper and
+    # don't accidentally pull in collision-prone names. Done BEFORE
+    # the bare-reuse check below so a mixed-migration package sibling
+    # still ends up with its parent registered. Spotted by codex
+    # review on PR for slopsmith#33.
+    if parent_name not in sys.modules:
+        import types
+        parent = types.ModuleType(parent_name)
+        parent.__path__ = []
+        sys.modules[parent_name] = parent
     # Mixed-migration reuse: if a bare `import {name}` already loaded
     # THIS plugin's same file (via sys.path during the transition),
     # reuse it instead of re-executing. The path equality check ensures
@@ -92,19 +118,6 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
         if same_file:
             sys.modules[module_name] = bare_cached
             return bare_cached
-    # Register a synthetic parent package so relative imports inside
-    # a sibling package (`from .child import X`) and explicit lookups
-    # of submodules (`importlib.import_module('plugin_<id>.<name>.X')`)
-    # can resolve through the parent. The parent has an empty
-    # __path__: the plugin's dir is intentionally NOT on it, so that
-    # all sibling lookups continue to flow through this helper and
-    # don't accidentally pull in collision-prone names. Spotted by
-    # codex review on PR for slopsmith#33.
-    if parent_name not in sys.modules:
-        import types
-        parent = types.ModuleType(parent_name)
-        parent.__path__ = []
-        sys.modules[parent_name] = parent
     spec = importlib.util.spec_from_file_location(
         module_name,
         str(sibling_path),
