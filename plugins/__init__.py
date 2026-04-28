@@ -106,18 +106,32 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     # collision bug) will not match this path and we'll load our own
     # under the namespaced key. Without this, load_sibling would
     # double-exec the file and any module-level singletons / caches
-    # / registrations would split into two copies. Spotted by codex
-    # review on PR for slopsmith#33.
-    bare_cached = sys.modules.get(name)
-    if bare_cached is not None:
-        bare_file = getattr(bare_cached, "__file__", None)
-        try:
-            same_file = bool(bare_file) and Path(bare_file).resolve() == sibling_path.resolve()
-        except OSError:
-            same_file = False
-        if same_file:
-            sys.modules[module_name] = bare_cached
-            return bare_cached
+    # / registrations would split into two copies.
+    #
+    # Limited to FILE-form siblings: a package-form bare import keeps
+    # `__package__`, `__spec__.name`, and `__name__` set to the
+    # un-namespaced bare name, so lazy relative imports inside the
+    # package (`from .child import X` in a function body, or
+    # `importlib.import_module(__package__ + '.child')`) would keep
+    # resolving `extractor.child` through the global sys.path cache.
+    # Two plugins that both shipped `extractor/` could still
+    # cross-load submodules on the migration path. Re-executing the
+    # package under the namespaced spec is safer; the trade-off is
+    # that module-level state in the package-form sibling will exist
+    # under both `extractor` and `plugin_<id>.extractor` until the
+    # plugin removes its bare imports. Spotted by codex review on
+    # PR for slopsmith#33.
+    if submodule_search is None:
+        bare_cached = sys.modules.get(name)
+        if bare_cached is not None:
+            bare_file = getattr(bare_cached, "__file__", None)
+            try:
+                same_file = bool(bare_file) and Path(bare_file).resolve() == sibling_path.resolve()
+            except OSError:
+                same_file = False
+            if same_file:
+                sys.modules[module_name] = bare_cached
+                return bare_cached
     spec = importlib.util.spec_from_file_location(
         module_name,
         str(sibling_path),
@@ -162,7 +176,13 @@ def _warn_on_module_collisions(plugin_specs):
     `plugin_specs` is a list of `(plugin_id, plugin_dir)` tuples for
     plugins the loader has decided to load (post-dedup).
     """
-    by_name: dict[str, list[str]] = {}
+    # Map: module_name -> {plugin_id: set_of_kinds}.
+    # Using a per-plugin nested dict deduplicates the case where ONE
+    # plugin ships both `extractor.py` and `extractor/__init__.py`
+    # — that intra-plugin layout is supported by load_sibling (file
+    # form wins) and shouldn't trip a cross-plugin collision warning.
+    # Spotted by codex review on PR for slopsmith#33.
+    by_name: dict[str, dict[str, set[str]]] = {}
     for plugin_id, plugin_dir in plugin_specs:
         try:
             for child in plugin_dir.iterdir():
@@ -180,25 +200,24 @@ def _warn_on_module_collisions(plugin_specs):
                     kind = "package"
                 if module_name is None:
                     continue
-                by_name.setdefault(module_name, []).append((plugin_id, kind))
+                by_name.setdefault(module_name, {}).setdefault(plugin_id, set()).add(kind)
         except OSError:
             # Unreadable plugin dir — the per-plugin load below will
             # surface the error in a more useful place; don't warn here.
             continue
-    for name, entries in by_name.items():
-        if len(entries) < 2:
+    for name, by_plugin in by_name.items():
+        # Count distinct plugin ids — only fire when MULTIPLE plugins
+        # ship the same module name. A single plugin shipping the
+        # name in multiple forms is fine.
+        if len(by_plugin) < 2:
             continue
-        ids_quoted = ", ".join(
-            f"'{pid}'" for pid, _ in sorted(entries, key=lambda e: e[0])
-        )
-        # Mention which form (module vs package) shows up if it's
-        # not all one or the other — helps maintainers spot the
-        # `extractor.py` vs `extractor/__init__.py` mixed case.
-        kinds = {k for _, k in entries}
+        ids_quoted = ", ".join(f"'{pid}'" for pid in sorted(by_plugin))
+        # Aggregate kinds across all plugins to label the warning.
+        kinds = {k for kind_set in by_plugin.values() for k in kind_set}
         kind_label = "module/package" if len(kinds) > 1 else next(iter(kinds))
         print(
             f"[Plugin] Module-name collision warning: '{name}' "
-            f"({kind_label}) is shipped by {len(entries)} plugins "
+            f"({kind_label}) is shipped by {len(by_plugin)} plugins "
             f"({ids_quoted}). Bare `import {name}` may load the wrong "
             f"file. Migrate to context['load_sibling']('{name}') — "
             f"see CLAUDE.md (slopsmith#33)."

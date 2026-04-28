@@ -195,6 +195,92 @@ def test_collision_warning_excludes_routes_and_dunders(tmp_path, reset_plugin_st
     assert "Module-name collision warning" not in out
 
 
+def test_collision_warning_dedupes_per_plugin(tmp_path, reset_plugin_state, capsys):
+    """A single plugin shipping BOTH `extractor.py` and
+    `extractor/__init__.py` is a supported intra-plugin layout
+    (load_sibling deterministically prefers the file form). The
+    warning must NOT count it as a 2-plugin collision and emit a
+    bogus message listing the same plugin id twice. Codex round 5."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "lonely")
+    (plugin_dir / "extractor.py").write_text("FROM = 'file'\n")
+    pkg_dir = plugin_dir / "extractor"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("FROM = 'package'\n")
+    _run_load_plugins(plugins, type("FakeApp", (), {})(), tmp_path)
+    out = capsys.readouterr().out
+    # Only one plugin is involved, so no cross-plugin warning fires.
+    assert "Module-name collision warning" not in out
+
+
+def test_collision_warning_still_fires_when_two_plugins_each_have_both_forms(
+    tmp_path, reset_plugin_state, capsys
+):
+    """Two plugins each shipping both forms of `extractor` IS a
+    real cross-plugin collision and must be reported. Codex round 5
+    sanity check on the dedup logic."""
+    plugins = reset_plugin_state
+    for pid in ("alpha", "beta"):
+        plugin_dir = _make_plugin(tmp_path, pid)
+        (plugin_dir / "extractor.py").write_text(f"OWNER = '{pid}-file'\n")
+        pkg_dir = plugin_dir / "extractor"
+        pkg_dir.mkdir()
+        (pkg_dir / "__init__.py").write_text(f"OWNER = '{pid}-package'\n")
+    _run_load_plugins(plugins, type("FakeApp", (), {})(), tmp_path)
+    out = capsys.readouterr().out
+    warning_lines = [ln for ln in out.splitlines() if "Module-name collision warning" in ln]
+    assert len(warning_lines) == 1
+    warning = warning_lines[0]
+    assert "alpha" in warning
+    assert "beta" in warning
+    # The warning text should list each plugin id ONCE, even though
+    # both plugins ship two forms of `extractor`.
+    assert warning.count("'alpha'") == 1
+    assert warning.count("'beta'") == 1
+    # Both forms reported in the kind label.
+    assert "module/package" in warning
+
+
+def test_load_sibling_does_not_alias_bare_imported_package(tmp_path, reset_plugin_state):
+    """A bare-imported package keeps `__package__` and
+    `__spec__.name` as the un-namespaced bare name, so lazy
+    relative imports inside it would still resolve through the
+    global cache. To avoid that, load_sibling does NOT reuse a
+    bare-imported package — it re-executes under the namespaced
+    spec instead. Two copies of the package coexist (one bare,
+    one namespaced); module-level state diverges. This is
+    documented as the trade-off; the alternative would silently
+    leak submodule cross-loads. Codex round 5."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "pkgsafe")
+    pkg_dir = plugin_dir / "extractor"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("MARK = object()\n")
+    (pkg_dir / "child.py").write_text("FROM = 'leaf'\n")
+    # Pre-populate sys.modules['extractor'] as if a bare import had
+    # already pulled in the package.
+    spec = importlib.util.spec_from_file_location(
+        "extractor",
+        str(pkg_dir / "__init__.py"),
+        submodule_search_locations=[str(pkg_dir)],
+    )
+    bare_pkg = importlib.util.module_from_spec(spec)
+    sys.modules["extractor"] = bare_pkg
+    spec.loader.exec_module(bare_pkg)
+    bare_mark = bare_pkg.MARK
+    # load_sibling re-executes under the namespaced spec rather
+    # than aliasing the bare package.
+    via_helper = plugins._load_plugin_sibling("pkgsafe", plugin_dir, "extractor")
+    assert via_helper is not bare_pkg
+    # Different MARK objects confirm the namespaced version was
+    # actually re-executed.
+    assert via_helper.MARK is not bare_mark
+    # The namespaced submodule resolves through the namespaced
+    # package, NOT through `extractor.child`.
+    child = importlib.import_module("plugin_pkgsafe.extractor.child")
+    assert child.FROM == "leaf"
+
+
 def test_load_sibling_rejects_dotted_plugin_id(tmp_path, reset_plugin_state):
     """A plugin_id containing `.` would make the namespaced key
     ambiguous (Python would treat `plugin_foo.bar` as a real package
@@ -208,38 +294,6 @@ def test_load_sibling_rejects_dotted_plugin_id(tmp_path, reset_plugin_state):
     for bad in ("", None, 123):
         with pytest.raises((ValueError, TypeError)):
             plugins._load_plugin_sibling(bad, plugin_dir, "util")
-
-
-def test_load_sibling_creates_parent_even_when_reusing_bare_package(tmp_path, reset_plugin_state):
-    """Mixed-migration corner: a plugin bare-imports a package
-    sibling first, then later calls load_sibling for the same
-    package. The reuse path used to short-circuit before creating
-    the synthetic parent, so submodule imports failed afterward.
-    Codex round 4."""
-    plugins = reset_plugin_state
-    plugin_dir = _make_plugin(tmp_path, "mixedpkg")
-    pkg_dir = plugin_dir / "extractor"
-    pkg_dir.mkdir()
-    (pkg_dir / "__init__.py").write_text("ROOT = 'init'\n")
-    (pkg_dir / "child.py").write_text("CHILD = 'leaf'\n")
-    # Simulate bare `import extractor` resolving the package via
-    # sys.path during transition.
-    spec = importlib.util.spec_from_file_location(
-        "extractor",
-        str(pkg_dir / "__init__.py"),
-        submodule_search_locations=[str(pkg_dir)],
-    )
-    bare_pkg = importlib.util.module_from_spec(spec)
-    sys.modules["extractor"] = bare_pkg
-    spec.loader.exec_module(bare_pkg)
-    # Now switch to load_sibling.
-    via_helper = plugins._load_plugin_sibling("mixedpkg", plugin_dir, "extractor")
-    assert via_helper is bare_pkg
-    # The synthetic parent must exist so submodule imports through
-    # the namespaced key still work after the reuse.
-    assert "plugin_mixedpkg" in sys.modules
-    child = importlib.import_module("plugin_mixedpkg.extractor.child")
-    assert child.CHILD == "leaf"
 
 
 def test_load_sibling_package_relative_import_works(tmp_path, reset_plugin_state):
