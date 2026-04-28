@@ -24,17 +24,20 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     cache, so two plugins that each ship `extractor.py` get distinct
     cached modules instead of stomping each other through `sys.path`.
     See slopsmith#33."""
-    if not isinstance(plugin_id, str) or not plugin_id or "." in plugin_id:
-        # Plugin ids containing `.` would make the namespaced cache
-        # key (`plugin_<id>.<name>`) ambiguous AND would prevent
-        # building the synthetic parent package — Python would treat
-        # `foo.bar` as "module bar inside package foo" but there's no
-        # package `plugin_foo`. Manifest convention is identifier-
-        # shaped ids, so this just enforces the convention loudly.
-        # Spotted by codex review on PR for slopsmith#33.
+    if not isinstance(plugin_id, str) or not plugin_id:
         raise ValueError(
-            f"load_sibling: plugin_id must be a non-empty string without '.', got {plugin_id!r}"
+            f"load_sibling: plugin_id must be a non-empty string, got {plugin_id!r}"
         )
+    # Escape `.` in plugin_id when forming the synthetic parent
+    # package name. The cache key is `parent.name` and Python's
+    # import machinery treats `.` as a package boundary, so a raw
+    # plugin_id like 'foo.bar' would collide with the parent
+    # registration. Use `_x2e_` (the hex code for `.`) as a clearly
+    # marked, identifier-shaped substitution. Plugin ids containing
+    # the literal substring `_x2e_` would in theory collide with
+    # ids containing `.`; that's vanishingly unlikely. Spotted
+    # across multiple codex review rounds on PR for slopsmith#33.
+    safe_plugin_id = plugin_id.replace(".", "_x2e_") if "." in plugin_id else plugin_id
     if (
         not isinstance(name, str)
         or not name
@@ -58,7 +61,7 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     # by codex review on PR for slopsmith#33. `.` is rejected in
     # `name` above; plugin_ids with `.` are degenerate (manifest
     # convention is identifier-shaped) so the format stays unique.
-    parent_name = f"plugin_{plugin_id}"
+    parent_name = f"plugin_{safe_plugin_id}"
     module_name = f"{parent_name}.{name}"
     cached = sys.modules.get(module_name)
     if cached is not None:
@@ -90,19 +93,25 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
             f"{file_path} or {pkg_init}"
         )
     # Register a synthetic parent package so relative imports inside
-    # a sibling package (`from .child import X`) and explicit lookups
-    # of submodules (`importlib.import_module('plugin_<id>.<name>.X')`)
-    # can resolve through the parent. The parent has an empty
-    # __path__: the plugin's dir is intentionally NOT on it, so that
-    # all sibling lookups continue to flow through this helper and
-    # don't accidentally pull in collision-prone names. Done BEFORE
-    # the bare-reuse check below so a mixed-migration package sibling
-    # still ends up with its parent registered. Spotted by codex
-    # review on PR for slopsmith#33.
+    # a sibling (e.g. `helper.py` doing `from .shared import X`, or
+    # a sibling package's `__init__.py` doing the same) and explicit
+    # lookups of `plugin_<id>.<name>` submodules can resolve through
+    # the parent. The parent's `__path__` points at the plugin's
+    # directory so the standard import machinery can FIND those
+    # siblings — that's what relative imports ultimately consult. It
+    # does NOT undermine the namespace isolation, because:
+    #   • bare `import sibling` still goes through sys.path (the
+    #     transition fallback for plugins that haven't migrated)
+    #   • `import plugin_<id>.sibling` lands in the namespaced
+    #     sys.modules entry — same key load_sibling uses, so caching
+    #     stays coherent
+    # Done BEFORE the bare-reuse check below so a mixed-migration
+    # package sibling still ends up with its parent registered.
+    # Spotted by codex review on PR for slopsmith#33.
     if parent_name not in sys.modules:
         import types
         parent = types.ModuleType(parent_name)
-        parent.__path__ = []
+        parent.__path__ = [str(plugin_dir)]
         sys.modules[parent_name] = parent
     # Mixed-migration reuse: if a bare `import {name}` already loaded
     # THIS plugin's same file (via sys.path during the transition),
@@ -320,20 +329,6 @@ def load_plugins(app: FastAPI, context: dict):
                 continue
             plugin_id = manifest.get("id")
             if not plugin_id:
-                continue
-            # Reject dotted ids at discovery so plugins don't load
-            # successfully and then blow up on the first
-            # `context['load_sibling'](...)` call. The helper's
-            # synthetic parent package machinery requires a
-            # `.`-free id; the manifest convention is identifier-
-            # shaped ids anyway. Spotted by codex review on PR for
-            # slopsmith#33.
-            if "." in plugin_id:
-                print(
-                    f"[Plugin] Refusing to load '{plugin_id}' from "
-                    f"{plugin_dir}: plugin id must not contain '.' "
-                    f"(slopsmith#33). Rename the id in plugin.json."
-                )
                 continue
             if plugin_id in loaded_ids:
                 print(f"[Plugin] Skipping duplicate '{plugin_id}' from {plugins_base_dir}")
