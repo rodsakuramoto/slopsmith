@@ -17,6 +17,88 @@ LOADED_PLUGINS = []
 _PIP_TARGET = Path(os.environ.get("CONFIG_DIR", "/config")) / "pip_packages"
 
 
+def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
+    """Load a sibling .py file from a plugin's directory under a namespaced
+    module name (`plugin_{plugin_id}_{name}`). Mirrors the routes-loading
+    pattern at the top of `load_plugins()` and shares its `sys.modules`
+    cache, so two plugins that each ship `extractor.py` get distinct
+    cached modules instead of stomping each other through `sys.path`.
+    See slopsmith#33."""
+    if not isinstance(name, str) or not name or "/" in name or "\\" in name or name.endswith(".py"):
+        # Reject path traversal and the redundant `.py` suffix — the
+        # helper takes a bare module name. Reject empty / non-string
+        # early so the spec_from_file_location error path doesn't have
+        # to disambiguate.
+        raise ValueError(
+            f"plugin {plugin_id!r}: load_sibling expects a bare module name, got {name!r}"
+        )
+    module_name = f"plugin_{plugin_id}_{name}"
+    cached = sys.modules.get(module_name)
+    if cached is not None:
+        return cached
+    sibling_path = plugin_dir / f"{name}.py"
+    if not sibling_path.is_file():
+        raise ImportError(
+            f"plugin {plugin_id!r}: no sibling module {name!r} at {sibling_path}"
+        )
+    spec = importlib.util.spec_from_file_location(module_name, str(sibling_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(
+            f"plugin {plugin_id!r}: could not build import spec for {name!r}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    # Register before exec so the sibling can self-reference (e.g. for
+    # internal `import plugin_<id>_helper` patterns) without infinite
+    # recursion through this helper.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # On exec failure, drop the half-initialized module so a
+        # retry doesn't return the broken object from cache.
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def _warn_on_module_collisions(plugin_specs):
+    """Scan top-level `.py` files across all plugins about to be loaded.
+    Print a warning for any module name shipped by 2+ plugins, since
+    bare `import <name>` from those plugins will hit the sys.path-based
+    cache and cross-load (slopsmith#33). `routes.py` is excluded because
+    the loader already namespaces it as `plugin_{id}_routes`.
+
+    `plugin_specs` is a list of `(plugin_id, plugin_dir)` tuples for
+    plugins the loader has decided to load (post-dedup).
+    """
+    by_name: dict[str, list[str]] = {}
+    for plugin_id, plugin_dir in plugin_specs:
+        try:
+            for child in plugin_dir.iterdir():
+                if not child.is_file() or child.suffix != ".py":
+                    continue
+                # Skip routes.py — already namespaced. Skip dunder
+                # files like __init__.py — packages handle their own
+                # namespacing if a plugin opts into being a package.
+                if child.name == "routes.py" or child.name.startswith("__"):
+                    continue
+                by_name.setdefault(child.stem, []).append(plugin_id)
+        except OSError:
+            # Unreadable plugin dir — the per-plugin load below will
+            # surface the error in a more useful place; don't warn here.
+            continue
+    for name, ids in by_name.items():
+        if len(ids) < 2:
+            continue
+        ids_quoted = ", ".join(f"'{p}'" for p in sorted(ids))
+        print(
+            f"[Plugin] Module-name collision warning: '{name}.py' is shipped "
+            f"by {len(ids)} plugins ({ids_quoted}). Bare `import {name}` "
+            f"may load the wrong file. Migrate to "
+            f"context['load_sibling']('{name}') — see CLAUDE.md (slopsmith#33)."
+        )
+
+
 def _install_requirements(plugin_dir: Path, plugin_id: str):
     """Install plugin requirements.txt to a persistent location."""
     req_file = plugin_dir / "requirements.txt"
@@ -87,74 +169,99 @@ def load_plugins(app: FastAPI, context: dict):
         sys.path.insert(0, pip_target)
 
     loaded_ids = set()
-
+    # Two-pass discovery so we can warn about cross-plugin module-name
+    # collisions BEFORE any plugin's setup runs (slopsmith#33). The
+    # first pass collects (plugin_id, plugin_dir, manifest, base_dir)
+    # tuples in load order; the second pass actually executes each
+    # plugin's setup with a per-plugin context.
+    plugin_load_specs = []
     for plugins_base_dir in plugin_dirs:
         for plugin_dir in sorted(plugins_base_dir.iterdir()):
             if not plugin_dir.is_dir():
                 continue
-
             manifest_path = plugin_dir / "plugin.json"
             if not manifest_path.exists():
                 continue
-
             try:
                 manifest = json.loads(manifest_path.read_text())
             except Exception as e:
                 print(f"[Plugin] Failed to read {manifest_path}: {e}")
                 continue
-
             plugin_id = manifest.get("id")
             if not plugin_id:
                 continue
-
             if plugin_id in loaded_ids:
                 print(f"[Plugin] Skipping duplicate '{plugin_id}' from {plugins_base_dir}")
                 continue
             loaded_ids.add(plugin_id)
+            plugin_load_specs.append((plugin_id, plugin_dir, manifest, plugins_base_dir))
 
-            # Install plugin requirements if present
-            _install_requirements(plugin_dir, plugin_id)
+    # Warn before loading so authors see the message even if a colliding
+    # plugin's setup itself blows up later in the loop.
+    _warn_on_module_collisions(
+        [(plugin_id, plugin_dir) for plugin_id, plugin_dir, _, _ in plugin_load_specs]
+    )
 
-            # Add plugin directory to sys.path so it can import its own modules
-            plugin_dir_str = str(plugin_dir)
-            if plugin_dir_str not in sys.path:
-                sys.path.insert(0, plugin_dir_str)
+    for plugin_id, plugin_dir, manifest, plugins_base_dir in plugin_load_specs:
+        # Install plugin requirements if present
+        _install_requirements(plugin_dir, plugin_id)
 
-            # Load routes using importlib to avoid module name collisions
-            routes_file = manifest.get("routes")
-            if routes_file:
-                try:
-                    module_name = f"plugin_{plugin_id}_routes"
-                    spec = importlib.util.spec_from_file_location(
-                        module_name, str(plugin_dir / routes_file))
-                    routes_module = importlib.util.module_from_spec(spec)
-                    sys.modules[module_name] = routes_module
-                    spec.loader.exec_module(routes_module)
-                    if hasattr(routes_module, "setup"):
-                        routes_module.setup(app, context)
-                        print(f"[Plugin] Loaded routes for '{plugin_id}'")
-                except Exception as e:
-                    print(f"[Plugin] Failed to load routes for '{plugin_id}': {e}")
-                    import traceback
-                    traceback.print_exc()
+        # Add plugin directory to sys.path so the plugin's bare
+        # `import sibling` keeps working during the slopsmith#33
+        # transition. New plugins should prefer
+        # `context['load_sibling']('sibling')` instead — see
+        # CLAUDE.md / Plugin System / Backend routes.
+        plugin_dir_str = str(plugin_dir)
+        if plugin_dir_str not in sys.path:
+            sys.path.insert(0, plugin_dir_str)
 
-            LOADED_PLUGINS.append({
-                "id": plugin_id,
-                "name": manifest.get("name", plugin_id),
-                "nav": manifest.get("nav"),
-                # `type` is an optional manifest hint for the frontend —
-                # e.g. "visualization" lets the highway viz picker know
-                # this plugin offers a renderer. Absent → no declared
-                # role; plugin is still loaded and scripts run, it just
-                # doesn't show up in role-specific UIs. See slopsmith#36.
-                "type": manifest.get("type"),
-                "has_screen": bool(manifest.get("screen")),
-                "has_script": bool(manifest.get("script")),
-                "has_settings": bool(manifest.get("settings")),
-                "_dir": plugin_dir,
-                "_manifest": manifest,
-            })
-            print(f"[Plugin] Registered '{plugin_id}' ({manifest.get('name', '')})")
+        # Build a per-plugin context: shallow-copy the shared one
+        # (so plugin A can't mutate plugin B's view) and add a
+        # `load_sibling` closure scoped to THIS plugin's id + dir.
+        # The helper namespaces sibling modules as
+        # `plugin_{id}_{name}` so two plugins shipping the same
+        # filename get distinct cached modules. See slopsmith#33.
+        plugin_context = dict(context)
+        plugin_context["load_sibling"] = (
+            lambda name, _pid=plugin_id, _pdir=plugin_dir:
+                _load_plugin_sibling(_pid, _pdir, name)
+        )
+
+        # Load routes using importlib to avoid module name collisions
+        routes_file = manifest.get("routes")
+        if routes_file:
+            try:
+                module_name = f"plugin_{plugin_id}_routes"
+                spec = importlib.util.spec_from_file_location(
+                    module_name, str(plugin_dir / routes_file))
+                routes_module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = routes_module
+                spec.loader.exec_module(routes_module)
+                if hasattr(routes_module, "setup"):
+                    routes_module.setup(app, plugin_context)
+                    print(f"[Plugin] Loaded routes for '{plugin_id}'")
+            except Exception as e:
+                print(f"[Plugin] Failed to load routes for '{plugin_id}': {e}")
+                import traceback
+                traceback.print_exc()
+
+        LOADED_PLUGINS.append({
+            "id": plugin_id,
+            "name": manifest.get("name", plugin_id),
+            "nav": manifest.get("nav"),
+            # `type` is an optional manifest hint for the frontend —
+            # e.g. "visualization" lets the highway viz picker know
+            # this plugin offers a renderer. Absent → no declared
+            # role; plugin is still loaded and scripts run, it just
+            # doesn't show up in role-specific UIs. See slopsmith#36.
+            "type": manifest.get("type"),
+            "has_screen": bool(manifest.get("screen")),
+            "has_script": bool(manifest.get("script")),
+            "has_settings": bool(manifest.get("settings")),
+            "_dir": plugin_dir,
+            "_manifest": manifest,
+        })
+        print(f"[Plugin] Registered '{plugin_id}' ({manifest.get('name', '')})")
 
 
 def _check_plugin_update(plugin_dir: Path) -> dict | None:
