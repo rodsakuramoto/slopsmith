@@ -24,15 +24,30 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     cache, so two plugins that each ship `extractor.py` get distinct
     cached modules instead of stomping each other through `sys.path`.
     See slopsmith#33."""
-    if not isinstance(name, str) or not name or "/" in name or "\\" in name or name.endswith(".py"):
-        # Reject path traversal and the redundant `.py` suffix — the
-        # helper takes a bare module name. Reject empty / non-string
-        # early so the spec_from_file_location error path doesn't have
-        # to disambiguate.
+    if (
+        not isinstance(name, str)
+        or not name
+        or "/" in name
+        or "\\" in name
+        or "." in name
+        or name.endswith(".py")
+    ):
+        # Reject path traversal, the redundant `.py` suffix, and any
+        # `.` (used as our separator below). The helper takes a bare
+        # module name; reject empty / non-string early so the
+        # spec_from_file_location error path doesn't have to
+        # disambiguate.
         raise ValueError(
             f"plugin {plugin_id!r}: load_sibling expects a bare module name, got {name!r}"
         )
-    module_name = f"plugin_{plugin_id}_{name}"
+    # Use `.` as the separator between id and name so the cache key
+    # is unambiguous when plugin_ids or names contain underscores —
+    # `f"plugin_{id}_{name}"` would collide when (id='a_b', name='c')
+    # and (id='a', name='b_c') both map to `plugin_a_b_c`. Spotted
+    # by codex review on PR for slopsmith#33. `.` is rejected in
+    # `name` above; plugin_ids with `.` are degenerate (manifest
+    # convention is identifier-shaped) so the format stays unique.
+    module_name = f"plugin_{plugin_id}.{name}"
     cached = sys.modules.get(module_name)
     if cached is not None:
         return cached
@@ -62,11 +77,21 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
 
 
 def _warn_on_module_collisions(plugin_specs):
-    """Scan top-level `.py` files across all plugins about to be loaded.
-    Print a warning for any module name shipped by 2+ plugins, since
-    bare `import <name>` from those plugins will hit the sys.path-based
-    cache and cross-load (slopsmith#33). `routes.py` is excluded because
-    the loader already namespaces it as `plugin_{id}_routes`.
+    """Scan top-level importable modules across all plugins about to
+    be loaded. Print a warning for any module name shipped by 2+
+    plugins, since bare `import <name>` from those plugins will hit
+    the sys.path-based cache and cross-load (slopsmith#33).
+
+    Both top-level `.py` files AND top-level packages (directories
+    containing `__init__.py`) are scanned — the same collision
+    pattern applies to either, e.g. one plugin's `extractor.py` vs
+    another plugin's `extractor/__init__.py` both produce a shared
+    `sys.modules['extractor']` entry. Spotted by codex review on
+    PR for slopsmith#33.
+
+    `routes.py` itself is excluded because the loader already
+    namespaces it as `plugin_{id}_routes`. Top-level dunder files
+    (like a hypothetical bare `__main__.py`) are excluded too.
 
     `plugin_specs` is a list of `(plugin_id, plugin_dir)` tuples for
     plugins the loader has decided to load (post-dedup).
@@ -75,27 +100,42 @@ def _warn_on_module_collisions(plugin_specs):
     for plugin_id, plugin_dir in plugin_specs:
         try:
             for child in plugin_dir.iterdir():
-                if not child.is_file() or child.suffix != ".py":
+                module_name = None
+                kind = None
+                if child.is_file() and child.suffix == ".py":
+                    if child.name == "routes.py" or child.name.startswith("__"):
+                        continue
+                    module_name = child.stem
+                    kind = "module"
+                elif child.is_dir() and (child / "__init__.py").is_file():
+                    if child.name.startswith("__"):
+                        continue
+                    module_name = child.name
+                    kind = "package"
+                if module_name is None:
                     continue
-                # Skip routes.py — already namespaced. Skip dunder
-                # files like __init__.py — packages handle their own
-                # namespacing if a plugin opts into being a package.
-                if child.name == "routes.py" or child.name.startswith("__"):
-                    continue
-                by_name.setdefault(child.stem, []).append(plugin_id)
+                by_name.setdefault(module_name, []).append((plugin_id, kind))
         except OSError:
             # Unreadable plugin dir — the per-plugin load below will
             # surface the error in a more useful place; don't warn here.
             continue
-    for name, ids in by_name.items():
-        if len(ids) < 2:
+    for name, entries in by_name.items():
+        if len(entries) < 2:
             continue
-        ids_quoted = ", ".join(f"'{p}'" for p in sorted(ids))
+        ids_quoted = ", ".join(
+            f"'{pid}'" for pid, _ in sorted(entries, key=lambda e: e[0])
+        )
+        # Mention which form (module vs package) shows up if it's
+        # not all one or the other — helps maintainers spot the
+        # `extractor.py` vs `extractor/__init__.py` mixed case.
+        kinds = {k for _, k in entries}
+        kind_label = "module/package" if len(kinds) > 1 else next(iter(kinds))
         print(
-            f"[Plugin] Module-name collision warning: '{name}.py' is shipped "
-            f"by {len(ids)} plugins ({ids_quoted}). Bare `import {name}` "
-            f"may load the wrong file. Migrate to "
-            f"context['load_sibling']('{name}') — see CLAUDE.md (slopsmith#33)."
+            f"[Plugin] Module-name collision warning: '{name}' "
+            f"({kind_label}) is shipped by {len(entries)} plugins "
+            f"({ids_quoted}). Bare `import {name}` may load the wrong "
+            f"file. Migrate to context['load_sibling']('{name}') — "
+            f"see CLAUDE.md (slopsmith#33)."
         )
 
 

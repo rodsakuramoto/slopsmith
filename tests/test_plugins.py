@@ -100,9 +100,11 @@ def test_load_sibling_returns_per_plugin_namespaced_modules(tmp_path, reset_plug
     _run_load_plugins(plugins, fake_app, tmp_path)
     assert fake_app.state.alpha_manifest == "alpha-manifest"
     assert fake_app.state.beta_value == 42
-    # The two extractors are namespaced into distinct sys.modules entries.
-    alpha_mod = sys.modules["plugin_alpha_extractor"]
-    beta_mod = sys.modules["plugin_beta_extractor"]
+    # The two extractors are namespaced into distinct sys.modules
+    # entries. `.` separates id and name to disambiguate when either
+    # contains underscores.
+    alpha_mod = sys.modules["plugin_alpha.extractor"]
+    beta_mod = sys.modules["plugin_beta.extractor"]
     assert alpha_mod is not beta_mod
     assert getattr(alpha_mod, "MANIFEST_DIR", None) == "alpha-manifest"
     assert getattr(beta_mod, "BETA_VALUE", None) == 42
@@ -130,7 +132,7 @@ def test_load_sibling_caches_repeat_calls(tmp_path, reset_plugin_state):
     fake_app.state = type("State", (), {})()
     _run_load_plugins(plugins, fake_app, tmp_path)
     assert fake_app.state.same is True
-    assert fake_app.state.instance is sys.modules["plugin_cached_util"].INSTANCE
+    assert fake_app.state.instance is sys.modules["plugin_cached.util"].INSTANCE
 
 
 def test_load_sibling_missing_module_raises_import_error(tmp_path, reset_plugin_state):
@@ -145,7 +147,13 @@ def test_load_sibling_rejects_traversal_and_suffix(tmp_path, reset_plugin_state)
     traverse paths or carry a redundant .py suffix."""
     plugins = reset_plugin_state
     plugin_dir = _make_plugin(tmp_path, "p")
-    for bad in ("", "../etc", "sub/util", "util.py", 123, None):
+    # Reject:
+    # - empty / non-string (bare module name required)
+    # - path traversal (`/`, `\`, `../`)
+    # - redundant `.py` suffix
+    # - any `.` (used as separator in the cache key — would
+    #   otherwise allow ambiguous keys)
+    for bad in ("", "../etc", "sub/util", "util.py", "pkg.helper", 123, None):
         with pytest.raises((ValueError, TypeError)):
             plugins._load_plugin_sibling("p", plugin_dir, bad)
 
@@ -158,7 +166,7 @@ def test_collision_warning_fires_for_shared_module_name(tmp_path, reset_plugin_s
     _run_load_plugins(plugins, type("FakeApp", (), {})(), tmp_path)
     out = capsys.readouterr().out
     assert "Module-name collision warning" in out
-    assert "extractor.py" in out
+    assert "'extractor' (module)" in out
     assert "rs1extract" in out
     assert "discextract" in out
 
@@ -185,6 +193,65 @@ def test_collision_warning_excludes_routes_and_dunders(tmp_path, reset_plugin_st
     _run_load_plugins(plugins, type("FakeApp", (), {})(), tmp_path)
     out = capsys.readouterr().out
     assert "Module-name collision warning" not in out
+
+
+def test_load_sibling_disambiguates_underscored_ids_and_names(tmp_path, reset_plugin_state):
+    """`(plugin_id='a_b', name='c')` and `(plugin_id='a', name='b_c')`
+    must NOT collide in sys.modules. The `.` separator makes the cache
+    key unambiguous (the old `_` separator collapsed both to
+    `plugin_a_b_c`). Codex review on PR for slopsmith#33."""
+    plugins = reset_plugin_state
+    p1 = _make_plugin(tmp_path, "a_b", sibling_files={"c": "WHO = 'a_b/c'\n"})
+    p2 = _make_plugin(tmp_path, "a", sibling_files={"b_c": "WHO = 'a/b_c'\n"})
+    m1 = plugins._load_plugin_sibling("a_b", p1, "c")
+    m2 = plugins._load_plugin_sibling("a", p2, "b_c")
+    assert m1 is not m2
+    assert m1.WHO == "a_b/c"
+    assert m2.WHO == "a/b_c"
+    # Both keys exist independently in sys.modules.
+    assert "plugin_a_b.c" in sys.modules
+    assert "plugin_a.b_c" in sys.modules
+    assert sys.modules["plugin_a_b.c"] is m1
+    assert sys.modules["plugin_a.b_c"] is m2
+
+
+def test_collision_warning_detects_package_form(tmp_path, reset_plugin_state, capsys):
+    """A plugin shipping `extractor/__init__.py` collides with another
+    plugin's `extractor.py` the same way two `.py` files would. The
+    scanner picks up packages too. Codex review on PR for slopsmith#33."""
+    plugins = reset_plugin_state
+    # Plugin one: extractor.py
+    _make_plugin(tmp_path, "as_module", sibling_files={"extractor": "X = 1\n"})
+    # Plugin two: extractor/ (package form)
+    plugin_pkg = _make_plugin(tmp_path, "as_package")
+    pkg_dir = plugin_pkg / "extractor"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("Y = 2\n")
+    _run_load_plugins(plugins, type("FakeApp", (), {})(), tmp_path)
+    out = capsys.readouterr().out
+    assert "Module-name collision warning" in out
+    assert "extractor" in out
+    assert "as_module" in out
+    assert "as_package" in out
+    # The mixed-form label should also appear so the maintainer knows
+    # to look for both shapes.
+    assert "module/package" in out
+
+
+def test_collision_warning_detects_two_packages(tmp_path, reset_plugin_state, capsys):
+    """Two plugins each shipping the SAME package directory form."""
+    plugins = reset_plugin_state
+    for pid in ("plug_a", "plug_b"):
+        plugin_dir = _make_plugin(tmp_path, pid)
+        pkg = plugin_dir / "shared_pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text(f"# {pid}\n")
+    _run_load_plugins(plugins, type("FakeApp", (), {})(), tmp_path)
+    out = capsys.readouterr().out
+    assert "Module-name collision warning" in out
+    assert "shared_pkg" in out
+    assert "plug_a" in out
+    assert "plug_b" in out
 
 
 def test_per_plugin_context_does_not_leak_load_sibling_across_plugins(tmp_path, reset_plugin_state):
