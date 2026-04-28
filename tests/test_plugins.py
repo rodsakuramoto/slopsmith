@@ -195,6 +195,54 @@ def test_collision_warning_excludes_routes_and_dunders(tmp_path, reset_plugin_st
     assert "Module-name collision warning" not in out
 
 
+def test_load_sibling_loads_package_form(tmp_path, reset_plugin_state):
+    """A plugin shipping a sibling as a package directory
+    (`extractor/__init__.py`) should be loadable through
+    load_sibling exactly like a single-file `.py` sibling. The
+    collision-warning scanner directs maintainers of package-form
+    plugins toward load_sibling, so the helper has to actually
+    support them. Codex review on PR for slopsmith#33."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "pkgplugin")
+    pkg_dir = plugin_dir / "extractor"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("ROOT_VALUE = 7\n")
+    (pkg_dir / "child.py").write_text("CHILD_VALUE = 8\n")
+    extractor = plugins._load_plugin_sibling("pkgplugin", plugin_dir, "extractor")
+    assert extractor.ROOT_VALUE == 7
+    # Submodule lookup works because spec carried submodule_search_locations.
+    child = importlib.import_module("plugin_pkgplugin.extractor.child")
+    assert child.CHILD_VALUE == 8
+
+
+def test_load_sibling_prefers_file_over_package_when_both_exist(tmp_path, reset_plugin_state):
+    """If a plugin ships BOTH `extractor.py` and `extractor/__init__.py`
+    in the same directory, the file form wins (matches Python's own
+    import precedence — namespace packages last). Documents the
+    deterministic behavior in case anyone hits this corner."""
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "both")
+    (plugin_dir / "extractor.py").write_text("FROM = 'file'\n")
+    pkg_dir = plugin_dir / "extractor"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("FROM = 'package'\n")
+    extractor = plugins._load_plugin_sibling("both", plugin_dir, "extractor")
+    assert extractor.FROM == "file"
+
+
+def test_load_sibling_missing_in_both_forms_raises_with_useful_message(tmp_path, reset_plugin_state):
+    plugins = reset_plugin_state
+    plugin_dir = _make_plugin(tmp_path, "empty")
+    with pytest.raises(ImportError) as exc:
+        plugins._load_plugin_sibling("empty", plugin_dir, "missing")
+    msg = str(exc.value)
+    # Error message should mention BOTH probed locations so a
+    # confused author sees "I checked here AND here" not "I checked
+    # only the .py form".
+    assert "missing.py" in msg
+    assert "missing" in msg and "__init__.py" in msg
+
+
 def test_load_sibling_disambiguates_underscored_ids_and_names(tmp_path, reset_plugin_state):
     """`(plugin_id='a_b', name='c')` and `(plugin_id='a', name='b_c')`
     must NOT collide in sys.modules. The `.` separator makes the cache

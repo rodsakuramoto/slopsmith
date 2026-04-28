@@ -51,12 +51,31 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     cached = sys.modules.get(module_name)
     if cached is not None:
         return cached
-    sibling_path = plugin_dir / f"{name}.py"
-    if not sibling_path.is_file():
+    # Resolve `name` to either a top-level `.py` file (`extractor.py`)
+    # or a package directory (`extractor/__init__.py`). Package form
+    # is documented as a valid plugin layout (the collision-warning
+    # scanner detects it) so it must be loadable here too. Spotted
+    # by codex review on PR for slopsmith#33.
+    file_path = plugin_dir / f"{name}.py"
+    pkg_init = plugin_dir / name / "__init__.py"
+    submodule_search = None
+    if file_path.is_file():
+        sibling_path = file_path
+    elif pkg_init.is_file():
+        sibling_path = pkg_init
+        # Tell the import system that this is a package whose
+        # submodules can be looked up under `plugin_{id}.{name}.X`.
+        submodule_search = [str(pkg_init.parent)]
+    else:
         raise ImportError(
-            f"plugin {plugin_id!r}: no sibling module {name!r} at {sibling_path}"
+            f"plugin {plugin_id!r}: no sibling module {name!r} at "
+            f"{file_path} or {pkg_init}"
         )
-    spec = importlib.util.spec_from_file_location(module_name, str(sibling_path))
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        str(sibling_path),
+        submodule_search_locations=submodule_search,
+    )
     if spec is None or spec.loader is None:
         raise ImportError(
             f"plugin {plugin_id!r}: could not build import spec for {name!r}"
