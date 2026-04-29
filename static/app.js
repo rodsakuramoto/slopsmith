@@ -1731,7 +1731,9 @@ async function loadPlugins() {
                 details.className = 'bg-dark-700/40 border border-gray-800 rounded-xl overflow-hidden group';
 
                 const summary = document.createElement('summary');
-                summary.className = 'cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-300 hover:bg-dark-700/70 transition flex items-center justify-between';
+                // .plugin-settings-summary class hides the browser's native
+                // disclosure triangle (see style.css) so only our chevron shows.
+                summary.className = 'plugin-settings-summary cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-300 hover:bg-dark-700/70 transition flex items-center justify-between';
                 const labelSpan = document.createElement('span');
                 labelSpan.textContent = plugin.name || plugin.id;
                 summary.appendChild(labelSpan);
