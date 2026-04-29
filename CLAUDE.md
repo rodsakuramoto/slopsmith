@@ -64,7 +64,7 @@ All fields except `id` and `name` are optional. Plugins can have any combination
 
 **Sibling imports — use `load_sibling`, not bare imports** (slopsmith#33). The plugin loader inserts each plugin's directory onto `sys.path` so `from extractor import X` works, but Python caches imports by **module name** in `sys.modules`. Two plugins that each ship a top-level `extractor.py` (or any other generic name — `util.py`, `client.py`, `parser.py`, `config.py`, …) collide: whichever loads first wins, and the other plugin's `from extractor import X` either gets the wrong module or fails with `cannot import name 'X' from 'extractor'`.
 
-The fix is `context["load_sibling"](name)`, which loads the sibling under a namespaced module name (`plugin_<id>.<name>`, with `.` in plugin_id escaped to `_x2e_` so reverse-DNS-style ids like `com.example.foo` work) so each plugin gets its own copy:
+The fix is `context["load_sibling"](name)`, which loads the sibling under a namespaced module name (`plugin_<id>.<name>`, where plugin_id is bijectively encoded so reverse-DNS-style ids like `com.example.foo` work without colliding: `_` -> `_5f_`, `.` -> `_2e_`) so each plugin gets its own copy:
 
 ```python
 def setup(app, context):

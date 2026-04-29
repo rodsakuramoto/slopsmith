@@ -69,14 +69,15 @@ def _safe_plugin_id_for_module_name(plugin_id: str) -> str:
 
 def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     """Load a sibling module from a plugin's directory under a namespaced
-    module name (`plugin_<plugin_id>.<name>`, with `.` in plugin_id
-    escaped to `_x2e_`). Both single-file siblings (`extractor.py`)
-    and package-form siblings (`extractor/__init__.py`) are supported;
-    package form wins when both exist (matches CPython's import
-    precedence). Mirrors the routes-loading pattern in `load_plugins()`
-    and shares its `sys.modules` cache, so two plugins that each ship
-    `extractor.py` get distinct cached modules instead of stomping each
-    other through `sys.path`. See slopsmith#33."""
+    module name (`plugin_<plugin_id>.<name>`, with plugin_id
+    bijectively encoded by `_safe_plugin_id_for_module_name` —
+    `_` -> `_5f_`, `.` -> `_2e_`). Both single-file siblings
+    (`extractor.py`) and package-form siblings (`extractor/__init__.py`)
+    are supported; package form wins when both exist (matches CPython's
+    import precedence). Mirrors the routes-loading pattern in
+    `load_plugins()` and shares its `sys.modules` cache, so two plugins
+    that each ship `extractor.py` get distinct cached modules instead
+    of stomping each other through `sys.path`. See slopsmith#33."""
     if not isinstance(plugin_id, str) or not plugin_id:
         raise ValueError(
             f"load_sibling: plugin_id must be a non-empty string, got {plugin_id!r}"
@@ -432,8 +433,9 @@ def load_plugins(app: FastAPI, context: dict):
         # stored in context are still the same objects across
         # plugins, so e.g. `ctx['meta_db']` mutations are still
         # observable everywhere by design.) The helper namespaces
-        # sibling modules as `plugin_<id>.<name>` (with `.` in
-        # plugin_id escaped to `_x2e_`) so two plugins shipping the
+        # sibling modules as `plugin_<id>.<name>` (with plugin_id
+        # bijectively encoded by _safe_plugin_id_for_module_name:
+        # `_` -> `_5f_`, `.` -> `_2e_`) so two plugins shipping the
         # same filename get distinct cached modules. See
         # slopsmith#33.
         plugin_context = dict(context)
