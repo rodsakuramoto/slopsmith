@@ -27,7 +27,7 @@ my-song.sloppak/
 │   ├── rhythm.json
 │   └── bass.json
 ├── stems/
-│   ├── full.ogg              # Mixed audio (always present)
+│   ├── full.ogg              # Mixed audio (initial single-stem output; may be absent after stem splitting)
 │   ├── guitar.ogg            # Optional individual stems
 │   ├── bass.ogg
 │   ├── drums.ogg
@@ -39,7 +39,7 @@ my-song.sloppak/
 
 Three rules to remember:
 
-1. **`manifest.yaml` is the index.** Nothing inside the sloppak is auto-discovered — every file path is listed in the manifest. This makes the format predictable: no scanning, no guessing.
+1. **`manifest.yaml` is the index.** Nothing inside the sloppak is auto-discovered — every file path is listed in the manifest. This makes the format predictable: no scanning, no guessing. (One historical exception: the cover-art handler in `server.py` falls back to `cover.jpg` when `manifest.cover` is missing. New code should not add similar filename fallbacks.)
 2. **Filenames in `manifest.yaml` are POSIX paths**, relative to the sloppak root (forward slashes, no leading `/`).
 3. **YAML for the manifest, JSON for everything else.** YAML is hand-editable for users; JSON is fast-parsed and easy to round-trip in code.
 
@@ -94,7 +94,7 @@ arrangements:
     capo: 0
 ```
 
-- `tuning` is **always a six-element list of semitone offsets** from standard `E2 A2 D2 G3 B3 E4`. For bass, the four bass strings are at indices 0–3; the other two slots are `0`. (See `lib/tunings.py` for naming.)
+- `tuning` is a list of semitone offsets from standard `E2 A2 D2 G3 B3 E4`. **Six elements is the Rocksmith convention** and the only length `lib/tunings.py` produces friendly names for; 5- and 7-string content is accepted by the loader and falls through to a numeric label. For bass, the four bass strings are at indices 0–3; the other two slots are `0`. Consumers should not hard-code `len(tuning) == 6`.
 - `name` controls the sort order in the UI: `Lead > Combo > Rhythm > Bass > everything else`.
 - Manifest-level `tuning` and `capo` **override** anything embedded in the arrangement JSON. The arrangement JSON's own values are fallbacks.
 
@@ -115,7 +115,7 @@ stems:
 
 - `id` is referenced by the Stems plugin and any other consumer; keep it stable.
 - `default` accepts `true`/`false`, or strings (`"on"`/`"off"`/`"true"`/etc.) for hand-edited manifests.
-- The first sloppak ever written by `lib/sloppak_convert.py` always has at least `{id: full, ...}` — treat `full` as a conventional "mixed" track.
+- A freshly converted sloppak from `lib/sloppak_convert.py` starts with a single `{id: full, file: stems/full.ogg, ...}` entry. After stem-splitting (Demucs), `full.ogg` is removed and the manifest is rewritten with per-instrument entries (`guitar`, `bass`, `drums`, `vocals`, `other`). The format requires only that `stems` is non-empty — there's no specific filename or id that must always be present.
 
 ### 2.3. `lyrics`
 
@@ -496,7 +496,7 @@ If you add a new file type or manifest key:
 1. **Round-trip test**: write a sample, load it, write it back, compare. Add to `tests/test_sloppak.py`.
 2. **Backward-compat test**: load a sloppak that *doesn't* have your new key — your code must not crash, and the song must still play.
 3. **Hand-edit test**: open the directory form in a text editor, change a field by hand, reload Slopsmith. The format is meant to be hand-editable; your additions should preserve that.
-4. **Both forms**: test with both the directory form and the zipped form. The unpack cache is mtime-checksummed, so you can repackage and reload without restarting the server.
+4. **Both forms**: test with both the directory form and the zipped form. The unpack cache is invalidated based on mtime and size, so you can repackage and reload without restarting the server.
 
 The full pytest suite (`pytest`) must stay green before any PR.
 
