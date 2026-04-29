@@ -16,25 +16,6 @@ LOADED_PLUGINS = []
 # Persistent pip install location (survives container restarts)
 _PIP_TARGET = Path(os.environ.get("CONFIG_DIR", "/config")) / "pip_packages"
 
-# Per-module-name locks for `_load_plugin_sibling` so two threads
-# calling `ctx['load_sibling']('extractor')` concurrently don't both
-# see the half-initialized module after the first has registered it
-# in sys.modules but before exec_module finishes. Stored in a dict
-# guarded by an outer lock — a fresh per-name lock is created on
-# first contention. Spotted by codex review on PR for slopsmith#33.
-import threading as _threading
-_sibling_lock_dict_lock = _threading.Lock()
-_sibling_locks: dict[str, _threading.Lock] = {}
-
-
-def _get_sibling_lock(module_name: str) -> _threading.Lock:
-    with _sibling_lock_dict_lock:
-        lock = _sibling_locks.get(module_name)
-        if lock is None:
-            lock = _threading.Lock()
-            _sibling_locks[module_name] = lock
-        return lock
-
 
 def _safe_plugin_id_for_module_name(plugin_id: str) -> str:
     """Bijectively encode a plugin_id for safe use as part of a Python
@@ -82,7 +63,6 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
         raise ValueError(
             f"load_sibling: plugin_id must be a non-empty string, got {plugin_id!r}"
         )
-    safe_plugin_id = _safe_plugin_id_for_module_name(plugin_id)
     if (
         not isinstance(name, str)
         or not name
@@ -92,142 +72,60 @@ def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
         or name.endswith(".py")
     ):
         # Reject path traversal, the redundant `.py` suffix, and any
-        # `.` (used as our separator below). The helper takes a bare
-        # module name; reject empty / non-string early so the
-        # spec_from_file_location error path doesn't have to
-        # disambiguate.
+        # `.` (the separator between id and name in the cache key).
         raise ValueError(
             f"plugin {plugin_id!r}: load_sibling expects a bare module name, got {name!r}"
         )
-    # Use `.` as the separator between id and name so the cache key
-    # is unambiguous when plugin_ids or names contain underscores —
-    # an `_` separator would collide when (id='a_b', name='c') and
-    # (id='a', name='b_c') both map to `plugin_a_b_c`. `.` is
-    # rejected in `name` above; `.` in plugin_id is escaped via
-    # `safe_plugin_id` so the separator stays unambiguous. Spotted
-    # across multiple codex review rounds on PR for slopsmith#33.
+    safe_plugin_id = _safe_plugin_id_for_module_name(plugin_id)
     parent_name = f"plugin_{safe_plugin_id}"
     module_name = f"{parent_name}.{name}"
-    # NB: no pre-lock cached lookup here. A concurrent first-time
-    # caller can briefly observe a half-initialized module that the
-    # FIRST caller registered via `sys.modules[module_name] = module`
-    # before `exec_module` finished. The cached check happens inside
-    # the lock below so it serializes against the load. Spotted by
-    # codex review on PR for slopsmith#33 round 8.
-    # Resolve `name` to either a top-level `.py` file (`extractor.py`)
-    # or a package directory (`extractor/__init__.py`). Package form
-    # is documented as a valid plugin layout (the collision-warning
-    # scanner detects it) so it must be loadable here too. Spotted
-    # by codex review on PR for slopsmith#33.
-    # Match CPython's import-resolution precedence: regular packages
-    # win over same-named `.py` modules. If a plugin ships both
-    # `extractor.py` and `extractor/__init__.py`, bare `import
-    # extractor` and `load_sibling('extractor')` must execute the
-    # same code path so plugins don't see split state. Spotted by
-    # codex review on PR for slopsmith#33.
+
+    # Pre-check that the sibling actually exists before we hand off
+    # to importlib.import_module — its ModuleNotFoundError is less
+    # specific than the message we want to surface (which lists both
+    # probed paths so a confused author sees "I checked here AND
+    # here").
     file_path = plugin_dir / f"{name}.py"
     pkg_init = plugin_dir / name / "__init__.py"
-    submodule_search = None
-    if pkg_init.is_file():
-        sibling_path = pkg_init
-        # Tell the import system that this is a package whose
-        # submodules can be looked up under `plugin_{id}.{name}.X`.
-        submodule_search = [str(pkg_init.parent)]
-    elif file_path.is_file():
-        sibling_path = file_path
-    else:
+    if not file_path.is_file() and not pkg_init.is_file():
         raise ImportError(
             f"plugin {plugin_id!r}: no sibling module {name!r} at "
             f"{file_path} or {pkg_init}"
         )
-    # Register a synthetic parent package so relative imports inside
-    # a sibling (e.g. `helper.py` doing `from .shared import X`, or
-    # a sibling package's `__init__.py` doing the same) and explicit
-    # lookups of `plugin_<id>.<name>` submodules can resolve through
-    # the parent. The parent's `__path__` points at the plugin's
-    # directory so the standard import machinery can FIND those
-    # siblings — that's what relative imports ultimately consult. It
-    # does NOT undermine the namespace isolation, because:
+
+    # Register a synthetic parent package so the standard import
+    # machinery can find this plugin's siblings via the parent's
+    # `__path__`. The parent points at the plugin's directory; this
+    # is what relative imports between siblings consult. It does NOT
+    # undermine the namespace isolation, because:
     #   • bare `import sibling` still goes through sys.path (the
     #     transition fallback for plugins that haven't migrated)
     #   • `import plugin_<id>.sibling` lands in the namespaced
-    #     sys.modules entry — same key load_sibling uses, so caching
-    #     stays coherent
-    # Done BEFORE the bare-reuse check below so a mixed-migration
-    # package sibling still ends up with its parent registered.
-    # Spotted by codex review on PR for slopsmith#33.
-    # Use setdefault so two threads loading different siblings for
-    # the same plugin can't both pass an `in sys.modules` check and
-    # then overwrite each other's parent registration. Without this,
-    # a losing thread's freshly-built parent would replace the
-    # winner's parent that already had child attributes attached
-    # via setattr below — `from . import sibling` lookups would
-    # then fail. setdefault is atomic under the GIL, so the loser's
-    # ModuleType is silently discarded. Spotted by Copilot review
-    # on PR #105 round 2.
+    #     sys.modules entry — same key load_sibling produces
+    # `setdefault` is atomic under the GIL so two threads racing to
+    # create the parent can't overwrite each other's registration.
+    # Spotted by codex/Copilot reviews on PRs for slopsmith#33.
     import types
     new_parent = types.ModuleType(parent_name)
     new_parent.__path__ = [str(plugin_dir)]
     sys.modules.setdefault(parent_name, new_parent)
-    # NB: We DON'T reuse bare-imported same-named modules here. The
-    # alias path looked attractive — module-level singletons stay
-    # shared across `import sibling` and `load_sibling('sibling')` —
-    # but the bare module's `__package__`/`__spec__.name`/`__name__`
-    # remain set to the un-namespaced bare name. Any relative import
-    # that runs after the alias (lazy `from .shared import X` inside
-    # a function, or `importlib.import_module(__package__ + '.X')`)
-    # then routes through the bare global cache, undoing the
-    # isolation. The right answer for plugins that mix bare imports
-    # with load_sibling on the SAME module is "stop mixing"; the
-    # transition cost is that the module's state exists under two
-    # cache keys until the bare imports are removed. Documented in
-    # CLAUDE.md / codex review on PR for slopsmith#33.
 
-    # Per-module lock so concurrent first-time callers of load_sibling
-    # serialize through exec_module — the second caller waits for the
-    # first to finish before observing the registered module instead
-    # of seeing a half-initialized object. Spotted by codex review on
-    # PR for slopsmith#33.
-    with _get_sibling_lock(module_name):
-        cached = sys.modules.get(module_name)
-        if cached is not None:
-            return cached
-        spec = importlib.util.spec_from_file_location(
-            module_name,
-            str(sibling_path),
-            submodule_search_locations=submodule_search,
-        )
-        if spec is None or spec.loader is None:
-            raise ImportError(
-                f"plugin {plugin_id!r}: could not build import spec for {name!r}"
-            )
-        module = importlib.util.module_from_spec(spec)
-        # Register before exec so the sibling can self-reference (e.g.
-        # for internal `import plugin_<id>.helper` patterns) without
-        # infinite recursion through this helper. Concurrent callers
-        # don't observe this half-initialized state because they're
-        # blocked on the lock.
-        sys.modules[module_name] = module
-        try:
-            spec.loader.exec_module(module)
-        except BaseException:
-            # On exec failure, drop the half-initialized module so a
-            # retry doesn't return the broken object from cache.
-            sys.modules.pop(module_name, None)
-            raise
-        # Expose the loaded child as an attribute on the synthetic
-        # parent. Python's standard import machinery does this after
-        # `_find_and_load` so that `from . import sibling` and
-        # `from .. import sibling` work via attribute lookup. Without
-        # it, plugins that mix load_sibling with package-style
-        # relative imports get `ImportError: cannot import name
-        # 'sibling' from 'plugin_<id>'` even though sys.modules has
-        # the module. Spotted by codex review on PR for slopsmith#33
-        # round 9.
-        parent = sys.modules.get(parent_name)
-        if parent is not None:
-            setattr(parent, name, module)
-        return module
+    # Delegate the actual load to importlib.import_module. It uses
+    # Python's per-module import lock, so concurrent callers — via
+    # load_sibling, relative imports inside another sibling
+    # (`from . import extractor`), or an explicit
+    # `importlib.import_module('plugin_<id>.<name>')` from anywhere
+    # — all serialize through the SAME lock. A rolled-our-own lock
+    # could only coordinate load_sibling callers; the standard lock
+    # plugs cross-API races where the half-initialized module would
+    # otherwise leak. Python's standard finder walks the parent's
+    # `__path__`, picks package over file when both exist (matching
+    # CPython precedence), exposes the child as an attribute on the
+    # parent post-load (`setattr(parent, name, child)`), and cleans
+    # up sys.modules on exec failure — all the things this helper
+    # used to do by hand. Spotted by Copilot review on PR #105
+    # round 5.
+    return importlib.import_module(module_name)
 
 
 def _warn_on_module_collisions(plugin_specs):
@@ -388,18 +286,25 @@ def load_plugins(app: FastAPI, context: dict):
                 print(f"[Plugin] Failed to read {manifest_path}: {e}")
                 continue
             plugin_id = manifest.get("id")
-            if not plugin_id:
+            if plugin_id is None:
+                # No `id` key at all — silently skip (existing
+                # behavior; manifests without an id were never
+                # meant to be valid).
                 continue
-            # Validate type explicitly. A malformed manifest with a
-            # non-string id (number, list, ...) would otherwise crash
-            # later when `.replace()` runs in
-            # `_safe_plugin_id_for_module_name`. Spotted by Copilot
-            # review on PR #105 round 3.
+            # Type-check BEFORE the empty check: falsy non-string
+            # values (`{"id": 0}`, `{"id": []}`) should produce the
+            # explicit "must be a string" warning, not be silently
+            # dropped. Spotted by Copilot review on PR #105 round 4.
             if not isinstance(plugin_id, str):
                 print(
                     f"[Plugin] Skipping {manifest_path}: 'id' must be a string, "
                     f"got {type(plugin_id).__name__} ({plugin_id!r})"
                 )
+                continue
+            if not plugin_id:
+                # Empty-string id — silently skip (matches the
+                # original `if not plugin_id: continue` semantics
+                # for empty strings).
                 continue
             if plugin_id in loaded_ids:
                 print(f"[Plugin] Skipping duplicate '{plugin_id}' from {plugins_base_dir}")

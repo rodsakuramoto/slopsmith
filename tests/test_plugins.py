@@ -35,18 +35,17 @@ def reset_plugin_state():
       * any `plugin_*` keys we add to `sys.modules`
       * the bare names this module simulates (`util`, `extractor`)
       * `sys.path` — `plugins.load_plugins()` mutates it
-      * `plugins._sibling_locks` — the per-module-name lock dict
     so each test runs against a clean slate AND nothing leaks into
-    the rest of the suite.
+    the rest of the suite. Per-module locks are owned by the
+    standard import system (`importlib._bootstrap._module_locks`)
+    and are not our responsibility to reset.
     """
     plugins = importlib.import_module("plugins")
     saved_loaded = list(plugins.LOADED_PLUGINS)
     saved_modules = {k: v for k, v in sys.modules.items() if k.startswith("plugin_")}
     saved_bare = {k: sys.modules[k] for k in _BARE_NAMES_USED if k in sys.modules}
     saved_path = list(sys.path)
-    saved_locks = dict(plugins._sibling_locks)
     plugins.LOADED_PLUGINS.clear()
-    plugins._sibling_locks.clear()
     for k in list(sys.modules):
         if k.startswith("plugin_") or k in _BARE_NAMES_USED:
             del sys.modules[k]
@@ -55,8 +54,6 @@ def reset_plugin_state():
     finally:
         plugins.LOADED_PLUGINS.clear()
         plugins.LOADED_PLUGINS.extend(saved_loaded)
-        plugins._sibling_locks.clear()
-        plugins._sibling_locks.update(saved_locks)
         for k in list(sys.modules):
             if k.startswith("plugin_") or k in _BARE_NAMES_USED:
                 del sys.modules[k]
@@ -506,6 +503,26 @@ def test_load_plugins_skips_non_string_id(tmp_path, reset_plugin_state, capsys):
     loaded_ids = {p["id"] for p in plugins.LOADED_PLUGINS}
     assert 42 not in loaded_ids
     assert "good" in loaded_ids
+
+
+def test_load_plugins_warns_on_falsy_non_string_id(tmp_path, reset_plugin_state, capsys):
+    """`{"id": 0}` and `{"id": []}` are falsy non-strings. The
+    type-check must run BEFORE the falsy-empty check so the user
+    gets the explicit "must be a string" warning instead of a
+    silent skip. Copilot review on PR #105 round 4."""
+    plugins = reset_plugin_state
+    for i, bad_value in enumerate(("0", "[]", "false")):  # JSON literals
+        bad_dir = tmp_path / f"bad{i}"
+        bad_dir.mkdir()
+        (bad_dir / "plugin.json").write_text(f'{{"id": {bad_value}, "name": "x"}}')
+    _run_load_plugins(plugins, type("FakeApp", (), {})(), tmp_path)
+    out = capsys.readouterr().out
+    # Each malformed manifest produces a "must be a string" warning;
+    # none are silently dropped.
+    assert out.count("must be a string") == 3
+    assert "int" in out  # for {"id": 0}
+    assert "list" in out  # for {"id": []}
+    assert "bool" in out  # for {"id": false}
 
 
 def test_load_plugins_escapes_dotted_id_in_routes_module_name(tmp_path, reset_plugin_state):
