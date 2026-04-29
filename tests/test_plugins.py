@@ -27,7 +27,7 @@ _BARE_NAMES_USED = ("util", "extractor")
 
 
 @pytest.fixture()
-def reset_plugin_state():
+def reset_plugin_state(monkeypatch):
     """Clear loader module-level state and restore on teardown.
 
     Saves and restores:
@@ -35,11 +35,14 @@ def reset_plugin_state():
       * any `plugin_*` keys we add to `sys.modules`
       * the bare names this module simulates (`util`, `extractor`)
       * `sys.path` — `plugins.load_plugins()` mutates it
-    so each test runs against a clean slate AND nothing leaks into
-    the rest of the suite. Per-module locks are owned by the
-    standard import system (`importlib._bootstrap._module_locks`)
-    and are not our responsibility to reset.
+    Also unsets `SLOPSMITH_PLUGINS_DIR` for the test's duration
+    (via monkeypatch) so a CI env that pre-sets it can't leak
+    real user plugins into a tmp_path-driven test. Per-module
+    locks are owned by the standard import system
+    (`importlib._bootstrap._module_locks`) and are not our
+    responsibility to reset.
     """
+    monkeypatch.delenv("SLOPSMITH_PLUGINS_DIR", raising=False)
     plugins = importlib.import_module("plugins")
     saved_loaded = list(plugins.LOADED_PLUGINS)
     saved_modules = {k: v for k, v in sys.modules.items() if k.startswith("plugin_")}
