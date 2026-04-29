@@ -244,6 +244,8 @@ lyrics.json            Syllable-level lyrics (optional)
 
 Sloppak is the preferred format for new features. The [Sloppak Converter plugin](https://github.com/topkoa/slopsmith-plugin-sloppak-converter) converts PSARCs to sloppak, and the [Stems plugin](https://github.com/topkoa/slopsmith-plugin-stems) provides live stem mixing for sloppak songs.
 
+**Full developer reference:** [docs/sloppak-spec.md](docs/sloppak-spec.md) — manifest schema, arrangement wire format, and how to extend the format with new data types (drum tab, key/scale annotations, etc.).
+
 **Key code:**
 - `lib/sloppak.py` — format detection, zip/directory resolution, metadata extraction, song loading
 - `lib/sloppak_convert.py` — PSARC to sloppak conversion pipeline, Demucs stem splitting
