@@ -1732,10 +1732,25 @@ async function loadPlugins() {
 
                 const summary = document.createElement('summary');
                 summary.className = 'cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-300 hover:bg-dark-700/70 transition flex items-center justify-between';
-                const label = plugin.name || plugin.id;
-                summary.innerHTML = `
-                    <span>${label}</span>
-                    <svg class="w-4 h-4 text-gray-500 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>`;
+                const labelSpan = document.createElement('span');
+                labelSpan.textContent = plugin.name || plugin.id;
+                summary.appendChild(labelSpan);
+                // Chevron icon — built via setAttributeNS so the SVG sits in
+                // the SVG namespace and renders correctly. Plugin label is
+                // appended as text above so manifest values can't inject HTML.
+                const svgNS = 'http://www.w3.org/2000/svg';
+                const svg = document.createElementNS(svgNS, 'svg');
+                svg.setAttribute('class', 'w-4 h-4 text-gray-500 transition-transform group-open:rotate-180');
+                svg.setAttribute('fill', 'none');
+                svg.setAttribute('stroke', 'currentColor');
+                svg.setAttribute('viewBox', '0 0 24 24');
+                const path = document.createElementNS(svgNS, 'path');
+                path.setAttribute('stroke-linecap', 'round');
+                path.setAttribute('stroke-linejoin', 'round');
+                path.setAttribute('stroke-width', '2');
+                path.setAttribute('d', 'M19 9l-7 7-7-7');
+                svg.appendChild(path);
+                summary.appendChild(svg);
                 details.appendChild(summary);
 
                 const body = document.createElement('div');
