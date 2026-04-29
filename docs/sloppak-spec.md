@@ -139,7 +139,7 @@ If present, points at a JSON file containing a flat list of syllable objects:
 
 ## 3. Arrangement JSON — the wire format
 
-Arrangement JSON files use the **wire format** — the exact same shape Slopsmith streams over `/ws/highway/{filename}`. This means a sloppak's `arrangements/*.json` files double as a frozen recording of the WebSocket payload, and the same parser handles both.
+Arrangement JSON files use the **wire format** produced by `arrangement_to_wire()` — the on-disk representation of a complete arrangement. Slopsmith's `/ws/highway/{filename}` endpoint transports similar data as a sequence of typed messages (`notes`, `chords`, `anchors`, `chord_templates`, `phrases`, …) rather than as one identical top-level JSON object, and individual frames may drop fields the on-disk format keeps (e.g. WS `chord_templates` currently omits `fingers`). In practice, the WebSocket stream reuses the same per-object field names where applicable, but it should not be treated as a byte-for-byte match for `arrangements/*.json`.
 
 The authoritative serializer/deserializer is in [lib/song.py](../lib/song.py):
 
