@@ -4,7 +4,17 @@
  */
 function createHighway() {
     let canvas, ctx, ws;
+    // Two notions of "now" — kept deliberately separate:
+    //   chartTime — audio-aligned clock. What getTime() exposes to plugins
+    //               (scoring, note detection, etc.) and what setTime() receives.
+    //   currentTime — rendering clock. Equal to chartTime + avOffsetSec, so the
+    //                 draw code can shift visual notes forward to compensate
+    //                 for audio-output pipeline latency without plugins having
+    //                 to care about the offset.
+    // avOffsetSec is set by setAvOffset(ms); default 0 means old behavior.
+    let chartTime = 0;
     let currentTime = 0;
+    let avOffsetSec = 0;
     let animFrame = null;
     let _connectOpts = {};
     let _resizeContainer = null;
@@ -19,6 +29,12 @@ function createHighway() {
     let sections = [];
     let anchors = [];
     let chordTemplates = [];
+    // Number of strings on the active arrangement. Updated from the
+    // `stringCount` field in each `song_info` WS message; falls back
+    // to `tuning.length` (works for older servers that don't yet emit
+    // stringCount) then to 6 (final safety). 4 = bass, 6 = guitar,
+    // 7+ = extended-range GP imports.
+    let stringCount = 6;
     let lyrics = [];
     let toneChanges = [];
     let toneBase = "";
@@ -44,8 +60,14 @@ function createHighway() {
     let _drawHooks = [];  // plugin draw callbacks: fn(ctx, W, H)
     let _renderScale = parseFloat(localStorage.getItem('renderScale') || '1');  // 1 = full, 0.5 = half res
     let _inverted = localStorage.getItem('invertHighway') === 'true';
-    function si(s) { return _inverted ? 5 - s : s; }  // string index mapper for inversion
     let _lefty = localStorage.getItem('lefty') === '1';
+    let _lastChordOnFretLine = null;  // chord object currently shown on fret line
+    let _chordFretLineNotes = [];  // notes to render on fret line
+    const _frameMismatchWarned = new Set();  // chord ids already warned about (slopsmith#88)
+    // Per-chord render info, computed lazily once per src array (slopsmith#88).
+    const _chordRenderInfo = new WeakMap();  // chord -> { chainIndex, chainLen, isFull, baseFret }
+    let _chordRenderCacheSrc = null;
+    let _chordRenderCacheInverted = null;
 
     // Rendering config
     const VISIBLE_SECONDS = 3.0;
@@ -53,17 +75,24 @@ function createHighway() {
     const Z_MAX = 10.0;
     const BG = '#080810';
 
+    // String color palettes. Indices 0–5 cover guitar / bass; 6–7
+    // are added for extended-range GP imports (7-string, 8-string).
+    // Lookups still use `|| '#888'` as a safety fallback for any
+    // out-of-range index.
     const STRING_COLORS = [
         '#cc0000', '#cca800', '#0066cc',
         '#cc6600', '#00cc66', '#9900cc',
+        '#cc00aa', '#00cccc',  // 7th = magenta, 8th = teal
     ];
     const STRING_DIM = [
         '#520000', '#524200', '#002952',
         '#522900', '#005229', '#3d0052',
+        '#520042', '#005252',
     ];
     const STRING_BRIGHT = [
         '#ff3c3c', '#ffe040', '#3c9cff',
         '#ff9c3c', '#3cff9c', '#cc3cff',
+        '#ff3ce0', '#3ce0e0',
     ];
 
     // ── Projection ───────────────────────────────────────────────────────
@@ -103,7 +132,7 @@ function createHighway() {
         const src = _filteredAnchors !== null ? _filteredAnchors : anchors;
         let maxFret = 0;
         for (const anc of src) {
-            if (anc.time > t + VISIBLE_SECONDS) break;
+            if (anc.time > t + VISIBLE_SECONDS + 2) break; // Skip anchors well in the future (with a little buffer to avoid moving early the cutoff)
             if (anc.time + 2 < t) continue;  // skip anchors well in the past
             const top = anc.fret + anc.width;
             if (top > maxFret) maxFret = top;
@@ -112,7 +141,16 @@ function createHighway() {
     }
 
     function updateSmoothAnchor(anchor, dt) {
-        const rate = Math.min(1.0 * dt, 1.0);
+        // Smoothing rate balances two regressions seen in slopsmith#88:
+        //   rate=1.0 (was) snapped to target every frame — visible jitter
+        //   on aerial passages where anchors moved every few frames.
+        //   rate=0.15 (Knaifhogg) was too gentle — large jumps (low frets
+        //   to teens) took ~3s to catch up, pushing upcoming notes off the
+        //   right edge.
+        // 0.4 splits the difference: half-life ~1.7s, but the per-frame
+        // step at 60fps is ~0.0067 — still small enough that frame-to-frame
+        // changes read as smooth.
+        const rate = Math.min(0.4 * dt, 0.4);
         // Look ahead: use the widest fret range across all visible anchors
         const lookAheadMax = getMaxFretInWindow(currentTime);
         const currentMax = anchor.fret + anchor.width;
@@ -197,6 +235,7 @@ function createHighway() {
             beats,
             sections,
             chordTemplates,
+            stringCount,
             lyrics,
             toneChanges,
             toneBase,
@@ -521,10 +560,17 @@ function createHighway() {
         const strTop = H * 0.83;
         const strBot = H * 0.95;
         const margin = W * 0.03;
-        for (let i = 0; i < 6; i++) {
-            const yi = _inverted ? 5 - i : i;
-            const y = strTop + (yi / 5) * (strBot - strTop);
-            ctx.strokeStyle = STRING_COLORS[i];
+        // Adapt to the active arrangement's string count: 4 for bass,
+        // 6 for guitar, 7+ for extended-range GP imports. The visible
+        // band [strTop..strBot] gets divided into (stringCount - 1)
+        // slots, so 4 strings spread across the full band rather than
+        // using the upper 4/6ths of the 6-string layout. The Math.max
+        // guards against a hypothetical 1-string instrument (denom=0).
+        const span = Math.max(1, stringCount - 1);
+        for (let i = 0; i < stringCount; i++) {
+            const yi = _inverted ? (stringCount - 1 - i) : i;
+            const y = strTop + (yi / span) * (strBot - strTop);
+            ctx.strokeStyle = STRING_COLORS[i] || '#888';
             ctx.lineWidth = 3;
             ctx.beginPath();
             ctx.moveTo(margin, y);
@@ -951,69 +997,164 @@ function createHighway() {
         // See drawNotes — _filteredChords is null for slider-disabled
         // sources so we fall through to the flat chords array.
         const src = _filteredChords !== null ? _filteredChords : chords;
+        _ensureChordRenderCache(src);
+
         const tMin = currentTime - 0.25;
         const tMax = currentTime + VISIBLE_SECONDS;
-        let lo = bsearchChords(src, tMin);
-        let hi = bsearchChords(src, tMax);
+        const lo = bsearchChords(src, tMin);
+        const hi = bsearchChords(src, tMax);
+
+        _updateFretLinePreview(src, lo, hi);
+        _drawFretLineChordPreview(W, H);
 
         for (let i = hi - 1; i >= lo; i--) {
             const ch = src[i];
             const p = project(ch.t - currentTime);
             if (!p) continue;
 
+            const info = _chordRenderInfo.get(ch);
+            const { isFull, baseFret } = info;
+
             const sorted = [...ch.notes].sort((a, b) => _inverted ? b.s - a.s : a.s - b.s);
             const sz = Math.max(10, 28 * p.scale * (H / 900));
             const spread = sz * 0.85;
-            const totalH = spread * (sorted.length - 1);
-
-            // Bracket connector
-            const minSpread = sz + 16;  // full note size + gap (accounts for glow)
+            const minSpread = sz + 16 * p.scale;
             const actualSpread = Math.max(spread, minSpread);
-            const actualTotalH = actualSpread * (sorted.length - 1);
-            if (sorted.length >= 2) {
-                const positions = sorted.map((cn, j) => ({
+            const actualTotalH = actualSpread * Math.max(0, sorted.length - 1);
+
+            const { tmpl, getTemplateFret, isOpen } = getChordTemplateInfo(ch.id, chordTemplates);
+            const nonZeroNotes = sorted.filter(cn => !isOpen(cn));
+            const hasNonZero = nonZeroNotes.length >= 1;
+
+            const frameLeftFret = baseFret;
+            const frameRightFret = baseFret + CHORD_FRAME_FRETS;
+
+            // Frame validation — log once per chord id rather than every frame.
+            if (hasNonZero && !_frameMismatchWarned.has(ch.id)) {
+                const notesInFrame = nonZeroNotes.every(cn => cn.f >= frameLeftFret && cn.f <= frameRightFret);
+                if (!notesInFrame) {
+                    _frameMismatchWarned.add(ch.id);
+                    console.warn('Chord frame mismatch:', ch.id, { frameLeftFret, frameRightFret, nonZeroFrets: nonZeroNotes.map(cn => cn.f) });
+                }
+            }
+
+            // X span between fretted notes (excluding open strings)
+            const xMin = hasNonZero ? Math.min(...nonZeroNotes.map(cn => fretX(cn.f, p.scale, W))) : null;
+            const xMax = hasNonZero ? Math.max(...nonZeroNotes.map(cn => fretX(cn.f, p.scale, W))) : null;
+
+            // Muted chord (all notes muted): draw empty gray frame with X
+            const allMuted = sorted.length > 0 && sorted.every(cn => cn.mt);
+            if (allMuted) {
+                const { boxX, boxW, boxTop, boxH } = _computeChordBox(p, H, W, sorted, sz, actualSpread, baseFret);
+
+                ctx.strokeStyle = MUTE_BOX_STROKE;
+                ctx.lineWidth = Math.max(2, sz / 6);
+                roundRect(ctx, boxX, boxTop, boxW, boxH, 2);
+                ctx.stroke();
+
+                ctx.fillStyle = MUTE_BOX_BAR;
+                ctx.fillRect(boxX, boxTop + 2, boxW, 4);
+
+                // Gray X cross, centered in frame
+                const xInset = sz * 0.6;
+                const xStartX = boxX + xInset;
+                const xEndX = boxX + boxW - xInset;
+                ctx.beginPath();
+                ctx.moveTo(xStartX, boxTop + sz * 0.5);
+                ctx.lineTo(xEndX, boxTop + boxH - sz * 0.5);
+                ctx.moveTo(xEndX, boxTop + sz * 0.5);
+                ctx.lineTo(xStartX, boxTop + boxH - sz * 0.5);
+                ctx.stroke();
+
+                continue;
+            }
+
+            // Repeat chord (mid-chain): translucent box + bracket bar.
+            if (!isFull) {
+                const { boxX, boxW, boxTop, boxH } = _computeChordBox(p, H, W, sorted, sz, actualSpread, baseFret);
+
+                ctx.fillStyle = REPEAT_BOX_FILL;
+                roundRect(ctx, boxX, boxTop, boxW, boxH, 2);
+                ctx.fill();
+
+                ctx.fillStyle = REPEAT_BOX_BAR;
+                ctx.fillRect(boxX, boxTop + 2, boxW, 4);
+
+                continue;
+            }
+
+            // First-in-chain (or short chain): full chord rendering.
+            // Bracket bar above the notes.
+            if (hasNonZero || sorted.length >= 2) {
+                const positions = (hasNonZero ? nonZeroNotes : sorted).map((cn, j) => ({
                     x: fretX(cn.f, p.scale, W),
                     y: p.y * H - actualTotalH / 2 + j * actualSpread,
                 }));
                 const barY = positions[0].y - sz * 0.7;
+                const barLeft = hasNonZero ? xMin : fretX(frameLeftFret, p.scale, W);
+                const barRight = hasNonZero ? xMax : fretX(frameRightFret, p.scale, W);
 
-                ctx.fillStyle = '#50a0dc';
+                ctx.fillStyle = REPEAT_BOX_BAR;
                 ctx.lineWidth = Math.max(3, sz / 4);
-                // Horizontal bar
-                const xMin = Math.min(...positions.map(p => p.x));
-                const xMax = Math.max(...positions.map(p => p.x));
-                roundRect(ctx, xMin - 2, barY - 2, xMax - xMin + 4, 4, 2);
+                roundRect(ctx, barLeft - 2, barY - 2, barRight - barLeft + 4, 4, 2);
                 ctx.fill();
-                // Stems
                 for (const pos of positions) {
-                    ctx.fillRect(pos.x - 2, barY, 4, pos.y - sz/2 - barY);
+                    ctx.fillRect(pos.x - 2, barY, 4, pos.y - sz / 2 - barY);
                 }
             }
 
             // Chord name label
-            if (!ch.hd && p.scale > 0.15) {
-                const tmpl = chordTemplates[ch.id];
-                if (tmpl && tmpl.name) {
-                    const labelY = (sorted.length >= 2)
-                        ? (p.y * H - actualTotalH / 2 - sz * 0.7 - sz * 0.4)
-                        : (p.y * H - sz * 0.8);
-                    const labelX = (sorted.length >= 2)
-                        ? (Math.min(...sorted.map(cn => fretX(cn.f, p.scale, W))) + Math.max(...sorted.map(cn => fretX(cn.f, p.scale, W)))) / 2
-                        : fretX(sorted[0].f, p.scale, W);
-                    ctx.fillStyle = '#fff';
-                    ctx.font = `bold ${Math.max(14, sz * 0.45) | 0}px sans-serif`;
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'bottom';
-                    fillTextReadable(tmpl.name, labelX, labelY);
-                }
+            if (!ch.hd && p.scale > 0.15 && tmpl && tmpl.name) {
+                const labelY = hasNonZero
+                    ? (p.y * H - actualTotalH / 2 - sz * 0.7 - sz * 0.4)
+                    : (p.y * H - sz * 0.8);
+                const labelX = hasNonZero
+                    ? (xMin + xMax) / 2
+                    : (sorted.length >= 2
+                        ? (fretX(frameLeftFret, p.scale, W) + fretX(frameRightFret, p.scale, W)) / 2
+                        : fretX(sorted[0].f, p.scale, W));
+                ctx.fillStyle = '#fff';
+                ctx.font = `bold ${Math.max(14, sz * 0.45) | 0}px sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'bottom';
+                fillTextReadable(tmpl.name, labelX, labelY);
             }
 
-            // Notes — ensure same-fret notes don't overlap vertically
+            // Notes — wide colored bar for open strings inside a chord,
+            // normal note glyph otherwise.
             const chordPositions = [];
+            const hasMultipleNotes = sorted.length >= 2;
+
             sorted.forEach((cn, j) => {
                 const x = fretX(cn.f, p.scale, W);
                 const ny = p.y * H - actualTotalH / 2 + j * actualSpread;
-                drawNote(W, H, x, ny, p.scale, cn.s, cn.f, { ...cn, chord: true });
+
+                // Open-string-in-chord wide bar — only when the note has no
+                // technique flags. Otherwise fall back to drawNote so PM /
+                // H / P / T / tremolo / accent labels still render (drawNote
+                // is the only path that emits those labels).
+                if (getTemplateFret(cn) === 0 && hasMultipleNotes && !_noteHasTechniqueFlags(cn)) {
+                    const color = STRING_COLORS[cn.s] || '#888';
+                    const dark = STRING_DIM[cn.s] || '#222';
+                    const barH = sz;
+                    const barLeft = fretX(frameLeftFret, p.scale, W);
+                    const barRight = fretX(frameRightFret, p.scale, W);
+                    ctx.fillStyle = dark;
+                    roundRect(ctx, barLeft - 1, ny - barH / 2 - 1, barRight - barLeft + 2, barH + 2, 3);
+                    ctx.fill();
+                    ctx.fillStyle = color;
+                    roundRect(ctx, barLeft, ny - barH / 2, barRight - barLeft, barH, 2);
+                    ctx.fill();
+                    const fontSize = Math.max(8, sz * 0.5) | 0;
+                    ctx.fillStyle = '#fff';
+                    ctx.font = `bold ${fontSize}px sans-serif`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    fillTextReadable('0', (barLeft + barRight) / 2, ny);
+                } else {
+                    drawNote(W, H, x, ny, p.scale, cn.s, cn.f, { ...cn, chord: true });
+                }
+
                 chordPositions.push({ s: cn.s, f: cn.f, bn: cn.bn || 0, x, y: ny, scale: p.scale });
             });
 
@@ -1265,6 +1406,226 @@ function createHighway() {
         return lo;
     }
 
+    // ── Chord rendering — chains, frames, fretline preview (slopsmith#88) ──
+    //
+    // Rocksmith charts often repeat the same chord shape several times in a
+    // row (e.g. a G strummed 4 times). We call a contiguous run of same-id
+    // chords with gaps < CHAIN_GAP_THRESHOLD a "chain". Chains drive two
+    // visual choices:
+    //   • The first chord in a chain renders in full; subsequent chords in
+    //     a chain of CHAIN_RENDER_FULL_MAX or longer render as a "repeat
+    //     box" — a translucent boxed frame so the eye can see the rhythm
+    //     pattern without re-scanning identical fret numbers.
+    //   • Each chord anchors a CHORD_FRAME_FRETS-wide frame; muted and
+    //     open-only chords inherit the frame from their predecessor so
+    //     they don't snap to fret 0.
+    //
+    // We compute chain stats and frame anchors once per `src` array via
+    // _ensureChordRenderCache (lazy, invalidates when the array reference
+    // changes — which happens on chord ingest, mastery rebuild, or song
+    // reset). The render path is then pure read.
+    const CHAIN_GAP_THRESHOLD = 0.5;
+    const CHAIN_RENDER_FULL_MAX = 4;
+    const CHORD_FRAME_FRETS = 4;
+
+    // Fretline preview: the static fret line at the bottom shows the chord
+    // closest to the strum line (currentTime + FRETLINE_TARGET_OFFSET) within
+    // the [target - FRETLINE_WINDOW_BEFORE, target + FRETLINE_WINDOW_AFTER]
+    // window, as a teaching aid.
+    const FRETLINE_TARGET_OFFSET = -0.25;
+    const FRETLINE_WINDOW_BEFORE = 0.1;
+    const FRETLINE_WINDOW_AFTER = 0.3;
+
+    // Repeat / mute box colors.
+    const REPEAT_BOX_FILL = 'rgba(48, 80, 128, 0.06)';
+    const REPEAT_BOX_BAR = '#50a0dc';
+    const MUTE_BOX_STROKE = '#6060809b';
+    const MUTE_BOX_BAR = '#606080d1';
+
+    // Reset all chord-render-derived state. Called from init() and
+    // reconnect() so per-song state (preview, frame-mismatch warnings,
+    // chain cache) doesn't leak across songs that reuse chord IDs.
+    function _resetChordRenderState() {
+        _lastChordOnFretLine = null;
+        _chordFretLineNotes = [];
+        _frameMismatchWarned.clear();
+        _chordRenderCacheSrc = null;
+        _chordRenderCacheInverted = null;
+    }
+
+    // True if a chord note carries per-strum technique data (bend,
+    // hammer/pull/tap, slide, palm-mute, tremolo, accent, harmonic, pinch
+    // harmonic, dead note). drawNote renders these as glyph labels —
+    // alternate render paths (repeat box, open-string-in-chord wide bar)
+    // bypass drawNote and so must fall back to the full path whenever a
+    // technique flag is present, otherwise authored cues vanish silently.
+    function _noteHasTechniqueFlags(n) {
+        if (n.bn || n.ho || n.po || n.tp || n.pm || n.tr || n.ac || n.hm || n.hp || n.mt) return true;
+        if (typeof n.sl === 'number' && n.sl >= 0) return true;
+        return false;
+    }
+    function _chordHasTechniqueFlags(ch) {
+        const notes = ch.notes;
+        for (let i = 0; i < notes.length; i++) {
+            if (_noteHasTechniqueFlags(notes[i])) return true;
+        }
+        return false;
+    }
+
+    // Template lookup: returns helpers that classify a chord note's fret
+    // against its template. Open = template fret 0 (regardless of cn.f).
+    function getChordTemplateInfo(chordId, chordTemplates) {
+        const tmpl = chordTemplates[chordId];
+        const tmplFrets = tmpl && tmpl.frets ? tmpl.frets : [];
+        const getTemplateFret = (cn) => cn.s < tmplFrets.length ? tmplFrets[cn.s] : cn.f;
+        const isOpen = (cn) => getTemplateFret(cn) === 0;
+        return { tmpl, tmplFrets, getTemplateFret, isOpen };
+    }
+
+    // Build _chordRenderInfo for every chord in `src` if the cache is stale.
+    // Two passes over the array: chain bounds, then base-fret resolution
+    // (which can read previous chord's cached baseFret).
+    function _ensureChordRenderCache(src) {
+        if (_chordRenderCacheSrc === src && _chordRenderCacheInverted === _inverted) return;
+        _chordRenderCacheSrc = src;
+        _chordRenderCacheInverted = _inverted;
+
+        // Pass 1: walk forward, marking chain index / length / isFull on a
+        // per-chord WeakMap entry. A chain breaks when the next chord has a
+        // different id OR the time gap is >= CHAIN_GAP_THRESHOLD.
+        // Chords that carry per-strum technique flags (bend / palm-mute /
+        // hammer / pull / tap / slide / tremolo / accent / harmonic / mute)
+        // never collapse to a repeat box — those cues are authored on each
+        // strum and must stay visible.
+        let chainStart = 0;
+        for (let i = 0; i <= src.length; i++) {
+            const breakHere = (i === src.length) ||
+                (i > chainStart && (src[i].id !== src[i - 1].id ||
+                    Math.abs(src[i].t - src[i - 1].t) >= CHAIN_GAP_THRESHOLD));
+            if (breakHere && i > chainStart) {
+                const len = i - chainStart;
+                for (let k = chainStart; k < i; k++) {
+                    const chainIndex = k - chainStart;
+                    const hasTechniques = _chordHasTechniqueFlags(src[k]);
+                    _chordRenderInfo.set(src[k], {
+                        chainIndex,
+                        chainLen: len,
+                        isFull: len < CHAIN_RENDER_FULL_MAX || chainIndex === 0 || hasTechniques,
+                        baseFret: 0,  // filled in pass 2
+                    });
+                }
+                chainStart = i;
+            }
+        }
+
+        // Pass 2: resolve baseFret. Fretted chords use their own lowest
+        // non-open fret; chained same-id chords inherit from the previous
+        // entry; open-only / muted chords with a different-id predecessor
+        // inherit that predecessor's frame too. The walk is forward so
+        // prev's cached value is always present when we read it.
+        for (let i = 0; i < src.length; i++) {
+            const ch = src[i];
+            const info = _chordRenderInfo.get(ch);
+            const { isOpen } = getChordTemplateInfo(ch.id, chordTemplates);
+            const sortedNotes = [...ch.notes].sort((a, b) => _inverted ? b.s - a.s : a.s - b.s);
+            const nonZero = sortedNotes.filter(cn => !isOpen(cn));
+            if (nonZero.length >= 1) {
+                info.baseFret = Math.min(...nonZero.map(cn => cn.f));
+            } else if (i > 0) {
+                const prevInfo = _chordRenderInfo.get(src[i - 1]);
+                info.baseFret = prevInfo ? prevInfo.baseFret : 0;
+            } else {
+                info.baseFret = 0;
+            }
+        }
+    }
+
+    // Compute the on-screen box for a chord (used by both muted and repeat
+    // box renderings). Box height tracks the per-string note positions; box
+    // width spans the CHORD_FRAME_FRETS frame anchored at info.baseFret.
+    function _computeChordBox(p, H, W, sorted, sz, actualSpread, baseFret) {
+        const actualTotalH = actualSpread * Math.max(0, sorted.length - 1);
+        const yCenter = p.y * H;
+        const boxTop = yCenter - actualTotalH / 2 - sz * 0.5;
+        const boxBottom = boxTop + Math.max(sz, actualTotalH + sz);
+        const boxX = fretX(baseFret, p.scale, W);
+        const boxW = fretX(baseFret + CHORD_FRAME_FRETS, p.scale, W) - boxX;
+        return { boxX, boxW, boxTop, boxH: boxBottom - boxTop };
+    }
+
+    // Search [lo, hi) for the chord we should preview on the static fret
+    // line. Prefer the chord nearest the strum line that's within
+    // [target - before, target + after]; if none match, fall back to the
+    // first visible chord. Updates _lastChordOnFretLine / _chordFretLineNotes
+    // only when the active chord changes (lets the preview persist while a
+    // chord is held).
+    function _updateFretLinePreview(src, lo, hi) {
+        const targetTime = currentTime + FRETLINE_TARGET_OFFSET;
+        let activeChord = null;
+        let activeNotesOnFret = [];
+        let bestChordTime = -Infinity;
+
+        for (let i = lo; i < hi; i++) {
+            const ch = src[i];
+            if (ch.t >= targetTime - FRETLINE_WINDOW_BEFORE &&
+                ch.t < targetTime + FRETLINE_WINDOW_AFTER &&
+                ch.t > bestChordTime) {
+                bestChordTime = ch.t;
+                activeChord = ch;
+                const { isOpen } = getChordTemplateInfo(ch.id, chordTemplates);
+                const nonZero = ch.notes.filter(cn => !isOpen(cn));
+                activeNotesOnFret = nonZero.length >= 1 ? nonZero.map(cn => ({ s: cn.s, f: cn.f })) : [];
+            }
+        }
+
+        if (activeChord === null) {
+            for (let i = lo; i < hi; i++) {
+                const ch = src[i];
+                const p = project(ch.t - currentTime);
+                if (!p) continue;
+                activeChord = ch;
+                const { isOpen } = getChordTemplateInfo(ch.id, chordTemplates);
+                const nonZero = ch.notes.filter(cn => !isOpen(cn));
+                activeNotesOnFret = nonZero.length >= 1 ? nonZero.map(cn => ({ s: cn.s, f: cn.f })) : [];
+                break;
+            }
+        }
+
+        // Compare by chord OBJECT identity rather than .id — two strums of
+        // the same chord template are different objects, so a chain like
+        // (G normal) → (G all-muted) refreshes the preview instead of
+        // leaving the first strum's fingerings stuck on the fret line.
+        if (activeChord !== _lastChordOnFretLine) {
+            _chordFretLineNotes = activeNotesOnFret;
+            _lastChordOnFretLine = activeChord;
+        }
+    }
+
+    function _drawFretLineChordPreview(W, H) {
+        if (_chordFretLineNotes.length === 0) return;
+        const strTop = H * 0.83;
+        const strBot = H * 0.95;
+        // Scale glyphs with H so preview stays proportionate at any
+        // resolution / renderScale. Constants picked to match the prior
+        // hardcoded 30px diameter / 24px font at H=900.
+        const noteSize = Math.max(14, H * 0.033);
+        const fontSize = Math.max(11, H * 0.027) | 0;
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (const cn of _chordFretLineNotes) {
+            const yi = _inverted ? 5 - cn.s : cn.s;
+            const syl = strTop + (yi / 5) * (strBot - strTop);
+            const fretXPos = fretX(cn.f, 1, W);
+            ctx.fillStyle = STRING_COLORS[cn.s] || '#888';
+            ctx.beginPath();
+            ctx.arc(fretXPos, syl, noteSize / 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            fillTextReadable(String(cn.f), fretXPos, syl);
+        }
+    }
+
     // Rebuild the mastery-filtered note/chord arrays from _phrases +
     // _mastery. Called on `ready` and on every setMastery(). When
     // _phrases is null (slider-disabled source), we clear the filtered
@@ -1339,7 +1700,8 @@ function createHighway() {
             _resizeHandler = () => this.resize();
             window.addEventListener('resize', _resizeHandler);
             ready = false;
-            notes = []; chords = []; beats = []; sections = []; anchors = []; lyrics = []; toneChanges = []; toneBase = "";
+            notes = []; chords = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
+            stringCount = 6;  // default until song_info arrives
             // Reset phrase ladder + filter (slopsmith#48). _mastery
             // persists across arrangement switches — the slider's
             // position stays put. Filter rebuilds on the next `ready`
@@ -1349,6 +1711,7 @@ function createHighway() {
             _filteredNotes = null;
             _filteredChords = null;
             _filteredAnchors = null;
+            _resetChordRenderState();
         },
 
         resize() {
@@ -1444,6 +1807,44 @@ function createHighway() {
                         break;
                     case 'song_info':
                         songInfo = msg;
+                        // Pick up the active arrangement's string count.
+                        // Prefer the explicit `stringCount` field (added
+                        // in slopsmith-plugin-3dhighway#7); fall back to
+                        // `tuning.length` for older servers that haven't
+                        // started emitting it (works correctly for
+                        // GP-imported sources where tuning is already
+                        // truncated, and for sloppaks loaded against an
+                        // updated lib/song.py); final fallback is 6 for
+                        // safety so a missing/malformed payload doesn't
+                        // surface as 0 strings.
+                        //
+                        // Clamp to [1, MAX_STRINGS] before storing —
+                        // stringCount drives loop bounds in drawStrings
+                        // and downstream plugins. A malformed payload
+                        // (huge or zero / negative) would otherwise hang
+                        // the UI or render no strings at all. 8 covers
+                        // every real-world instrument we ship colors
+                        // for; values above that fall back to '#888'
+                        // anyway via the STRING_COLORS lookup so
+                        // capping the loop bound costs nothing visible.
+                        const MAX_STRINGS = 8;
+                        let _sc;
+                        if (typeof msg.stringCount === 'number' && msg.stringCount > 0) {
+                            _sc = msg.stringCount;
+                        } else if (Array.isArray(msg.tuning) && msg.tuning.length > 0) {
+                            _sc = msg.tuning.length;
+                        } else {
+                            _sc = 6;
+                        }
+                        // Math.trunc(_sc) (with finite check) instead of
+                        // `_sc | 0` — bitwise-OR forces 32-bit signed
+                        // conversion, so any value ≥ 2^31 wraps negative
+                        // and the Math.max(1, ...) clamp would land at
+                        // 1 string. Math.trunc preserves the magnitude;
+                        // the Math.min(MAX_STRINGS, ...) below caps it
+                        // safely.
+                        const _scTrunc = Number.isFinite(_sc) ? Math.trunc(_sc) : 1;
+                        stringCount = Math.max(1, Math.min(MAX_STRINGS, _scTrunc));
                         if (opts.onSongInfo) {
                             opts.onSongInfo(msg);
                         } else {
@@ -1602,7 +2003,9 @@ function createHighway() {
             };
         },
 
-        setTime(t) { currentTime = t; },
+        setTime(t) { chartTime = t; currentTime = t + avOffsetSec; },
+        setAvOffset(ms) { avOffsetSec = (Number(ms) || 0) / 1000; currentTime = chartTime + avOffsetSec; },
+        getAvOffset() { return avOffsetSec * 1000; },
 
         getBPM(t) {
             // Calculate BPM from beat intervals near time t
@@ -1623,13 +2026,35 @@ function createHighway() {
         },
 
         getBeats() { return beats; },
-        getTime() { return currentTime; },
+        getTime() { return chartTime; },
         getNotes() { return notes; },
         getChords() { return chords; },
+        // Live reference to the chord-template lookup table —
+        // `getChords()[i].id` is an index into this array. Each
+        // template carries `{ name, fingers, frets }`:
+        //   - name:    chord name string ("Em", "Cmaj7", …)
+        //   - fingers: per-string finger numbers (length matches
+        //              the tuning's string count; -1 = unused, 0 =
+        //              open string, n > 0 = finger number). RS XML
+        //              sources populate real values; GP imports
+        //              currently emit all -1.
+        //   - frets:   per-string fret numbers, same indexing.
+        // Read-only: overlay plugins should NOT mutate the array or
+        // its entries. Not difficulty-filter-aware (templates are
+        // static metadata; every chord_id referenced by `getChords()`
+        // is guaranteed valid).
+        getChordTemplates() { return chordTemplates; },
         getToneChanges() { return toneChanges; },
         getToneBase() { return toneBase; },
         getSections() { return sections; },
         getSongInfo() { return songInfo; },
+        // Number of strings on the active arrangement
+        // (slopsmith-plugin-3dhighway#7). 4 for bass, 6 for guitar,
+        // 7+ for extended-range GP imports. Plugins should size
+        // string-indexed UI / geometry against THIS rather than
+        // assuming 6. Defaults to 6 between songs (until the next
+        // song_info message arrives).
+        getStringCount() { return stringCount; },
         addDrawHook(fn) { _drawHooks.push(fn); },
         removeDrawHook(fn) { _drawHooks = _drawHooks.filter(h => h !== fn); },
         project(tOffset) { return project(tOffset); },
@@ -1655,7 +2080,8 @@ function createHighway() {
             // Close old WS but keep audio + animation running
             if (ws) { ws.close(); ws = null; }
             ready = false;
-            notes = []; chords = []; beats = []; sections = []; anchors = []; lyrics = []; toneChanges = []; toneBase = "";
+            notes = []; chords = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
+            stringCount = 6;  // default until song_info arrives
             // Reset phrase ladder + filter (slopsmith#48). _mastery
             // persists across arrangement switches — the slider's
             // position stays put. Filter rebuilds on the next `ready`
@@ -1665,6 +2091,7 @@ function createHighway() {
             _filteredNotes = null;
             _filteredChords = null;
             _filteredAnchors = null;
+            _resetChordRenderState();
             const arrParam = arrangement !== undefined ? `?arrangement=${arrangement}` : '';
             // filename might already be encoded from data-play attribute
             const decoded = decodeURIComponent(filename);

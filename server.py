@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from psarc import unpack_psarc, read_psarc_entries
-from song import load_song, phrase_to_wire
+from song import load_song, phrase_to_wire, arrangement_string_count
 from audio import find_wem_files, convert_wem
 from tunings import tuning_name
 import sloppak as sloppak_mod
@@ -819,6 +819,23 @@ def save_settings(data: dict):
             # which Python raises distinctly from ValueError.
             return {"error": "master_difficulty must be a number between 0 and 100"}
 
+    if "av_offset_ms" in data:
+        # Audio-output pipeline latency compensation. Positive values
+        # mean audio is running ahead of visuals; the highway adds
+        # this to its render clock to catch the visuals up. Clamped
+        # to ±1000 ms to mirror the client-side slider — a direct
+        # POST shouldn't be able to persist `1e9`. Same defensive
+        # coercion shape as master_difficulty above (reject bool,
+        # cover OverflowError, structured 4xx-style return on bad
+        # input rather than 500).
+        raw = data["av_offset_ms"]
+        if isinstance(raw, bool):
+            return {"error": "av_offset_ms must be a number between -1000 and 1000"}
+        try:
+            cfg["av_offset_ms"] = max(-1000.0, min(1000.0, float(raw)))
+        except (TypeError, ValueError, OverflowError):
+            return {"error": "av_offset_ms must be a number between -1000 and 1000"}
+
     config_file.write_text(json.dumps(cfg, indent=2))
     return {"message": ". ".join(messages) if messages else "Settings saved"}
 
@@ -1322,6 +1339,19 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
             "audio_url": audio_url,
             "audio_error": audio_error,
             "tuning": arr.tuning,
+            # Number of strings on the active arrangement
+            # (slopsmith-plugin-3dhighway#7). RS XML / PSARC sources
+            # always emit `tuning` as length 6 with zero-padding for
+            # unused string slots, so `len(arr.tuning)` is unreliable
+            # there; sloppak / GP-imported sources may instead carry
+            # a trimmed list. arrangement_string_count() combines a
+            # notes-derived lower bound, a name-based fallback (4 for
+            # "bass" arrangements), and the tuning length (when it
+            # disagrees with the RS-XML padded 6) into a single
+            # reliable signal. Plugins should size string-indexed UI
+            # / geometry against THIS rather than assuming 6 or
+            # using `tuning.length` directly.
+            "stringCount": arrangement_string_count(arr),
             "capo": arr.capo,
             "format": "sloppak" if is_slop else "psarc",
             "stems": stems_payload,
@@ -1339,10 +1369,20 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         anchors = [{"time": a.time, "fret": a.fret, "width": a.width} for a in arr.anchors]
         await websocket.send_json({"type": "anchors", "data": anchors})
 
-        # Send chord templates
+        # Send chord templates. Include `fingers` alongside `name` /
+        # `frets` so plugin overlays consuming highway.getChordTemplates()
+        # can render full chord boxes (Rocksmith-style fingering
+        # diagrams), not just chord names. Each fingering entry is
+        # per-string: -1 = unused, 0 = open string, n > 0 = finger
+        # number. RS XML sources populate real values; GP imports
+        # currently emit all -1 (no finger data available pre-import).
         templates = []
         for ct in arr.chord_templates:
-            templates.append({"name": ct.name, "frets": ct.frets})
+            templates.append({
+                "name": ct.name,
+                "fingers": ct.fingers,
+                "frets": ct.frets,
+            })
         await websocket.send_json({"type": "chord_templates", "data": templates})
 
         # Send lyrics if available
