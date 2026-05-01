@@ -581,6 +581,120 @@ async function saveSettings() {
     document.getElementById('settings-status').textContent = data.message || data.error;
 }
 
+// ── Settings export / import (slopsmith#113) ─────────────────────────────────
+//
+// Bundles server config + every localStorage key + opted-in plugin server
+// files into a single JSON file. Import is all-or-nothing across server
+// (atomic in /api/settings/import) and browser (localStorage clear+restore
+// only after server reports success), so a server-side validation failure
+// leaves the page state untouched.
+
+async function exportSettings() {
+    const status = document.getElementById('backup-status');
+    status.textContent = 'Exporting...';
+    try {
+        const resp = await fetch('/api/settings/export');
+        if (!resp.ok) {
+            status.textContent = `Export failed (HTTP ${resp.status})`;
+            return;
+        }
+        const bundle = await resp.json();
+        // Layer in the browser's localStorage. Keys are preserved verbatim
+        // as strings — that's how localStorage stores them, and round-trip
+        // fidelity matters more than re-typing values that were never
+        // typed in the first place.
+        const localStorageData = {};
+        for (const key of Object.keys(localStorage)) {
+            const value = localStorage.getItem(key);
+            if (value !== null) localStorageData[key] = value;
+        }
+        bundle.local_storage = localStorageData;
+
+        // Trigger download via blob + temporary <a download>. We honor the
+        // server's Content-Disposition filename when present, otherwise
+        // fall back to a date-stamped default.
+        let filename = 'slopsmith-settings.json';
+        const disposition = resp.headers.get('Content-Disposition');
+        if (disposition) {
+            const match = /filename="([^"]+)"/.exec(disposition);
+            if (match) filename = match[1];
+        }
+        const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        status.textContent = `Exported ${filename}`;
+    } catch (e) {
+        status.textContent = `Export failed: ${e.message}`;
+    }
+}
+
+async function importSettings(file) {
+    if (!file) return;
+    const status = document.getElementById('backup-status');
+    if (!confirm('Import will overwrite settings present in the bundle (server config, browser preferences, and opted-in plugin data) and reload the page. Settings not in the bundle (e.g. from plugins installed after the export) are preserved. Continue?')) {
+        status.textContent = 'Import cancelled';
+        return;
+    }
+    let bundle;
+    try {
+        bundle = JSON.parse(await file.text());
+    } catch (e) {
+        status.textContent = `Import failed: not valid JSON (${e.message})`;
+        return;
+    }
+
+    status.textContent = 'Importing...';
+    let resp, data;
+    try {
+        resp = await fetch('/api/settings/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(bundle),
+        });
+        data = await resp.json();
+    } catch (e) {
+        status.textContent = `Import failed: ${e.message}`;
+        return;
+    }
+    if (!data.ok) {
+        status.textContent = `Import failed: ${data.error || 'unknown error'}`;
+        return;
+    }
+
+    // Server applied successfully. Now apply the localStorage portion as
+    // a MERGE (not clear+restore): keys in the bundle overwrite, keys
+    // present locally but absent from the bundle are preserved. This
+    // matters when a plugin was installed *after* the export — wiping
+    // its localStorage would erase first-run defaults the plugin set on
+    // load, leaving it in a worse state than before the import. The
+    // tradeoff is that orphan keys from removed plugins or renamed key
+    // schemes also linger; cleaning those up is the user's job.
+    const ls = bundle.local_storage;
+    if (ls && typeof ls === 'object') {
+        try {
+            for (const [key, value] of Object.entries(ls)) {
+                if (typeof value === 'string') localStorage.setItem(key, value);
+            }
+        } catch (e) {
+            // Quota exceeded / private mode etc. Server side already
+            // committed, so we surface the partial state rather than
+            // pretending it succeeded.
+            status.textContent = `Server applied, but localStorage write failed: ${e.message}`;
+            return;
+        }
+    }
+
+    const warnings = (data.warnings || []).join('; ');
+    status.textContent = warnings ? `Imported with warnings: ${warnings}. Reloading...` : 'Imported. Reloading...';
+    setTimeout(() => location.reload(), 800);
+}
+
 async function rescanLibrary() {
     const btn = document.getElementById('btn-rescan');
     const status = document.getElementById('rescan-status');

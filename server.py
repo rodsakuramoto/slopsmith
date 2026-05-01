@@ -857,6 +857,372 @@ def save_settings(data: dict):
     return {"message": ". ".join(messages) if messages else "Settings saved"}
 
 
+# ── Settings export/import (slopsmith#113) ───────────────────────────────────
+
+# Bumped only when the bundle JSON shape changes incompatibly. Importer
+# refuses anything but this exact value — version mismatches are warned
+# but not blocked, schema mismatches ARE blocked.
+SETTINGS_BUNDLE_SCHEMA = 1
+
+
+def _running_version() -> str:
+    """Same lookup chain `/api/version` uses, factored out so the export
+    bundle records what shipped this file. Kept as a helper so future
+    changes (e.g. baked-in version) only have to touch one site."""
+    env_version = os.environ.get("APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+    version_file = Path(__file__).parent / "VERSION"
+    if version_file.exists():
+        try:
+            return version_file.read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            pass
+    return "unknown"
+
+
+def _matches_allowlist(relpath: str, allowed: list[str]) -> bool:
+    """Return True if `relpath` is covered by an entry in the manifest's
+    `_export_paths`. Entries ending in `/` are directory rules
+    (prefix-match); other entries are exact-file rules. Both `relpath`
+    and `allowed` are POSIX strings already normalized through
+    `_normalize_export_paths` on the loader side."""
+    for allow in allowed:
+        if allow.endswith("/"):
+            prefix = allow  # e.g. "nam_models/"
+            if relpath.startswith(prefix) or relpath == prefix.rstrip("/"):
+                return True
+        elif relpath == allow:
+            return True
+    return False
+
+
+def _validate_relpath(relpath: str, allowed: list[str], config_dir: Path) -> Path:
+    """Resolve `relpath` to an absolute path under `config_dir`, raising
+    ValueError on anything that smells like path-traversal, an absolute
+    path, or a manifest-undeclared file. Three layers of defense:
+
+      1. String-level: reject empty / `..` / drive-letter / absolute
+         forms before they can reach `Path` resolution.
+      2. Manifest allowlist: relpath must match a declared entry.
+      3. Realpath check: after resolution under config_dir, the target
+         must still live inside config_dir (defeats symlink escape
+         attacks where someone planted a symlink inside config_dir
+         pointing out, then tried to import a file "under" it).
+
+    Returns the resolved absolute path (caller writes there in phase 2).
+    """
+    import posixpath
+    if not isinstance(relpath, str) or not relpath or relpath != relpath.strip():
+        raise ValueError(f"illegal relpath: {relpath!r}")
+    # Reject backslashes outright — manifest entries are POSIX, and
+    # accepting `foo\bar` here on a platform whose Path treats `\` as
+    # a separator would let a hostile bundle smuggle traversal past
+    # the part-by-part check below.
+    if "\\" in relpath:
+        raise ValueError(f"relpath uses non-POSIX separator: {relpath!r}")
+    # Absolute / drive-letter check before splitting.
+    if relpath.startswith("/") or (len(relpath) >= 2 and relpath[1] == ":"):
+        raise ValueError(f"relpath must be relative: {relpath!r}")
+    parts = posixpath.normpath(relpath).split("/")
+    if any(part in ("", "..") for part in parts) or parts[0].startswith("."):
+        # `posixpath.normpath` collapses `a/./b` etc. but preserves a
+        # leading `..`; the `parts[0].startswith(".")` guard rejects
+        # `./foo` and dotfile-disguised escape attempts.
+        raise ValueError(f"relpath contains illegal segment: {relpath!r}")
+
+    if not _matches_allowlist(relpath, allowed):
+        raise ValueError(f"relpath not declared in plugin manifest: {relpath!r}")
+
+    target = (config_dir / relpath).resolve()
+    config_root = config_dir.resolve()
+    # `target == config_root` would mean the relpath resolved to the
+    # config dir itself, which can't be a file write target — reject.
+    if target == config_root:
+        raise ValueError(f"relpath resolves to config_dir itself: {relpath!r}")
+    if config_root not in target.parents:
+        raise ValueError(f"relpath escapes config_dir: {relpath!r}")
+    return target
+
+
+def _encode_file(abs_path: Path) -> dict:
+    """Encode a single file for the export bundle. JSON files that parse
+    cleanly use the `json` encoding so the bundle stays diff-friendly;
+    everything else (sqlite, NAM models, IRs, binary blobs) falls back
+    to base64. Symlinks are skipped at the caller — we never reach this
+    helper for them."""
+    import base64
+    raw = abs_path.read_bytes()
+    if abs_path.suffix.lower() == ".json":
+        try:
+            return {"encoding": "json", "data": json.loads(raw.decode("utf-8"))}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # Fall through to base64 — file claimed `.json` but isn't
+            # valid JSON; preserve bytes verbatim rather than refusing.
+            pass
+    return {"encoding": "base64", "data": base64.b64encode(raw).decode("ascii")}
+
+
+def _decode_entry(entry: dict) -> bytes:
+    """Inverse of `_encode_file`. Raises ValueError on malformed entries
+    so phase 1 of the importer can refuse the whole bundle without
+    having written anything."""
+    import base64
+    if not isinstance(entry, dict):
+        raise ValueError(f"file entry must be an object, got {type(entry).__name__}")
+    encoding = entry.get("encoding")
+    data = entry.get("data")
+    if encoding == "base64":
+        if not isinstance(data, str):
+            raise ValueError("base64 entry: 'data' must be a string")
+        try:
+            return base64.b64decode(data, validate=True)
+        except Exception as e:
+            raise ValueError(f"base64 entry: invalid payload ({e})")
+    if encoding == "json":
+        # We re-serialize the parsed value with stable formatting. Round
+        # trips with the original byte stream aren't guaranteed (key
+        # order, whitespace), but the file's *meaning* is preserved.
+        try:
+            return json.dumps(data, indent=2).encode("utf-8")
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"json entry: cannot re-serialize ({e})")
+    raise ValueError(f"unknown encoding: {encoding!r}")
+
+
+def _walk_export_paths(allowed: list[str], config_dir: Path) -> dict:
+    """Expand a plugin's `_export_paths` against disk and return a
+    `{relpath: encoded_entry}` dict. Missing files are silently skipped
+    (intentional — manifests can list optional files). Symlinks are
+    skipped with no entry. Directories are walked recursively; their
+    contained files surface as POSIX-joined relpaths."""
+    out: dict[str, dict] = {}
+    for entry in allowed:
+        is_dir = entry.endswith("/")
+        rel = entry.rstrip("/")
+        abs_target = config_dir / rel
+        if abs_target.is_symlink():
+            continue
+        if is_dir:
+            if not abs_target.is_dir():
+                continue
+            for child in sorted(abs_target.rglob("*")):
+                if child.is_symlink() or not child.is_file():
+                    continue
+                # POSIX-joined relpath relative to config_dir keeps the
+                # bundle cross-platform — Windows-authored bundles can
+                # be applied on Linux and vice versa.
+                child_rel = child.relative_to(config_dir).as_posix()
+                out[child_rel] = _encode_file(child)
+        else:
+            if not abs_target.is_file():
+                continue
+            out[rel] = _encode_file(abs_target)
+    return out
+
+
+def _atomic_write_file(target: Path, payload: bytes):
+    """Write `payload` to `target` via a sibling `.tmp.import` + os.replace.
+    `os.replace` is atomic on both POSIX and Win32 — readers see either
+    the old file or the new one, never a half-written state."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp.import")
+    tmp.write_bytes(payload)
+    os.replace(tmp, target)
+
+
+@app.get("/api/settings/export")
+def export_settings():
+    """Build a settings bundle covering server config + opted-in plugin
+    server-side files. Frontend layers in `local_storage` before
+    triggering the download. See slopsmith#113."""
+    import datetime
+    from plugins import LOADED_PLUGINS
+
+    config_file = CONFIG_DIR / "config.json"
+    server_config = _load_config(config_file)
+    if server_config is None:
+        server_config = _default_settings()
+
+    plugin_blocks: dict[str, dict] = {}
+    for p in LOADED_PLUGINS:
+        allowed = p.get("_export_paths") or []
+        plugin_blocks[p["id"]] = {"files": _walk_export_paths(allowed, CONFIG_DIR)}
+
+    bundle = {
+        "schema": SETTINGS_BUNDLE_SCHEMA,
+        "exported_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "slopsmith_version": _running_version(),
+        "server_config": server_config,
+        "plugin_server_configs": plugin_blocks,
+    }
+    filename = (
+        f"slopsmith-settings-"
+        f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')}.json"
+    )
+    return JSONResponse(
+        bundle,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/settings/import")
+def import_settings(bundle: dict):
+    """Apply a previously exported settings bundle. Validates the entire
+    bundle in phase 1 (no disk writes); only on full success does
+    phase 2 commit each file via temp+rename. The frontend reads
+    `local_storage` itself — server ignores it. See slopsmith#113."""
+    from plugins import LOADED_PLUGINS
+
+    if not isinstance(bundle, dict):
+        return JSONResponse({"ok": False, "error": "bundle must be a JSON object"}, status_code=400)
+
+    # ── Phase 1: validate everything before touching disk ────────────
+    schema = bundle.get("schema")
+    if schema != SETTINGS_BUNDLE_SCHEMA:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"unsupported schema {schema!r}; this server speaks schema {SETTINGS_BUNDLE_SCHEMA}",
+            },
+            status_code=400,
+        )
+
+    server_config = bundle.get("server_config")
+    if not isinstance(server_config, dict):
+        return JSONResponse(
+            {"ok": False, "error": "server_config must be an object"},
+            status_code=400,
+        )
+
+    plugin_blocks = bundle.get("plugin_server_configs") or {}
+    if not isinstance(plugin_blocks, dict):
+        return JSONResponse(
+            {"ok": False, "error": "plugin_server_configs must be an object"},
+            status_code=400,
+        )
+
+    warnings: list[str] = []
+    bundle_version = bundle.get("slopsmith_version")
+    running = _running_version()
+    if bundle_version and bundle_version != running:
+        warnings.append(
+            f"version mismatch: bundle {bundle_version!r} vs running {running!r}; importing anyway"
+        )
+
+    by_id = {p["id"]: p for p in LOADED_PLUGINS}
+
+    # Stage every (target_abs_path, payload) pair before writing.
+    staged: list[tuple[Path, bytes]] = []
+    applied_plugins: list[str] = []
+    for plugin_id, block in plugin_blocks.items():
+        if not isinstance(plugin_id, str) or not plugin_id:
+            return JSONResponse(
+                {"ok": False, "error": f"invalid plugin id key: {plugin_id!r}"},
+                status_code=400,
+            )
+        plugin = by_id.get(plugin_id)
+        if plugin is None:
+            warnings.append(f"plugin {plugin_id!r} not loaded; skipping its files")
+            continue
+        if not isinstance(block, dict):
+            return JSONResponse(
+                {"ok": False, "error": f"plugin {plugin_id!r}: block must be an object"},
+                status_code=400,
+            )
+        files = block.get("files") or {}
+        if not isinstance(files, dict):
+            return JSONResponse(
+                {"ok": False, "error": f"plugin {plugin_id!r}: files must be an object"},
+                status_code=400,
+            )
+        allowed = plugin.get("_export_paths") or []
+        skipped_for_plugin: list[str] = []
+        applied_for_plugin = False
+        for relpath, file_entry in files.items():
+            try:
+                target = _validate_relpath(relpath, allowed, CONFIG_DIR)
+            except ValueError as e:
+                # Distinguish "manifest doesn't list this file anymore"
+                # from "this looks like an attack". The first is a normal
+                # outcome of a plugin update between export and import —
+                # warn-and-skip so the rest of the bundle still applies.
+                # Path-traversal / absolute-path / illegal-segment errors
+                # are still hard failures; we never want to apply a
+                # bundle that contains those, even partially.
+                msg = str(e)
+                if "not declared in plugin manifest" in msg:
+                    skipped_for_plugin.append(relpath)
+                    continue
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"plugin {plugin_id!r}, file {relpath!r}: {e}",
+                    },
+                    status_code=400,
+                )
+            try:
+                payload = _decode_entry(file_entry)
+            except ValueError as e:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"plugin {plugin_id!r}, file {relpath!r}: {e}",
+                    },
+                    status_code=400,
+                )
+            staged.append((target, payload))
+            applied_for_plugin = True
+        if skipped_for_plugin:
+            warnings.append(
+                f"plugin {plugin_id!r}: skipped {len(skipped_for_plugin)} file(s) "
+                f"no longer declared in manifest: {skipped_for_plugin}"
+            )
+        if applied_for_plugin:
+            applied_plugins.append(plugin_id)
+
+    # ── Phase 2: commit ──────────────────────────────────────────────
+    written: list[str] = []
+    try:
+        for target, payload in staged:
+            _atomic_write_file(target, payload)
+            written.append(str(target))
+        # Server config last so a write failure on a plugin file
+        # doesn't leave config.json mismatched against the (untouched)
+        # plugin state. Full-replace: caller is responsible for the
+        # whole dict — this is restore semantics, not partial-update.
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _atomic_write_file(
+            CONFIG_DIR / "config.json",
+            json.dumps(server_config, indent=2).encode("utf-8"),
+        )
+    except OSError as e:
+        # Phase-1 validation should have caught all foreseeable
+        # failures; an OSError here means disk-level trouble (ENOSPC,
+        # permission). We can't roll back already-replaced files
+        # because we didn't snapshot them — surface what got written
+        # so the user knows the state is partial.
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"write failed mid-apply: {e}",
+                "partial": written,
+            },
+            status_code=500,
+        )
+
+    return {
+        "ok": True,
+        "warnings": warnings,
+        "applied": {
+            "server_config": True,
+            "plugins": applied_plugins,
+        },
+    }
+
+
 # ── Plugin-provided routes are registered at startup via plugins/__init__.py ─
 # (CustomsForge, Ultimate Guitar, etc. are loaded from plugins/ directory)
 
