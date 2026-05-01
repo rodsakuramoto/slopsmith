@@ -12,6 +12,7 @@ is exercised separately in `test_plugins.py`.
 import base64
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -440,3 +441,169 @@ def test_import_rejects_non_dict_plugin_blocks(client):
         "plugin_server_configs": "not an object",
     })
     assert r.status_code == 400
+
+
+# ── Loader/importer rule consistency ────────────────────────────────────────
+
+def test_normalize_export_paths_consistency(server_mod, tmp_path):
+    """Round-trip safety property: every entry the loader keeps in
+    `_export_paths` must satisfy `_validate_relpath` at import time. If
+    these two sides drift, exports become unimportable on the same
+    server (the importer rejects entries the loader produced). The
+    fix in `_normalize_export_paths` mirrors the import-side rules
+    (whitespace / `.` segments / leading-dot first segment); this test
+    locks that contract in."""
+    from plugins import _normalize_export_paths
+
+    # Mix of bad shapes that older versions of the loader let through:
+    # leading/trailing whitespace, embedded `.` segment, dotfile first
+    # segment, and one good entry that should survive.
+    settings_field = {
+        "server_files": [
+            "  trim_me.db  ",
+            "models/./a.json",
+            ".cache/file",
+            "good.db",
+        ]
+    }
+    cleaned = _normalize_export_paths(settings_field, "fake_plugin")
+    assert cleaned == ["good.db"]
+
+    # Every survivor must pass `_validate_relpath` against an allowlist
+    # that includes itself — i.e. the loader can't produce something
+    # the importer would refuse with a `ValueError` on traversal /
+    # absolute-path / illegal-segment grounds.
+    for rel in cleaned:
+        # Wraps `_validate_relpath` to assert it doesn't raise the
+        # hard-failure ValueErrors. _UndeclaredFile would mean the
+        # allowlist is wrong, not that the relpath shape is bad.
+        server_mod._validate_relpath(rel, cleaned, tmp_path)
+
+
+# ── Atomic write: unique tmp + cleanup on failure ───────────────────────────
+
+def test_atomic_write_cleans_up_tmp_on_failure(server_mod, tmp_path, monkeypatch):
+    """`_atomic_write_file` must remove its temp file when `os.replace`
+    fails. Otherwise a failed import leaves `.tmp.import` litter in
+    config_dir that persists across server restarts. Also verifies the
+    contract that two failed calls don't collide on the same temp name
+    (mkstemp ensures unique names; we assert both temps are gone)."""
+    target = tmp_path / "out.db"
+
+    boom_calls = {"n": 0}
+    real_replace = server_mod.os.replace
+
+    def boom(*args, **kwargs):
+        boom_calls["n"] += 1
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(server_mod.os, "replace", boom)
+
+    for _ in range(2):
+        with pytest.raises(OSError):
+            server_mod._atomic_write_file(target, b"payload")
+
+    # Both attempts cleaned up. No .tmp.import residue means the
+    # mkstemp + finally-unlink pattern held even across failures.
+    leftover = list(tmp_path.glob("*.tmp.import"))
+    assert leftover == [], f"temp files leaked: {leftover}"
+    assert boom_calls["n"] == 2
+
+    # Restoring real replace, the function should still work end-to-end.
+    monkeypatch.setattr(server_mod.os, "replace", real_replace)
+    server_mod._atomic_write_file(target, b"payload")
+    assert target.read_bytes() == b"payload"
+    assert list(tmp_path.glob("*.tmp.import")) == []
+
+
+# ── Partial-failure response uses relpaths, not absolute paths ──────────────
+
+def test_partial_field_uses_relpaths_not_absolute(client, server_mod, tmp_path, monkeypatch):
+    """When `_atomic_write_file` fails mid-apply, the 500 response
+    surfaces a `partial` list. Returning absolute resolved paths there
+    leaks deployment layout (e.g. `/srv/slopsmith/config/...`); the
+    importer instead returns the bundle's own relpaths, which are
+    portable and meaningful to the user."""
+    _stub_plugin(server_mod, "fake_plugin", ["a.db", "b.db"])
+
+    # Fail on the second `os.replace` call so the first file commits
+    # but the second triggers the OSError branch. `partial` should
+    # then list the first file as `<plugin_id>/<relpath>` — never an
+    # absolute path containing the tmp_path config dir.
+    call_count = {"n": 0}
+    real_replace = server_mod.os.replace
+
+    def selective_boom(src, dst, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError("simulated mid-apply failure")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(server_mod.os, "replace", selective_boom)
+
+    bundle = {
+        "schema": 1,
+        "server_config": {"master_difficulty": 99},
+        "plugin_server_configs": {
+            "fake_plugin": {
+                "files": {
+                    "a.db": {"encoding": "base64", "data": base64.b64encode(b"A").decode()},
+                    "b.db": {"encoding": "base64", "data": base64.b64encode(b"B").decode()},
+                },
+            },
+        },
+    }
+    r = client.post("/api/settings/import", json=bundle)
+    assert r.status_code == 500
+    body = r.json()
+    partial = body.get("partial")
+    assert isinstance(partial, list) and partial, body
+    config_root = str(tmp_path)
+    for p in partial:
+        # Relpath form: no absolute prefix, no drive letter, no leak
+        # of the local config_dir's filesystem path.
+        assert not p.startswith("/"), p
+        assert config_root not in p, p
+        assert ":" not in p[:3], p  # no drive letter
+    # First file actually got written (because we let the first
+    # replace through); listed in `partial` under its plugin-prefixed
+    # relpath form.
+    assert any(p.endswith("a.db") for p in partial)
+
+
+# ── Export refuses to follow symlinked subdirectories ───────────────────────
+
+def test_export_skips_symlinked_subdir_contents(client, server_mod, tmp_path):
+    """Manifest declares `models/`, the user's config_dir contains a
+    real file `models/a.bin` and a symlinked subdirectory
+    `models/linked → outside/`. `os.walk(followlinks=False)` plus the
+    explicit `dirnames`/`islink` filters must keep the bundle from
+    capturing the symlinked contents — otherwise an attacker (or just
+    a misconfigured volume mount) can leak data outside config_dir."""
+    _stub_plugin(server_mod, "fake_plugin", ["models/"])
+
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "a.bin").write_bytes(b"real")
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "secret.bin").write_bytes(b"SECRET")
+
+    try:
+        os.symlink(
+            str(tmp_path / "outside"),
+            str(tmp_path / "models" / "linked"),
+            target_is_directory=True,
+        )
+    except (OSError, NotImplementedError):
+        # Windows without Developer Mode / admin can't create symlinks;
+        # that's a privilege limitation of the test host, not a bug in
+        # the code under test. Skip rather than xfail so devs with the
+        # privilege still exercise the assertion.
+        pytest.skip("symlink creation not permitted on this host")
+
+    bundle = client.get("/api/settings/export").json()
+    files = bundle["plugin_server_configs"]["fake_plugin"]["files"]
+    assert "models/a.bin" in files
+    # The leak we're guarding against: the symlinked subdir's contents
+    # must NOT appear in the bundle in any form.
+    assert "models/linked/secret.bin" not in files
+    assert not any("secret.bin" in k for k in files)

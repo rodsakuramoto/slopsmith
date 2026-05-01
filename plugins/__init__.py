@@ -232,6 +232,17 @@ def _normalize_export_paths(settings_field, plugin_id: str) -> list[str]:
                 f"server_files entry {entry!r}"
             )
             continue
+        # Loader rules mirror what `_validate_relpath` enforces at import
+        # time, so any entry that passes here is guaranteed to round-trip
+        # through export and back through import. Surfacing whitespace /
+        # `.` / dotfile entries as warnings beats silently producing a
+        # bundle that the same server later refuses to ingest.
+        if entry != entry.strip():
+            print(
+                f"[Plugin] '{plugin_id}': dropping server_files entry with "
+                f"leading/trailing whitespace {entry!r}"
+            )
+            continue
         # Reject absolute paths, drive letters, and any backslash-
         # separated form before splitting — the importer treats the
         # allowlist as POSIX strings, so accepting `foo\bar` here would
@@ -255,11 +266,12 @@ def _normalize_export_paths(settings_field, plugin_id: str) -> list[str]:
         if (
             body.startswith("/")
             or (len(body) >= 2 and body[1] == ":")  # Windows drive letter
-            or any(part in ("", "..") for part in parts)
+            or any(part in ("", ".", "..") for part in parts)
+            or parts[0].startswith(".")
         ):
             print(
                 f"[Plugin] '{plugin_id}': dropping unsafe server_files entry "
-                f"{entry!r} (absolute / traversal / empty segment)"
+                f"{entry!r} (absolute / traversal / dotfile / empty segment)"
             )
             continue
         cleaned.append(body + ("/" if is_dir else ""))
