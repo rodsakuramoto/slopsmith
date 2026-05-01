@@ -584,10 +584,25 @@ async function saveSettings() {
 // ── Settings export / import (slopsmith#113) ─────────────────────────────────
 //
 // Bundles server config + every localStorage key + opted-in plugin server
-// files into a single JSON file. Import is all-or-nothing across server
-// (atomic in /api/settings/import) and browser (localStorage clear+restore
-// only after server reports success), so a server-side validation failure
-// leaves the page state untouched.
+// files into a single JSON file.
+//
+// Apply semantics — phased, NOT all-or-nothing across the two stores:
+//   1. Server first (/api/settings/import). Phase-1 validation guards
+//      the whole bundle; phase-2 disk commit is per-file but ordered
+//      so a mid-apply failure surfaces a `partial` field. A server
+//      failure short-circuits before any localStorage write, so the
+//      browser side stays untouched on validation refusals.
+//   2. localStorage second, only after the server returns ok. Applied
+//      as a MERGE (no clear): bundled keys overwrite, locally-present
+//      keys absent from the bundle are preserved (so a plugin
+//      installed after the export keeps its first-run defaults).
+//      A localStorage exception here (quota / private mode) is
+//      surfaced verbatim — server state is already committed and we
+//      don't pretend the import was clean.
+//
+// In short: the server side is atomic in phase 1 and surface-partial in
+// phase 2; the localStorage side is best-effort merge after server
+// success. Failures are reported, never silenced.
 
 async function exportSettings() {
     const status = document.getElementById('backup-status');
