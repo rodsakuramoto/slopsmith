@@ -348,6 +348,11 @@ function filterLibrary() {
         _libEpoch++;
         currentPage = 0;
         _treeLetter = '';
+        // Letter-bar counts depend on `q` and the active filter set —
+        // any change to those must invalidate the tree-view stats
+        // cache or the next switch to tree view will render stale
+        // letter counts (slopsmith#134 review).
+        _treeStats = null;
         loadLibrary(0);
     }, 250);
 }
@@ -355,6 +360,9 @@ function filterLibrary() {
 function sortLibrary() {
     _libEpoch++;
     currentPage = 0;
+    // Same reason as filterLibrary: format dropdown changes the stats
+    // payload, so the cache must drop too.
+    _treeStats = null;
     loadLibrary(0);
 }
 

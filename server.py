@@ -297,7 +297,12 @@ class MetadataDB:
             # break ties by signed key DESC (down-tuned before up-
             # tuned, mirroring how Rocksmith groups them) and then by
             # name so the order is fully deterministic.
-            "tuning": "ABS(tuning_sort_key), tuning_sort_key DESC, tuning_name COLLATE NOCASE",
+            #
+            # Leading term pushes pre-migration / unscanned rows
+            # (`tuning_name` empty, `tuning_sort_key` defaulted to 0)
+            # to the bottom — without it ABS(0) collides with E
+            # Standard's 0 and the empty-tuning rows would sort first.
+            "tuning": "(tuning_name = '') ASC, ABS(tuning_sort_key), tuning_sort_key DESC, tuning_name COLLATE NOCASE",
             # Year sort (slopsmith#128). Empty-year rows pushed to the
             # bottom for both directions; otherwise CAST so '2010' >
             # '2005' rather than alphabetic.
@@ -444,8 +449,13 @@ class MetadataDB:
             has_lyrics=has_lyrics, tunings=tunings,
         )
         total = self.conn.execute(f"SELECT COUNT(*) FROM songs {where}", params).fetchone()[0]
+        # NOCASE collation here mirrors `query_artists` and the per-
+        # letter `COUNT(DISTINCT artist COLLATE NOCASE)` below — without
+        # it, an artist stored under two different casings would inflate
+        # `total_artists` against the letter-bar breakdown the UI
+        # renders next to it.
         artist_count = self.conn.execute(
-            f"SELECT COUNT(DISTINCT artist) FROM songs {where}", params
+            f"SELECT COUNT(DISTINCT artist COLLATE NOCASE) FROM songs {where}", params
         ).fetchone()[0]
         rows = self.conn.execute(
             f"SELECT UPPER(SUBSTR(artist, 1, 1)) as letter, COUNT(DISTINCT artist COLLATE NOCASE) "

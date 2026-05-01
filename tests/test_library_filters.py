@@ -224,6 +224,38 @@ def test_year_sort_asc_oldest_first(client, seeded):
     assert files == ["b.psarc", "a.psarc", "f.psarc", "d.sloppak", "c.sloppak", "e.sloppak"]
 
 
+def test_tuning_sort_pushes_empty_tuning_name_to_bottom(client, server_mod):
+    """Pre-rescan rows have empty `tuning_name` and `tuning_sort_key=0`.
+    Without a leading `(tuning_name='') ASC` term, ABS(0) collides with
+    E Standard's 0 so unscanned rows would float to the top of the
+    tuning sort. Regression for Copilot finding on PR #134."""
+    _put(server_mod, filename="real.psarc", title="Real", artist="A",
+         tuning_name="E Standard", tuning_sort_key=0,
+         arrangements=[{"index": 0, "name": "Lead", "notes": 1}])
+    _put(server_mod, filename="legacy.psarc", title="Legacy", artist="B",
+         tuning_name="", tuning_sort_key=0,
+         arrangements=[{"index": 0, "name": "Lead", "notes": 1}])
+    data = _get(client, sort="tuning")
+    files = [s["filename"] for s in data["songs"]]
+    assert files == ["real.psarc", "legacy.psarc"]
+
+
+def test_query_stats_artist_count_is_case_insensitive(client, server_mod):
+    """`total_artists` previously used `COUNT(DISTINCT artist)` (case-
+    sensitive) while `query_artists` and the per-letter counts used
+    NOCASE — leading to mismatched totals when the same artist was
+    indexed under different casings. Regression for Copilot finding
+    on PR #134."""
+    _put(server_mod, filename="x.psarc", title="X", artist="The Beatles",
+         arrangements=[{"index": 0, "name": "Lead", "notes": 1}])
+    _put(server_mod, filename="y.psarc", title="Y", artist="the beatles",
+         arrangements=[{"index": 0, "name": "Lead", "notes": 1}])
+    stats = client.get("/api/library/stats").json()
+    assert stats["total_artists"] == 1
+    # Letter-bar count agrees.
+    assert stats["letters"].get("T") == 1
+
+
 def test_compound_sort_with_legacy_dir_desc_doesnt_error(client, seeded):
     """Regression for Copilot finding on PR #134: `sort=year&dir=desc`
     used to produce invalid SQL (`CAST(year AS INTEGER) ASC DESC`)
