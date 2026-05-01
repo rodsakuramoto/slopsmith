@@ -187,7 +187,6 @@ html { scroll-behavior: smooth; }
 @media (max-width: 640px) {
     #player-controls { gap: 4px; padding: 6px; }
     #player-controls button { padding: 4px 8px; font-size: 11px; }
-    #volume { width: 50px; }
 }
 
 /* Library filter drawer (slopsmith#129/#69) */
@@ -281,3 +280,31 @@ html { scroll-behavior: smooth; }
     line-height: 1;
 }
 #lib-filter-chips .chip button:hover { color: #fff; }
+
+/* Audio mixer popover */
+#mixer-popover { min-width: 200px; }
+#mixer-popover .mixer-strip { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0 10px; }
+#mixer-popover .mixer-strip-label {
+    font-size: 11px; color: #9ca3af; max-width: 80px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center;
+}
+#mixer-popover .mixer-strip-fader {
+    width: 110px;
+    height: 24px;
+    transform: rotate(-90deg);
+    transform-origin: center;
+}
+@supports ((-webkit-appearance: slider-vertical) or (appearance: slider-vertical)) {
+    #mixer-popover .mixer-strip-fader {
+        width: 24px;
+        height: 110px;
+        transform: none;
+        transform-origin: center;
+        writing-mode: vertical-lr;
+        direction: rtl;
+        -webkit-appearance: slider-vertical;
+        appearance: slider-vertical;
+    }
+}
+#mixer-popover .mixer-strip-value { font-size: 10px; color: #6b7280; font-variant-numeric: tabular-nums; }
+#mixer-popover .mixer-row { display: flex; align-items: stretch; gap: 4px; max-width: 90vw; overflow-x: auto; flex-wrap: wrap; }
