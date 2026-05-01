@@ -571,6 +571,60 @@ def test_partial_field_uses_relpaths_not_absolute(client, server_mod, tmp_path, 
     assert any(p.endswith("a.db") for p in partial)
 
 
+# ── Import validates server_config types/ranges ─────────────────────────────
+
+@pytest.mark.parametrize("bad_cfg, needle", [
+    ({"master_difficulty": 150}, "master_difficulty"),
+    ({"master_difficulty": -1}, "master_difficulty"),
+    ({"master_difficulty": True}, "master_difficulty"),
+    ({"master_difficulty": "75"}, "master_difficulty"),
+    ({"av_offset_ms": 5000}, "av_offset_ms"),
+    ({"av_offset_ms": False}, "av_offset_ms"),
+    ({"demucs_server_url": 42}, "demucs_server_url"),
+    ({"default_arrangement": ["Lead"]}, "default_arrangement"),
+    ({"dlc_dir": 42}, "dlc_dir"),
+])
+def test_import_refuses_invalid_server_config(client, tmp_path, bad_cfg, needle):
+    """Importer must apply the same per-key type/range gates that
+    POST /api/settings enforces; otherwise a hand-edited bundle could
+    persist values that downstream code crashes on (e.g. non-string
+    demucs_server_url, out-of-range difficulty)."""
+    pre = json.dumps({"master_difficulty": 50})
+    (tmp_path / "config.json").write_text(pre)
+
+    bundle = {
+        "schema": 1,
+        "server_config": bad_cfg,
+        "plugin_server_configs": {},
+    }
+    r = client.post("/api/settings/import", json=bundle)
+    assert r.status_code == 400, r.json()
+    assert needle in r.json()["error"]
+    # Disk untouched — phase-1 refusal blocks every write.
+    assert json.loads((tmp_path / "config.json").read_text())["master_difficulty"] == 50
+
+
+def test_import_passes_through_unknown_server_config_keys(client, tmp_path):
+    """Unknown server_config keys round-trip verbatim. The import path
+    isn't the place to gatekeep what plugins / future versions may add
+    to the settings dict — gates apply only to keys we know about."""
+    bundle = {
+        "schema": 1,
+        "server_config": {
+            "master_difficulty": 60,
+            "future_setting": {"nested": True},
+            "unknown_string": "hello",
+        },
+        "plugin_server_configs": {},
+    }
+    r = client.post("/api/settings/import", json=bundle)
+    assert r.status_code == 200, r.json()
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    assert cfg["future_setting"] == {"nested": True}
+    assert cfg["unknown_string"] == "hello"
+    assert cfg["master_difficulty"] == 60
+
+
 # ── Export refuses to follow symlinked subdirectories ───────────────────────
 
 def test_export_skips_symlinked_subdir_contents(client, server_mod, tmp_path):

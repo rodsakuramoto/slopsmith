@@ -881,6 +881,48 @@ def _running_version() -> str:
     return "unknown"
 
 
+def _validate_server_config_types(cfg: dict) -> str | None:
+    """Type-and-range gate for the server_config block of an import
+    bundle, mirroring the per-key checks in `POST /api/settings`. The
+    importer writes config.json verbatim, so without this gate a
+    hand-edited bundle could persist a non-string `demucs_server_url`
+    (which downstream code calls `.rstrip('/')` on and crashes) or an
+    out-of-range `master_difficulty` (which bypasses the slider's
+    clamp). Returns None on success, an error string on the first
+    violation. Filesystem-existence checks (e.g. dlc_dir is_dir) are
+    NOT performed here — restoring a bundle on a different machine
+    legitimately may reference paths that don't exist locally yet,
+    and the `POST /api/settings` interactive endpoint is the right
+    place for that ergonomic check, not the bulk-restore path.
+    Unknown keys are passed through so future settings (and per-plugin
+    keys that may be added later) round-trip without code changes
+    here."""
+    if "dlc_dir" in cfg:
+        v = cfg["dlc_dir"]
+        if v is not None and not isinstance(v, str):
+            return "server_config.dlc_dir must be a string"
+    for key in ("default_arrangement", "demucs_server_url"):
+        if key in cfg:
+            v = cfg[key]
+            if v is not None and not isinstance(v, str):
+                return f"server_config.{key} must be a string"
+    if "master_difficulty" in cfg:
+        v = cfg["master_difficulty"]
+        # bool is an int subclass — reject explicitly so True/False
+        # don't quietly persist as 1/0 difficulty values.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return "server_config.master_difficulty must be a number between 0 and 100"
+        if not (0 <= v <= 100):
+            return "server_config.master_difficulty must be between 0 and 100"
+    if "av_offset_ms" in cfg:
+        v = cfg["av_offset_ms"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return "server_config.av_offset_ms must be a number between -1000 and 1000"
+        if not (-1000 <= v <= 1000):
+            return "server_config.av_offset_ms must be between -1000 and 1000"
+    return None
+
+
 class _UndeclaredFile(ValueError):
     """Raised when a relpath would otherwise be safe but isn't covered by
     the plugin's manifest allowlist. Distinct from the generic
@@ -1221,6 +1263,12 @@ def import_settings(bundle: dict):
     if not isinstance(server_config, dict):
         return JSONResponse(
             {"ok": False, "error": "server_config must be an object"},
+            status_code=400,
+        )
+    cfg_err = _validate_server_config_types(server_config)
+    if cfg_err is not None:
+        return JSONResponse(
+            {"ok": False, "error": cfg_err},
             status_code=400,
         )
 
