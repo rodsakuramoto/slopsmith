@@ -64,13 +64,35 @@ function _defaultLibFilters() {
     };
 }
 
+function _normalizeStringArray(v) {
+    return Array.isArray(v) ? v.filter(x => typeof x === 'string' && x) : [];
+}
+
+function _normalizeLibFilters(parsed) {
+    // Defensive: a stale or hand-edited localStorage payload could have
+    // any shape. Without normalization a later `.join` or `.includes`
+    // on a non-array would throw at filter-apply time. Coerce each
+    // field back to its expected type, dropping anything we don't
+    // recognize. Slopsmith#134 review.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return _defaultLibFilters();
+    }
+    const lyrics = parsed.lyrics;
+    return {
+        arrHas: _normalizeStringArray(parsed.arrHas),
+        arrLacks: _normalizeStringArray(parsed.arrLacks),
+        stemsHas: _normalizeStringArray(parsed.stemsHas),
+        stemsLacks: _normalizeStringArray(parsed.stemsLacks),
+        lyrics: lyrics === 0 || lyrics === 1 ? lyrics : null,
+        tunings: _normalizeStringArray(parsed.tunings),
+    };
+}
+
 function _loadLibFilters() {
     try {
         const raw = localStorage.getItem(_LIB_FILTERS_KEY);
         if (!raw) return _defaultLibFilters();
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== 'object') return _defaultLibFilters();
-        return Object.assign(_defaultLibFilters(), parsed);
+        return _normalizeLibFilters(JSON.parse(raw));
     } catch {
         return _defaultLibFilters();
     }
@@ -176,17 +198,29 @@ function _renderLyricsPill() {
 async function _renderTuningList() {
     const c = document.getElementById('filter-tunings');
     if (!c) return;
+    let fetchError = null;
     if (!_tuningNames) {
         c.innerHTML = '<div class="text-xs text-gray-500 px-2">Loading...</div>';
         try {
             const resp = await fetch('/api/library/tuning-names');
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
-            _tuningNames = data.tunings || [];
-        } catch {
-            _tuningNames = [];
+            _tuningNames = Array.isArray(data.tunings) ? data.tunings : [];
+        } catch (e) {
+            // Distinguish a server / network failure from "the DB
+            // genuinely has no tunings indexed". The latter wants a
+            // Full Rescan; the former just wants a retry. Don't cache
+            // the failure — leave _tuningNames null so reopening the
+            // drawer triggers a fresh attempt.
+            _tuningNames = null;
+            fetchError = e.message || 'request failed';
         }
     }
     c.innerHTML = '';
+    if (fetchError) {
+        c.innerHTML = `<div class="text-xs text-red-400 px-2">Failed to load tunings (${esc(fetchError)}). Reopen the drawer to retry.</div>`;
+        return;
+    }
     if (!_tuningNames.length) {
         c.innerHTML = '<div class="text-xs text-gray-500 px-2">No tunings indexed yet — try Full Rescan.</div>';
         return;

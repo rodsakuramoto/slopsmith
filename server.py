@@ -293,16 +293,18 @@ class MetadataDB:
             # the sum of per-string offsets, so |sort_key| is the
             # magnitude of the down/up-tune. ABS ascending puts E
             # Standard (0) first, then ±2 (Drop D, F Standard), then
-            # ±6 (Eb Standard), and so on. Within a magnitude tier we
-            # break ties by signed key DESC (down-tuned before up-
-            # tuned, mirroring how Rocksmith groups them) and then by
-            # name so the order is fully deterministic.
+            # ±6 (Eb Standard, F# Standard), and so on. Within a
+            # magnitude tier we break ties by signed key ASC so the
+            # negative (down-tuned) variant comes before the positive
+            # (up-tuned) one — Eb Standard before F Standard, matching
+            # how Rocksmith groups its tuning list. Final tiebreak by
+            # name keeps the order fully deterministic.
             #
             # Leading term pushes pre-migration / unscanned rows
             # (`tuning_name` empty, `tuning_sort_key` defaulted to 0)
             # to the bottom — without it ABS(0) collides with E
             # Standard's 0 and the empty-tuning rows would sort first.
-            "tuning": "(tuning_name = '') ASC, ABS(tuning_sort_key), tuning_sort_key DESC, tuning_name COLLATE NOCASE",
+            "tuning": "(tuning_name = '') ASC, ABS(tuning_sort_key), tuning_sort_key ASC, tuning_name COLLATE NOCASE",
             # Year sort (slopsmith#128). Empty-year rows pushed to the
             # bottom for both directions; otherwise CAST so '2010' >
             # '2005' rather than alphabetic.
@@ -922,7 +924,12 @@ def list_tuning_names():
         "SELECT tuning_name, MIN(tuning_sort_key), COUNT(*) "
         "FROM songs WHERE title != '' AND tuning_name != '' "
         "GROUP BY tuning_name COLLATE NOCASE "
-        "ORDER BY ABS(MIN(tuning_sort_key)), MIN(tuning_sort_key) DESC, tuning_name COLLATE NOCASE"
+        # Same ordering as `sort=tuning` in `query_page`: distance
+        # from E Standard first, then signed-key ASC so the down-
+        # tuned variant precedes the up-tuned one at equal distance
+        # (Eb Standard before F Standard at distance 6). Final
+        # alphabetical tiebreak keeps the order deterministic.
+        "ORDER BY ABS(MIN(tuning_sort_key)), MIN(tuning_sort_key) ASC, tuning_name COLLATE NOCASE"
     ).fetchall()
     return {
         "tunings": [

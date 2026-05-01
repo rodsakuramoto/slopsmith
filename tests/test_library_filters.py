@@ -224,6 +224,37 @@ def test_year_sort_asc_oldest_first(client, seeded):
     assert files == ["b.psarc", "a.psarc", "f.psarc", "d.sloppak", "c.sloppak", "e.sloppak"]
 
 
+def test_tuning_sort_down_tuned_before_up_tuned_at_same_distance(client, server_mod):
+    """Within an ABS(tuning_sort_key) tier, the down-tuned variant
+    must come before the up-tuned one so the order matches Rocksmith's
+    grouping (Eb Standard before F Standard at distance 6, etc.).
+    Earlier code used signed-key DESC for the tiebreaker, which put
+    +6 before -6 — the opposite of intent. Regression for Copilot
+    finding on PR #134."""
+    _put(server_mod, filename="up.psarc", title="Up", artist="A",
+         tuning_name="F Standard", tuning_sort_key=6,
+         arrangements=[{"index": 0, "name": "Lead", "notes": 1}])
+    _put(server_mod, filename="down.psarc", title="Down", artist="B",
+         tuning_name="Eb Standard", tuning_sort_key=-6,
+         arrangements=[{"index": 0, "name": "Lead", "notes": 1}])
+    _put(server_mod, filename="std.psarc", title="Std", artist="C",
+         tuning_name="E Standard", tuning_sort_key=0,
+         arrangements=[{"index": 0, "name": "Lead", "notes": 1}])
+
+    # /api/library?sort=tuning
+    data = _get(client, sort="tuning")
+    seen = []
+    for s in data["songs"]:
+        tn = s.get("tuning_name")
+        if tn and tn not in seen:
+            seen.append(tn)
+    assert seen == ["E Standard", "Eb Standard", "F Standard"]
+
+    # /api/library/tuning-names — same intended order.
+    names = [t["name"] for t in client.get("/api/library/tuning-names").json()["tunings"]]
+    assert names == ["E Standard", "Eb Standard", "F Standard"]
+
+
 def test_tuning_sort_pushes_empty_tuning_name_to_bottom(client, server_mod):
     """Pre-rescan rows have empty `tuning_name` and `tuning_sort_key=0`.
     Without a leading `(tuning_name='') ASC` term, ABS(0) collides with
