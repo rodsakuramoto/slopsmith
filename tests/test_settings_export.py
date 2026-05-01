@@ -607,3 +607,111 @@ def test_export_skips_symlinked_subdir_contents(client, server_mod, tmp_path):
     # must NOT appear in the bundle in any form.
     assert "models/linked/secret.bin" not in files
     assert not any("secret.bin" in k for k in files)
+
+
+# ── Import refuses symlink target / symlinked parent ────────────────────────
+
+def test_import_rejects_symlinked_target_file(client, server_mod, tmp_path):
+    """Even a fully-allowlisted relpath must not redirect through a
+    symlink on import: the manifest declares `fake_plugin.db`, but the
+    user's config_dir contains a symlink at that name pointing at a
+    different in-config file. Writing through the symlink would defeat
+    the manifest's allowlist intent (the bundle authors `fake_plugin.db`
+    but bytes land at `decoy.db`). Phase-1 must refuse outright.
+    """
+    _stub_plugin(server_mod, "fake_plugin", ["fake_plugin.db"])
+    (tmp_path / "decoy.db").write_bytes(b"original")
+    try:
+        os.symlink(str(tmp_path / "decoy.db"), str(tmp_path / "fake_plugin.db"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this host")
+
+    bundle = {
+        "schema": 1,
+        "server_config": {},
+        "plugin_server_configs": {
+            "fake_plugin": {
+                "files": {
+                    "fake_plugin.db": {
+                        "encoding": "base64",
+                        "data": base64.b64encode(b"hijacked").decode(),
+                    },
+                },
+            },
+        },
+    }
+    r = client.post("/api/settings/import", json=bundle)
+    assert r.status_code == 400, r.json()
+    # Decoy file untouched — write was refused, not just redirected to
+    # a different output destination.
+    assert (tmp_path / "decoy.db").read_bytes() == b"original"
+
+
+def test_import_rejects_symlinked_parent_dir(client, server_mod, tmp_path):
+    """Manifest declares `models/`, but the user's config_dir has
+    `models` as a symlink to a sibling directory. Writing through it
+    would let the bundle author `models/<anything>` and have bytes land
+    in the symlink target — bypassing the spirit of the allowlist
+    even if the resolved path stays inside config_dir."""
+    _stub_plugin(server_mod, "fake_plugin", ["models/"])
+    (tmp_path / "real_models").mkdir()
+    try:
+        os.symlink(
+            str(tmp_path / "real_models"),
+            str(tmp_path / "models"),
+            target_is_directory=True,
+        )
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this host")
+
+    bundle = {
+        "schema": 1,
+        "server_config": {},
+        "plugin_server_configs": {
+            "fake_plugin": {
+                "files": {
+                    "models/x.bin": {
+                        "encoding": "base64",
+                        "data": base64.b64encode(b"x").decode(),
+                    },
+                },
+            },
+        },
+    }
+    r = client.post("/api/settings/import", json=bundle)
+    assert r.status_code == 400, r.json()
+    # No file written through the symlink either.
+    assert not (tmp_path / "real_models" / "x.bin").exists()
+
+
+# ── _atomic_write_file: closes raw fd if os.fdopen raises ───────────────────
+
+def test_atomic_write_closes_fd_when_fdopen_fails(server_mod, tmp_path, monkeypatch):
+    """`tempfile.mkstemp` returns a raw fd; `os.fdopen` is the only
+    code path that takes ownership. If `os.fdopen` itself raises
+    (rare — EMFILE / ENOMEM), the fd would otherwise leak, and on
+    Windows the temp file would remain locked. Verify the
+    fdopen-failure path explicitly closes the fd and removes the
+    temp file."""
+    target = tmp_path / "out.db"
+
+    closed_fds: list[int] = []
+    real_close = os.close
+
+    def tracking_close(fd):
+        closed_fds.append(fd)
+        return real_close(fd)
+
+    def boom_fdopen(*args, **kwargs):
+        raise OSError("simulated EMFILE")
+
+    monkeypatch.setattr(server_mod.os, "close", tracking_close)
+    monkeypatch.setattr(server_mod.os, "fdopen", boom_fdopen)
+
+    with pytest.raises(OSError, match="simulated EMFILE"):
+        server_mod._atomic_write_file(target, b"payload")
+
+    # fd was closed (so it didn't leak), and the temp file mkstemp
+    # created was removed (so it doesn't litter / lock on Windows).
+    assert closed_fds, "raw fd was never closed after fdopen failure"
+    assert list(tmp_path.glob("*.tmp.import")) == []

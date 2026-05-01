@@ -937,6 +937,15 @@ def _validate_relpath(relpath: str, allowed: list[str], config_dir: Path) -> Pat
          must still live inside config_dir. This catches symlinks-
          under-config_dir attacks where someone planted a symlink
          pointing out and tried to import a file "under" it.
+      4. Symlink rejection: even when a symlink (or symlinked
+         directory component) resolves to a path that *still* lives
+         inside config_dir, importing through it would let an
+         allowlisted relpath redirect the write to a different
+         in-config file — bypassing the manifest's intent. We probe
+         every path component from `config_dir` down to the target
+         using `lstat`, refusing if any link is set on the chain.
+         This matches the documented "symlinks are never followed on
+         import" guarantee.
 
     Returns the resolved absolute path (caller writes there in phase 2).
     """
@@ -976,6 +985,31 @@ def _validate_relpath(relpath: str, allowed: list[str], config_dir: Path) -> Pat
         raise ValueError(f"relpath resolves to config_dir itself: {relpath!r}")
     if config_root not in target.parents:
         raise ValueError(f"relpath escapes config_dir: {relpath!r}")
+
+    # Walk every component from config_dir down to (but not including)
+    # the target file, refusing if any is a symlink. The target itself
+    # is checked too — a symlinked file inside config_dir could still
+    # redirect the write to another in-config file, defeating the
+    # manifest's allowlist intent. `lstat` is the right primitive: it
+    # reports the link itself rather than the link's destination, so a
+    # broken or self-referential symlink won't slip through. Missing
+    # intermediate dirs are fine — `_atomic_write_file` mkdirs them
+    # under config_dir, and a path that doesn't exist yet trivially
+    # isn't a symlink.
+    probe = config_dir
+    for part in relpath.split("/"):
+        probe = probe / part
+        try:
+            st = os.lstat(probe)
+        except FileNotFoundError:
+            # Component doesn't exist yet → can't be a symlink. Any
+            # remaining components also don't exist, so we're done.
+            break
+        import stat as _stat
+        if _stat.S_ISLNK(st.st_mode):
+            raise ValueError(
+                f"relpath traverses or targets a symlink: {relpath!r}"
+            )
     return target
 
 
@@ -1099,8 +1133,22 @@ def _atomic_write_file(target: Path, payload: bytes):
         suffix=".tmp.import",
     )
     tmp = Path(tmp_name)
+    # Hand fd to os.fdopen inside its own try, so a failure to wrap
+    # the descriptor (rare — typically EMFILE / ENOMEM) doesn't leak
+    # the raw fd. On Windows an open fd would also keep the temp file
+    # locked and undeletable. Once `with` enters, the fdopen'd file
+    # owns close responsibility.
     try:
-        with os.fdopen(fd, "wb") as f:
+        f = os.fdopen(fd, "wb")
+    except Exception:
+        os.close(fd)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    try:
+        with f:
             f.write(payload)
         os.replace(tmp, target)
     except Exception:
@@ -1129,19 +1177,18 @@ def export_settings():
         allowed = p.get("_export_paths") or []
         plugin_blocks[p["id"]] = {"files": _walk_export_paths(allowed, CONFIG_DIR)}
 
+    # Capture the timestamp once so the bundle's `exported_at` and the
+    # download filename's date prefix can't disagree if the request
+    # crosses midnight UTC between the two formats.
+    now = datetime.datetime.now(datetime.timezone.utc)
     bundle = {
         "schema": SETTINGS_BUNDLE_SCHEMA,
-        "exported_at": datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        ),
+        "exported_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "slopsmith_version": _running_version(),
         "server_config": server_config,
         "plugin_server_configs": plugin_blocks,
     }
-    filename = (
-        f"slopsmith-settings-"
-        f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')}.json"
-    )
+    filename = f"slopsmith-settings-{now.strftime('%Y-%m-%d')}.json"
     return JSONResponse(
         bundle,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
