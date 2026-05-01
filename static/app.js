@@ -31,6 +31,290 @@ let _gridObserver = null;
 // they've been superseded and skip rendering stale results.
 let _libEpoch = 0;
 
+// ── Library filters (slopsmith#129/#69) ────────────────────────────────
+//
+// Filter state lives in a single object so the active set can be
+// serialized to localStorage as one key. Each axis is OR-within (Lead
+// + Rhythm = "has Lead OR Rhythm"); cross-axis is AND. Tri-state pills
+// translate to `_has` / `_lacks` lists on the wire so the server's
+// SQL doesn't have to encode the third "any" state.
+const _ARRANGEMENTS = ['Lead', 'Rhythm', 'Bass', 'Combo'];
+// Stem ids match the bare strings sloppak manifests use ("drums",
+// "bass", etc.). `full` is intentionally omitted from the filter UI:
+// it's the fallback mix every sloppak ships with, so filtering by it
+// would match all sloppaks and confuse users.
+const _STEM_DEFS = [
+    { id: 'drums', label: 'Drums' },
+    { id: 'bass', label: 'Bass' },
+    { id: 'vocals', label: 'Vocals' },
+    { id: 'guitar', label: 'Guitar' },
+    { id: 'piano', label: 'Piano' },
+    { id: 'other', label: 'Other' },
+];
+const _LIB_FILTERS_KEY = 'slopsmith.libFilters';
+let _libFilters = _loadLibFilters();
+let _tuningNames = null;  // cached from /api/library/tuning-names
+
+function _defaultLibFilters() {
+    return {
+        arrHas: [], arrLacks: [],
+        stemsHas: [], stemsLacks: [],
+        lyrics: null,             // null | 1 | 0
+        tunings: [],
+    };
+}
+
+function _loadLibFilters() {
+    try {
+        const raw = localStorage.getItem(_LIB_FILTERS_KEY);
+        if (!raw) return _defaultLibFilters();
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return _defaultLibFilters();
+        return Object.assign(_defaultLibFilters(), parsed);
+    } catch {
+        return _defaultLibFilters();
+    }
+}
+
+function _saveLibFilters() {
+    try { localStorage.setItem(_LIB_FILTERS_KEY, JSON.stringify(_libFilters)); }
+    catch { /* private mode / quota — ignore, in-memory state still works */ }
+}
+
+function _libActiveCount() {
+    let n = 0;
+    if (_libFilters.arrHas.length) n++;
+    if (_libFilters.arrLacks.length) n++;
+    if (_libFilters.stemsHas.length) n++;
+    if (_libFilters.stemsLacks.length) n++;
+    if (_libFilters.lyrics !== null) n++;
+    if (_libFilters.tunings.length) n++;
+    return n;
+}
+
+function _applyLibFiltersToParams(params) {
+    if (_libFilters.arrHas.length) params.set('arrangements_has', _libFilters.arrHas.join(','));
+    if (_libFilters.arrLacks.length) params.set('arrangements_lacks', _libFilters.arrLacks.join(','));
+    if (_libFilters.stemsHas.length) params.set('stems_has', _libFilters.stemsHas.join(','));
+    if (_libFilters.stemsLacks.length) params.set('stems_lacks', _libFilters.stemsLacks.join(','));
+    if (_libFilters.lyrics !== null) params.set('has_lyrics', String(_libFilters.lyrics));
+    if (_libFilters.tunings.length) params.set('tunings', _libFilters.tunings.join(','));
+    return params;
+}
+
+function _pillState(item, hasList, lacksList) {
+    if (hasList.includes(item)) return 'require';
+    if (lacksList.includes(item)) return 'exclude';
+    return 'any';
+}
+
+function _cyclePill(item, hasKey, lacksKey) {
+    // Cycle: any -> require -> exclude -> any. Mutates _libFilters in place.
+    const hasList = _libFilters[hasKey];
+    const lacksList = _libFilters[lacksKey];
+    const inHas = hasList.indexOf(item);
+    const inLacks = lacksList.indexOf(item);
+    if (inHas === -1 && inLacks === -1) {
+        hasList.push(item);
+    } else if (inHas !== -1) {
+        hasList.splice(inHas, 1);
+        lacksList.push(item);
+    } else {
+        lacksList.splice(inLacks, 1);
+    }
+    _saveLibFilters();
+    _renderLibFilterDrawer();
+    _renderLibFilterChips();
+    _libEpoch++;
+    currentPage = 0;
+    _treeStats = null;  // letter bar counts depend on filters now
+    loadLibrary(0);
+}
+
+function _renderPillRow(containerId, items, hasKey, lacksKey, labelFor) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    c.innerHTML = '';
+    for (const it of items) {
+        const id = typeof it === 'string' ? it : it.id;
+        const label = labelFor ? labelFor(it) : id;
+        const state = _pillState(id, _libFilters[hasKey], _libFilters[lacksKey]);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `filter-pill state-${state}`;
+        btn.textContent = label;
+        btn.onclick = () => _cyclePill(id, hasKey, lacksKey);
+        c.appendChild(btn);
+    }
+}
+
+function _renderLyricsPill() {
+    // Single tri-state pill matching the arrangement / stem pattern.
+    // Cycle: any (null) -> require (1) -> exclude (0) -> any.
+    const c = document.getElementById('filter-lyrics');
+    if (!c) return;
+    c.innerHTML = '';
+    const v = _libFilters.lyrics;
+    const state = v === 1 ? 'require' : v === 0 ? 'exclude' : 'any';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `filter-pill state-${state}`;
+    btn.textContent = 'Lyrics';
+    btn.onclick = () => {
+        _libFilters.lyrics = v === null ? 1 : v === 1 ? 0 : null;
+        _saveLibFilters();
+        _renderLyricsPill();
+        _renderLibFilterChips();
+        _libEpoch++;
+        currentPage = 0;
+        _treeStats = null;
+        loadLibrary(0);
+    };
+    c.appendChild(btn);
+}
+
+async function _renderTuningList() {
+    const c = document.getElementById('filter-tunings');
+    if (!c) return;
+    if (!_tuningNames) {
+        c.innerHTML = '<div class="text-xs text-gray-500 px-2">Loading...</div>';
+        try {
+            const resp = await fetch('/api/library/tuning-names');
+            const data = await resp.json();
+            _tuningNames = data.tunings || [];
+        } catch {
+            _tuningNames = [];
+        }
+    }
+    c.innerHTML = '';
+    if (!_tuningNames.length) {
+        c.innerHTML = '<div class="text-xs text-gray-500 px-2">No tunings indexed yet — try Full Rescan.</div>';
+        return;
+    }
+    for (const t of _tuningNames) {
+        const checked = _libFilters.tunings.includes(t.name);
+        const row = document.createElement('label');
+        row.className = 'tuning-row';
+        row.innerHTML =
+            `<input type="checkbox" ${checked ? 'checked' : ''} class="rounded border-gray-600 bg-dark-700 text-accent">` +
+            `<span class="flex-1">${esc(t.name)}</span>` +
+            `<span class="tuning-count">${t.count}</span>`;
+        const cb = row.querySelector('input');
+        cb.onchange = () => {
+            const i = _libFilters.tunings.indexOf(t.name);
+            if (cb.checked && i === -1) _libFilters.tunings.push(t.name);
+            else if (!cb.checked && i !== -1) _libFilters.tunings.splice(i, 1);
+            _saveLibFilters();
+            _updateLibFiltersBadge();
+            _renderLibFilterChips();
+            _renderTuningSummary();
+            _libEpoch++;
+            currentPage = 0;
+            _treeStats = null;
+            loadLibrary(0);
+        };
+        c.appendChild(row);
+    }
+    _renderTuningSummary();
+}
+
+function _renderTuningSummary() {
+    const s = document.getElementById('filter-tunings-summary');
+    if (!s) return;
+    if (!_libFilters.tunings.length) { s.textContent = 'All tunings'; return; }
+    if (_libFilters.tunings.length === 1) { s.textContent = _libFilters.tunings[0]; return; }
+    s.textContent = `${_libFilters.tunings[0]} +${_libFilters.tunings.length - 1}`;
+}
+
+function _updateLibFiltersBadge() {
+    const badge = document.getElementById('lib-filters-count');
+    if (!badge) return;
+    const n = _libActiveCount();
+    badge.textContent = String(n);
+    badge.classList.toggle('hidden', n === 0);
+}
+
+function _renderLibFilterDrawer() {
+    _renderPillRow('filter-arrangements', _ARRANGEMENTS, 'arrHas', 'arrLacks');
+    _renderPillRow('filter-stems', _STEM_DEFS, 'stemsHas', 'stemsLacks', s => s.label);
+    _renderLyricsPill();
+    // Stems section dimmed when format=psarc (no stems exist).
+    const stemsSection = document.getElementById('filter-stems-section');
+    if (stemsSection) {
+        const fmt = (document.getElementById('lib-format') || {}).value || '';
+        stemsSection.classList.toggle('opacity-40', fmt === 'psarc');
+        stemsSection.classList.toggle('pointer-events-none', fmt === 'psarc');
+    }
+    _updateLibFiltersBadge();
+}
+
+function _renderLibFilterChips() {
+    const row = document.getElementById('lib-filter-chips');
+    if (!row) return;
+    const chips = [];
+    for (const a of _libFilters.arrHas) chips.push({ label: a, kind: 'require', remove: () => _libFilters.arrHas = _libFilters.arrHas.filter(x => x !== a) });
+    for (const a of _libFilters.arrLacks) chips.push({ label: `no ${a}`, kind: 'exclude', remove: () => _libFilters.arrLacks = _libFilters.arrLacks.filter(x => x !== a) });
+    for (const s of _libFilters.stemsHas) {
+        const def = _STEM_DEFS.find(d => d.id === s);
+        chips.push({ label: def ? def.label : s, kind: 'require', remove: () => _libFilters.stemsHas = _libFilters.stemsHas.filter(x => x !== s) });
+    }
+    for (const s of _libFilters.stemsLacks) {
+        const def = _STEM_DEFS.find(d => d.id === s);
+        chips.push({ label: `no ${def ? def.label : s}`, kind: 'exclude', remove: () => _libFilters.stemsLacks = _libFilters.stemsLacks.filter(x => x !== s) });
+    }
+    if (_libFilters.lyrics === 1) chips.push({ label: 'has lyrics', kind: 'require', remove: () => _libFilters.lyrics = null });
+    if (_libFilters.lyrics === 0) chips.push({ label: 'no lyrics', kind: 'exclude', remove: () => _libFilters.lyrics = null });
+    for (const t of _libFilters.tunings) chips.push({ label: t, kind: 'require', remove: () => _libFilters.tunings = _libFilters.tunings.filter(x => x !== t) });
+
+    row.innerHTML = '';
+    if (!chips.length) {
+        row.classList.add('hidden');
+        return;
+    }
+    row.classList.remove('hidden');
+    for (const c of chips) {
+        const el = document.createElement('span');
+        el.className = `chip ${c.kind === 'exclude' ? 'chip-exclude' : ''}`;
+        el.innerHTML = `${esc(c.label)}<button title="Remove">×</button>`;
+        el.querySelector('button').onclick = () => {
+            c.remove();
+            _saveLibFilters();
+            _renderLibFilterDrawer();
+            _renderLibFilterChips();
+            _libEpoch++;
+            currentPage = 0;
+            _treeStats = null;
+            loadLibrary(0);
+        };
+        row.appendChild(el);
+    }
+}
+
+function toggleLibFilters(force) {
+    const drawer = document.getElementById('lib-filter-drawer');
+    const overlay = document.getElementById('lib-filter-overlay');
+    if (!drawer) return;
+    const open = force === undefined ? !drawer.classList.contains('open') : !!force;
+    drawer.classList.toggle('open', open);
+    overlay.classList.toggle('hidden', !open);
+    if (open) {
+        _renderLibFilterDrawer();
+        _renderTuningList();
+    }
+}
+
+function clearLibFilters() {
+    _libFilters = _defaultLibFilters();
+    _saveLibFilters();
+    _renderLibFilterDrawer();
+    _renderTuningList();
+    _renderLibFilterChips();
+    _libEpoch++;
+    currentPage = 0;
+    _treeStats = null;
+    loadLibrary(0);
+}
+
 function setLibView(view) {
     libView = view;
     document.getElementById('lib-grid').classList.toggle('hidden', view !== 'grid');
@@ -77,6 +361,7 @@ async function loadGridPage(page = 0) {
     const format = (document.getElementById('lib-format') || {}).value || '';
     const params = new URLSearchParams({ q, page, size: PAGE_SIZE, sort });
     if (format) params.set('format', format);
+    _applyLibFiltersToParams(params);
     const resp = await fetch(`/api/library?${params}`);
     const data = await resp.json();
     if (myEpoch !== _libEpoch) return; // filter/sort/view changed mid-fetch
@@ -206,7 +491,14 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
 
 async function loadTreeView() {
     if (!_treeStats) {
-        const resp = await fetch('/api/library/stats');
+        const q = document.getElementById('lib-filter').value.trim();
+        const format = (document.getElementById('lib-format') || {}).value || '';
+        const sp = new URLSearchParams();
+        if (q) sp.set('q', q);
+        if (format) sp.set('format', format);
+        _applyLibFiltersToParams(sp);
+        const qs = sp.toString();
+        const resp = await fetch(`/api/library/stats${qs ? '?' + qs : ''}`);
         _treeStats = await resp.json();
     }
     const q = document.getElementById('lib-filter').value.trim();
@@ -246,6 +538,7 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
     if (favoritesOnly) params.set('favorites', '1');
     const format = (document.getElementById('lib-format') || {}).value || '';
     if (format) params.set('format', format);
+    if (!favoritesOnly) _applyLibFiltersToParams(params);
     params.set('page', page);
     params.set('size', TREE_PAGE_SIZE);
     const resp = await fetch(`/api/library/artists?${params}`);
@@ -603,6 +896,7 @@ async function rescanLibrary() {
             btn.textContent = 'Rescan Library';
             status.textContent = sd.error ? `Error: ${sd.error}` : 'Done!';
             _treeStats = null;
+            _tuningNames = null;  // re-fetch on next drawer open
             loadLibrary();
         }
     }, 1000);
@@ -630,6 +924,7 @@ async function fullRescanLibrary() {
             btn.textContent = 'Full Rescan';
             status.textContent = sd.error ? `Error: ${sd.error}` : 'Done!';
             _treeStats = null;
+            _tuningNames = null;  // re-fetch on next drawer open
             loadLibrary();
         }
     }, 1000);
@@ -1811,6 +2106,11 @@ async function loadPlugins() {
 // before any playSong runs — otherwise a fast click could start
 // playback with stale settings before /api/settings returned.
 loadPlugins().then(async (plugins) => {
+    // Restore library-filter UI state from localStorage before the first
+    // grid fetch so the badge/chips are accurate immediately
+    // (slopsmith#129).
+    _renderLibFilterChips();
+    _updateLibFiltersBadge();
     setLibView('grid');
     try { await loadSettings(); } catch (e) { console.warn('initial loadSettings failed:', e); }
     checkScanAndLoad();
