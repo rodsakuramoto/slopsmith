@@ -208,6 +208,71 @@ def test_path_traversal_rejected(client, server_mod, tmp_path):
     assert json.loads((tmp_path / "config.json").read_text())["master_difficulty"] == 50
 
 
+def test_dotdot_after_allowed_prefix_rejected(client, server_mod, tmp_path):
+    """Regression for the allowlist-bypass that would let a relpath
+    starting with an allowed directory prefix smuggle a `..` past the
+    matcher (e.g. `fake_models/../config.json`). The raw string passes
+    a naive prefix check, but `posixpath.normpath` would collapse the
+    `..` to a target outside the manifest's intent. `_validate_relpath`
+    must reject any `..` segment in the *raw* relpath BEFORE
+    normalization."""
+    _stub_plugin(server_mod, "fake_plugin", ["fake_models/"])
+    (tmp_path / "config.json").write_text(json.dumps({"master_difficulty": 50}))
+
+    bundle = {
+        "schema": 1,
+        "server_config": {"master_difficulty": 99},
+        "plugin_server_configs": {
+            "fake_plugin": {
+                "files": {
+                    "fake_models/../config.json": {
+                        "encoding": "base64",
+                        "data": base64.b64encode(b"hijacked").decode(),
+                    },
+                },
+            },
+        },
+    }
+    r = client.post("/api/settings/import", json=bundle)
+    assert r.status_code == 400
+    # Disk untouched — phase-1 refusal blocks every write.
+    assert json.loads((tmp_path / "config.json").read_text())["master_difficulty"] == 50
+    assert (tmp_path / "config.json").read_text() != "hijacked"
+
+
+def test_directory_bare_name_rejected(client, server_mod, tmp_path):
+    """A directory entry in the allowlist (`fake_models/`) authorizes
+    files *under* that prefix, never the directory itself. A bundle
+    that targets the bare directory name (`fake_models`) would either
+    fail `os.replace()` mid-apply (500, partial state) or — worse,
+    on platforms where replace-over-empty-dir succeeds — silently
+    overwrite a directory with a file. Phase-1 refuses outright."""
+    _stub_plugin(server_mod, "fake_plugin", ["fake_models/"])
+    (tmp_path / "fake_models").mkdir()
+
+    bundle = {
+        "schema": 1,
+        "server_config": {},
+        "plugin_server_configs": {
+            "fake_plugin": {
+                "files": {
+                    "fake_models": {
+                        "encoding": "base64",
+                        "data": base64.b64encode(b"x").decode(),
+                    },
+                },
+            },
+        },
+    }
+    r = client.post("/api/settings/import", json=bundle)
+    # Treated as undeclared (manifest rule was a directory entry, but
+    # the bundle targets the bare dir name) → soft skip with warning,
+    # no writes. Important: the fake_models directory is preserved.
+    assert r.status_code == 200, r.json()
+    assert any("fake_models" in w for w in r.json().get("warnings", []))
+    assert (tmp_path / "fake_models").is_dir()
+
+
 @pytest.mark.parametrize("bad", ["/etc/passwd", "C:/Windows/foo", r"C:\Windows\foo"])
 def test_absolute_path_rejected(client, server_mod, bad):
     _stub_plugin(server_mod, "fake_plugin", ["fake_plugin.db"])

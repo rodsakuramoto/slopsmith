@@ -881,16 +881,31 @@ def _running_version() -> str:
     return "unknown"
 
 
+class _UndeclaredFile(ValueError):
+    """Raised when a relpath would otherwise be safe but isn't covered by
+    the plugin's manifest allowlist. Distinct from the generic
+    `ValueError` so the import handler can warn-and-skip this case
+    without resorting to message-string matching (which would silently
+    change behavior on a future error-text refactor)."""
+
+
 def _matches_allowlist(relpath: str, allowed: list[str]) -> bool:
     """Return True if `relpath` is covered by an entry in the manifest's
     `_export_paths`. Entries ending in `/` are directory rules
-    (prefix-match); other entries are exact-file rules. Both `relpath`
-    and `allowed` are POSIX strings already normalized through
-    `_normalize_export_paths` on the loader side."""
+    (strict prefix-match); other entries are exact-file rules. Both
+    `relpath` and `allowed` are POSIX strings already normalized
+    through `_normalize_export_paths` on the loader side. Caller is
+    expected to pass an already-normalized relpath — `_validate_relpath`
+    enforces this so a bundle can't satisfy a prefix rule with a
+    string that later normalizes to a different target."""
     for allow in allowed:
         if allow.endswith("/"):
-            prefix = allow  # e.g. "nam_models/"
-            if relpath.startswith(prefix) or relpath == prefix.rstrip("/"):
+            # Strict prefix match only. We deliberately reject
+            # `relpath == prefix.rstrip("/")` — a directory entry
+            # never authorizes writing AT the directory itself, and
+            # accepting that would let phase 2 try to `os.replace()`
+            # over an existing directory and crash mid-apply.
+            if relpath.startswith(allow):
                 return True
         elif relpath == allow:
             return True
@@ -899,20 +914,32 @@ def _matches_allowlist(relpath: str, allowed: list[str]) -> bool:
 
 def _validate_relpath(relpath: str, allowed: list[str], config_dir: Path) -> Path:
     """Resolve `relpath` to an absolute path under `config_dir`, raising
-    ValueError on anything that smells like path-traversal, an absolute
-    path, or a manifest-undeclared file. Three layers of defense:
+    on anything that smells like path-traversal, an absolute path, or
+    a manifest-undeclared file. Layered defenses:
 
-      1. String-level: reject empty / `..` / drive-letter / absolute
-         forms before they can reach `Path` resolution.
-      2. Manifest allowlist: relpath must match a declared entry.
-      3. Realpath check: after resolution under config_dir, the target
-         must still live inside config_dir (defeats symlink escape
-         attacks where someone planted a symlink inside config_dir
-         pointing out, then tried to import a file "under" it).
+      1. String-level: reject backslash, drive letter, absolute, and
+         any `.` / `..` segment in the *raw* input — BEFORE any
+         normalization. Critically, this catches the
+         `allowed_dir/../config.json` shape: the raw string starts
+         with `allowed_dir/`, so a naive prefix-match would accept
+         it; if we then normalized first, the `..` would collapse
+         away and the segment guard would have nothing to reject. By
+         refusing pre-normalization any input containing a `.` or
+         `..` segment, we make it impossible for a normalize-then-
+         resolve pass to "launder" a hostile prefix into a different
+         target.
+      2. Allowlist match against the now-known-clean relpath.
+         Allowlist-miss raises `_UndeclaredFile` (a `ValueError`
+         subclass) so the caller can distinguish "manifest changed
+         between export and import" from "this looks like an attack"
+         without string-matching the error message.
+      3. Realpath check: after resolving under config_dir, the target
+         must still live inside config_dir. This catches symlinks-
+         under-config_dir attacks where someone planted a symlink
+         pointing out and tried to import a file "under" it.
 
     Returns the resolved absolute path (caller writes there in phase 2).
     """
-    import posixpath
     if not isinstance(relpath, str) or not relpath or relpath != relpath.strip():
         raise ValueError(f"illegal relpath: {relpath!r}")
     # Reject backslashes outright — manifest entries are POSIX, and
@@ -924,15 +951,22 @@ def _validate_relpath(relpath: str, allowed: list[str], config_dir: Path) -> Pat
     # Absolute / drive-letter check before splitting.
     if relpath.startswith("/") or (len(relpath) >= 2 and relpath[1] == ":"):
         raise ValueError(f"relpath must be relative: {relpath!r}")
-    parts = posixpath.normpath(relpath).split("/")
-    if any(part in ("", "..") for part in parts) or parts[0].startswith("."):
-        # `posixpath.normpath` collapses `a/./b` etc. but preserves a
-        # leading `..`; the `parts[0].startswith(".")` guard rejects
-        # `./foo` and dotfile-disguised escape attempts.
+    raw_parts = relpath.split("/")
+    # Empty parts catch `foo//bar` and a trailing `/`. `.` / `..` catch
+    # both leading and embedded forms (`./x`, `a/./b`, `allow/../escape`).
+    if any(part in ("", ".", "..") for part in raw_parts):
         raise ValueError(f"relpath contains illegal segment: {relpath!r}")
+    # Defense-in-depth: any leading `.` segment (e.g. dotfile-disguised
+    # paths like `.git/config`) is also rejected — config_dir isn't a
+    # place plugins should be writing dotfiles, and accepting them here
+    # would let one plugin claim a global filename like `.npmrc`.
+    if raw_parts[0].startswith("."):
+        raise ValueError(f"relpath starts with dotfile segment: {relpath!r}")
 
     if not _matches_allowlist(relpath, allowed):
-        raise ValueError(f"relpath not declared in plugin manifest: {relpath!r}")
+        raise _UndeclaredFile(
+            f"relpath not declared in plugin manifest: {relpath!r}"
+        )
 
     target = (config_dir / relpath).resolve()
     config_root = config_dir.resolve()
@@ -1144,18 +1178,19 @@ def import_settings(bundle: dict):
         for relpath, file_entry in files.items():
             try:
                 target = _validate_relpath(relpath, allowed, CONFIG_DIR)
+            except _UndeclaredFile:
+                # Manifest-allowlist miss is a normal outcome of a
+                # plugin update between export and import — warn-and-
+                # skip so the rest of the bundle still applies.
+                skipped_for_plugin.append(relpath)
+                continue
             except ValueError as e:
-                # Distinguish "manifest doesn't list this file anymore"
-                # from "this looks like an attack". The first is a normal
-                # outcome of a plugin update between export and import —
-                # warn-and-skip so the rest of the bundle still applies.
-                # Path-traversal / absolute-path / illegal-segment errors
-                # are still hard failures; we never want to apply a
-                # bundle that contains those, even partially.
-                msg = str(e)
-                if "not declared in plugin manifest" in msg:
-                    skipped_for_plugin.append(relpath)
-                    continue
+                # Path-traversal / absolute-path / illegal-segment /
+                # backslash / dotfile errors are hard failures: we
+                # never want to apply a bundle that contains those,
+                # even partially. Caught AFTER `_UndeclaredFile`
+                # because that's a `ValueError` subclass — Python
+                # would otherwise route it through this branch.
                 return JSONResponse(
                     {
                         "ok": False,

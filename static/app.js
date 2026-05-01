@@ -599,12 +599,18 @@ async function exportSettings() {
             return;
         }
         const bundle = await resp.json();
-        // Layer in the browser's localStorage. Keys are preserved verbatim
-        // as strings — that's how localStorage stores them, and round-trip
-        // fidelity matters more than re-typing values that were never
-        // typed in the first place.
+        // Layer in the browser's localStorage. Use the standard Storage
+        // iteration API (length + key(i)) rather than Object.keys —
+        // Object.keys on a Storage instance is not deterministic across
+        // browsers and can both miss entries and include non-entry
+        // properties depending on the implementation. Keys are preserved
+        // verbatim as strings; that's how localStorage stores them, and
+        // round-trip fidelity matters more than re-typing values that
+        // were never typed in the first place.
         const localStorageData = {};
-        for (const key of Object.keys(localStorage)) {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key === null) continue;
             const value = localStorage.getItem(key);
             if (value !== null) localStorageData[key] = value;
         }
@@ -662,8 +668,21 @@ async function importSettings(file) {
         status.textContent = `Import failed: ${e.message}`;
         return;
     }
-    if (!data.ok) {
-        status.textContent = `Import failed: ${data.error || 'unknown error'}`;
+    // Two failure shapes to surface: our own validation handler
+    // returns `{ok: false, error: "..."}`, but if the body fails
+    // FastAPI's request-level validation (e.g. top-level value is
+    // an array, not an object), the response is the framework's
+    // `{detail: ...}` shape with no `ok` key. `resp.ok` distinguishes
+    // both from success without depending on which path produced
+    // the failure.
+    if (!resp.ok || data.ok === false) {
+        let msg = data.error;
+        if (!msg && data.detail) {
+            msg = typeof data.detail === 'string'
+                ? data.detail
+                : JSON.stringify(data.detail);
+        }
+        status.textContent = `Import failed: ${msg || `HTTP ${resp.status}`}`;
         return;
     }
 
