@@ -289,7 +289,15 @@ def extract_meta(path: Path) -> dict:
         if not isinstance(s, dict):
             continue
         sid = s.get("id")
-        if isinstance(sid, str) and sid:
+        sfile = s.get("file")
+        # Match `load_song()`'s validation: a stem entry needs BOTH a
+        # non-empty id AND a non-empty file to be playable. Indexing a
+        # half-formed entry would advertise a stem that load_song will
+        # later refuse to surface, so the library filter would lie.
+        if (
+            isinstance(sid, str) and sid
+            and isinstance(sfile, str) and sfile
+        ):
             stem_ids.append(sid)
     stem_count = len(stem_ids)
 

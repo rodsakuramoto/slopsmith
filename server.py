@@ -305,7 +305,14 @@ class MetadataDB:
             "year-desc": "(year = '') ASC, CAST(year AS INTEGER) DESC",
         }
         order = sort_map.get(sort, "artist COLLATE NOCASE")
-        if direction == "desc" and "DESC" not in order:
+        # Legacy `dir=desc` toggle: only safe to append on simple sort
+        # clauses that don't already encode a direction. Compound /
+        # multi-term entries above (tuning, year, year-desc) bake their
+        # ASC/DESC into the clause, so a global ` DESC` append would
+        # produce invalid SQL like `CAST(year AS INTEGER) ASC DESC`.
+        # Skip the append in that case — clients flipping direction on
+        # those sorts use the explicit `-desc` sort key instead.
+        if direction == "desc" and " ASC" not in order and " DESC" not in order:
             order += " DESC"
 
         total = self.conn.execute(f"SELECT COUNT(*) FROM songs {where}", params).fetchone()[0]

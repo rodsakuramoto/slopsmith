@@ -275,7 +275,13 @@ function _renderLibFilterChips() {
     for (const c of chips) {
         const el = document.createElement('span');
         el.className = `chip ${c.kind === 'exclude' ? 'chip-exclude' : ''}`;
-        el.innerHTML = `${esc(c.label)}<button title="Remove">×</button>`;
+        // The "×" glyph isn't a reliable accessible name; assistive tech
+        // also can't depend on `title` alone. Spell out the action plus
+        // the chip's label in `aria-label` so screen-reader users hear
+        // "Remove filter: Lead" instead of "button" or just "×".
+        const ariaLabel = `Remove filter: ${c.label}`;
+        el.innerHTML =
+            `${esc(c.label)}<button type="button" title="${esc(ariaLabel)}" aria-label="${esc(ariaLabel)}">×</button>`;
         el.querySelector('button').onclick = () => {
             c.remove();
             _saveLibFilters();

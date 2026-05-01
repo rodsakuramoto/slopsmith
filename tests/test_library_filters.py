@@ -224,6 +224,20 @@ def test_year_sort_asc_oldest_first(client, seeded):
     assert files == ["b.psarc", "a.psarc", "f.psarc", "d.sloppak", "c.sloppak", "e.sloppak"]
 
 
+def test_compound_sort_with_legacy_dir_desc_doesnt_error(client, seeded):
+    """Regression for Copilot finding on PR #134: `sort=year&dir=desc`
+    used to produce invalid SQL (`CAST(year AS INTEGER) ASC DESC`)
+    because the global dir-append toggle didn't notice that the
+    compound year sort already encoded direction. Now the append is
+    suppressed when the sort clause already contains ASC or DESC."""
+    r = client.get("/api/library", params={"sort": "year", "dir": "desc"})
+    assert r.status_code == 200
+    # Order matches plain `sort=year` (legacy dir is ignored on
+    # already-directional clauses). The point is no 500 from invalid SQL.
+    files = [s["filename"] for s in r.json()["songs"]]
+    assert files == ["b.psarc", "a.psarc", "f.psarc", "d.sloppak", "c.sloppak", "e.sloppak"]
+
+
 # ── Tuning sort by pitch distance (slopsmith#22) ────────────────────────────
 
 def test_tuning_sort_by_pitch_distance(client, seeded):
