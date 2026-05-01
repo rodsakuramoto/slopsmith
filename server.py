@@ -300,11 +300,23 @@ class MetadataDB:
             # how Rocksmith groups its tuning list. Final tiebreak by
             # name keeps the order fully deterministic.
             #
-            # Leading term pushes pre-migration / unscanned rows
-            # (`tuning_name` empty, `tuning_sort_key` defaulted to 0)
-            # to the bottom — without it ABS(0) collides with E
-            # Standard's 0 and the empty-tuning rows would sort first.
-            "tuning": "(tuning_name = '') ASC, ABS(tuning_sort_key), tuning_sort_key ASC, tuning_name COLLATE NOCASE",
+            # Leading term pushes pre-migration / unscanned rows to
+            # the bottom — without it ABS(0) collides with E
+            # Standard's 0 and unindexed rows would sort first.
+            # COALESCE on every column the clause references guards
+            # against NULL values — SQLite's literal-constant ADD
+            # COLUMN does backfill on most versions, but raw SQL
+            # inserts that bypass `put()`, edge-case migration paths,
+            # or future code that writes None could still leave NULLs
+            # behind, and a NULL `tuning_name` in `(tuning_name = '')`
+            # evaluates to NULL itself (which sorts ahead of 0 in
+            # ASC), defeating the push-to-bottom intent.
+            "tuning": (
+                "(COALESCE(tuning_name, '') = '') ASC, "
+                "ABS(COALESCE(tuning_sort_key, 0)), "
+                "COALESCE(tuning_sort_key, 0) ASC, "
+                "COALESCE(tuning_name, '') COLLATE NOCASE"
+            ),
             # Year sort (slopsmith#128). Empty-year rows pushed to the
             # bottom for both directions; otherwise CAST so '2010' >
             # '2005' rather than alphabetic.
@@ -922,14 +934,21 @@ def list_tuning_names():
     (slopsmith#22) — E Standard first, then nearest neighbors."""
     rows = meta_db.conn.execute(
         "SELECT tuning_name, MIN(tuning_sort_key), COUNT(*) "
-        "FROM songs WHERE title != '' AND tuning_name != '' "
+        # NULL/empty-name rows are excluded entirely from the picker —
+        # users can't usefully filter by an unknown tuning. Once they
+        # rescan, the rows acquire a name and join the list.
+        "FROM songs WHERE title != '' AND COALESCE(tuning_name, '') != '' "
         "GROUP BY tuning_name COLLATE NOCASE "
         # Same ordering as `sort=tuning` in `query_page`: distance
         # from E Standard first, then signed-key ASC so the down-
         # tuned variant precedes the up-tuned one at equal distance
         # (Eb Standard before F Standard at distance 6). Final
         # alphabetical tiebreak keeps the order deterministic.
-        "ORDER BY ABS(MIN(tuning_sort_key)), MIN(tuning_sort_key) ASC, tuning_name COLLATE NOCASE"
+        # COALESCE around the sort_key guards against NULL the same
+        # way the main tuning sort does.
+        "ORDER BY ABS(COALESCE(MIN(tuning_sort_key), 0)), "
+        "COALESCE(MIN(tuning_sort_key), 0) ASC, "
+        "tuning_name COLLATE NOCASE"
     ).fetchall()
     return {
         "tunings": [

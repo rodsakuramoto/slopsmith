@@ -271,6 +271,41 @@ def test_tuning_sort_pushes_empty_tuning_name_to_bottom(client, server_mod):
     assert files == ["real.psarc", "legacy.psarc"]
 
 
+def test_tuning_sort_pushes_null_tuning_name_to_bottom(client, server_mod):
+    """Defense in depth for the same intent as the empty-string case: a
+    row with NULL `tuning_name` / NULL `tuning_sort_key` (which can
+    arise from raw SQL inserts that bypass `put()`, future code that
+    writes None, or edge-case migration paths) must also fall to the
+    bottom. Without COALESCE in the ORDER BY, `(tuning_name = '')`
+    evaluates to NULL for those rows and NULLs sort *ahead of* 0 in
+    SQLite's ASC ordering — the legacy row would float above E
+    Standard. Regression for Copilot finding on PR #134."""
+    _put(server_mod, filename="real.psarc", title="Real", artist="A",
+         tuning_name="E Standard", tuning_sort_key=0,
+         arrangements=[{"index": 0, "name": "Lead", "notes": 1}])
+    # Direct INSERT with NULL tuning_name AND NULL tuning_sort_key —
+    # mimics what a pre-migration row would look like if SQLite hadn't
+    # backfilled the literal-constant defaults on ADD COLUMN.
+    server_mod.meta_db.conn.execute(
+        "INSERT INTO songs (filename, mtime, size, title, artist, album, year, "
+        "duration, tuning, arrangements, has_lyrics, format, stem_count, stem_ids, "
+        "tuning_name, tuning_sort_key) "
+        "VALUES (?, 1.0, 1, ?, ?, ?, '', 200.0, '', ?, 0, 'psarc', 0, '[]', NULL, NULL)",
+        ("legacy.psarc", "Legacy", "Z", "Z - LP", json.dumps([])),
+    )
+    server_mod.meta_db.conn.commit()
+
+    data = _get(client, sort="tuning")
+    files = [s["filename"] for s in data["songs"]]
+    assert files == ["real.psarc", "legacy.psarc"]
+
+    # /api/library/tuning-names should also exclude the NULL row from
+    # the picker entirely (users can't usefully filter by an unknown
+    # tuning).
+    names = [t["name"] for t in client.get("/api/library/tuning-names").json()["tunings"]]
+    assert names == ["E Standard"]
+
+
 def test_query_stats_artist_count_is_case_insensitive(client, server_mod):
     """`total_artists` previously used `COUNT(DISTINCT artist)` (case-
     sensitive) while `query_artists` and the per-letter counts used
