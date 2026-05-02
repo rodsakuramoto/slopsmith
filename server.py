@@ -794,7 +794,7 @@ register_plugin_api(app)
 
 @app.on_event("startup")
 async def startup_events():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     _set_startup_status(
         running=True,

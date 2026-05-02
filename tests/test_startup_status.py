@@ -10,12 +10,34 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+class _SuppressedThread:
+    """Stand-in for threading.Thread that never actually starts the thread.
+
+    Used in the startup-status tests to prevent the background plugin-loader
+    and metadata-scan threads from calling _set_startup_status concurrently
+    with the test assertions, which would make the helper round-trip tests
+    non-deterministic.
+    """
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        pass
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    """TestClient with CONFIG_DIR isolated in a per-test tmp_path."""
+    """TestClient with CONFIG_DIR isolated in a per-test tmp_path.
+
+    Background threads (plugin loader, metadata scan) are suppressed so that
+    tests which write and immediately read _startup_status don't race with the
+    worker threads that would otherwise also call _set_startup_status.
+    """
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     sys.modules.pop("server", None)
     server = importlib.import_module("server")
+    # Suppress all daemon threads launched by startup_events / startup_scan.
+    monkeypatch.setattr(server.threading, "Thread", _SuppressedThread)
     test_client = TestClient(server.app)
     try:
         yield test_client, server
