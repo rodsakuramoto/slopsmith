@@ -2442,6 +2442,33 @@ async function loadPlugins() {
     return plugins;
 }
 
+async function _scheduleStartupRehydration() {
+    // Continue polling until the backend startup completes (or a long deadline).
+    // Used when the initial waitForPluginStartupComplete() window expired before
+    // LOADED_PLUGINS was populated — re-hydrates plugins + viz picker once done.
+    const REHYDRATE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min additional window
+    const start = Date.now();
+    while (Date.now() - start < REHYDRATE_TIMEOUT_MS) {
+        await new Promise((r) => setTimeout(r, 5000));
+        try {
+            const resp = await fetch('/api/startup-status');
+            if (!resp.ok) continue;
+            const status = await resp.json();
+            if (!status.running) {
+                if (status.phase === 'complete') {
+                    console.log('[slopsmith] Background startup complete — re-hydrating plugins');
+                    const plugins = await loadPlugins();
+                    _populateVizPicker(plugins);
+                    setPluginLoadingState(false, '');
+                } else {
+                    console.warn('[slopsmith] Backend startup ended without completing — skipping re-hydration');
+                }
+                return;
+            }
+        } catch (_e) { /* network error — keep trying */ }
+    }
+}
+
 async function bootstrapPluginsAndUi() {
     setPluginLoadingState(true, 'Loading plugins...');
     const startup = await waitForPluginStartupComplete();
@@ -2449,6 +2476,11 @@ async function bootstrapPluginsAndUi() {
         const msg = startup.error || startup.message || 'Plugin startup failed';
         setPluginLoadingState(false, '');
         console.warn('Plugin startup reported error:', msg);
+        // On timeout the backend may still be loading. Continue polling in the
+        // background so plugins are hydrated once startup eventually completes.
+        if (startup.phase === 'timeout') {
+            _scheduleStartupRehydration();
+        }
     }
     const plugins = await loadPlugins();
     setPluginLoadingState(false, '');
