@@ -865,7 +865,7 @@ async def startup_events():
                     fut.result(timeout=60)
                 except concurrent.futures.TimeoutError:
                     _pid = getattr(fn, "_plugin_id", "unknown")
-                    print(f"[Plugin] WARNING: route registration for '{_pid}' timed out after 60 s; continuing startup", flush=True)
+                    print(f"[Plugin] WARNING: route registration for '{_pid}' timed out after 60 s", flush=True)
 
                     def _log_deferred(f: concurrent.futures.Future):
                         try:
@@ -876,6 +876,7 @@ async def startup_events():
                             print(f"[Plugin] ERROR: deferred route registration for '{_pid}' raised: {exc}", flush=True)
 
                     fut.add_done_callback(_log_deferred)
+                    raise  # propagate to load_plugins() so it emits plugin-error and skips "Loaded routes"
 
             _set_startup_status(
                 running=True,
