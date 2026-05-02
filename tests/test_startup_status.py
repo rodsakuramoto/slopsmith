@@ -30,23 +30,27 @@ def client(tmp_path, monkeypatch):
     # and AnyIO free to create real threads for their own internal use.
     monkeypatch.setattr(server, "load_plugins", lambda *a, **kw: None)
     monkeypatch.setattr(server, "startup_scan", lambda: None)
-    test_client = TestClient(server.app)
-    # Wait for the background startup thread to finish (it will since
-    # load_plugins is a no-op, so this completes in milliseconds).
-    # Without this barrier the thread can race against test assertions that
-    # immediately write then read _startup_status.
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if not server._get_startup_status().get("running", True):
-            break
-        time.sleep(0.01)
-    try:
-        yield test_client, server
-    finally:
-        test_client.close()
-        conn = getattr(getattr(server, "meta_db", None), "conn", None)
-        if conn is not None:
-            conn.close()
+    with TestClient(server.app) as test_client:
+        # Wait for the background startup thread to finish (it will since
+        # load_plugins is a no-op, so this completes in milliseconds).
+        # Without this barrier the thread can race against test assertions that
+        # immediately write then read _startup_status.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not server._get_startup_status().get("running", True):
+                break
+            time.sleep(0.01)
+        last_status = server._get_startup_status()
+        assert not last_status.get("running", True), (
+            f"Background startup thread did not complete within 5 s; "
+            f"last status: {last_status}"
+        )
+        try:
+            yield test_client, server
+        finally:
+            conn = getattr(getattr(server, "meta_db", None), "conn", None)
+            if conn is not None:
+                conn.close()
 
 
 # ── /api/startup-status endpoint ─────────────────────────────────────────────

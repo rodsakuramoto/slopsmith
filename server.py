@@ -1606,7 +1606,7 @@ def export_settings():
     server-side files. Frontend layers in `local_storage` before
     triggering the download. See slopsmith#113."""
     import datetime
-    from plugins import LOADED_PLUGINS, _PLUGINS_LOCK
+    from plugins import LOADED_PLUGINS, PLUGINS_LOCK
 
     config_file = CONFIG_DIR / "config.json"
     server_config = _load_config(config_file)
@@ -1614,7 +1614,7 @@ def export_settings():
         server_config = _default_settings()
 
     plugin_blocks: dict[str, dict] = {}
-    with _PLUGINS_LOCK:
+    with PLUGINS_LOCK:
         plugins_snapshot = list(LOADED_PLUGINS)
     for p in plugins_snapshot:
         allowed = p.get("_export_paths") or []
@@ -1644,7 +1644,7 @@ def import_settings(bundle: dict):
     bundle in phase 1 (no disk writes); only on full success does
     phase 2 commit each file via temp+rename. The frontend reads
     `local_storage` itself — server ignores it. See slopsmith#113."""
-    from plugins import LOADED_PLUGINS, _PLUGINS_LOCK
+    from plugins import LOADED_PLUGINS, PLUGINS_LOCK
 
     if not isinstance(bundle, dict):
         return JSONResponse({"ok": False, "error": "bundle must be a JSON object"}, status_code=400)
@@ -1688,7 +1688,7 @@ def import_settings(bundle: dict):
             f"version mismatch: bundle {bundle_version!r} vs running {running!r}; importing anyway"
         )
 
-    with _PLUGINS_LOCK:
+    with PLUGINS_LOCK:
         by_id = {p["id"]: p for p in LOADED_PLUGINS}
 
     # Stage every (display_relpath, target_abs_path, payload) tuple before

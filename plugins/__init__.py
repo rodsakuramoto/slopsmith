@@ -16,7 +16,7 @@ LOADED_PLUGINS = []
 # Guards all mutations of and snapshots from LOADED_PLUGINS so the
 # background plugin-loader thread and the event-loop request handlers
 # never race on the list.
-_PLUGINS_LOCK = threading.RLock()
+PLUGINS_LOCK = threading.RLock()
 
 # Persistent pip install location (survives container restarts)
 _PIP_TARGET = Path(os.environ.get("CONFIG_DIR", "/config")) / "pip_packages"
@@ -595,7 +595,7 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
 
     # Publish all plugins atomically so concurrent readers never observe
     # a partially-populated list during the loading window.
-    with _PLUGINS_LOCK:
+    with PLUGINS_LOCK:
         LOADED_PLUGINS.extend(_loaded_batch)
 
     _emit_progress(
@@ -644,7 +644,7 @@ def register_plugin_api(app: FastAPI):
 
     @app.get("/api/plugins")
     def list_plugins():
-        with _PLUGINS_LOCK:
+        with PLUGINS_LOCK:
             snapshot = list(LOADED_PLUGINS)
         return [
             {
@@ -666,7 +666,7 @@ def register_plugin_api(app: FastAPI):
     @app.get("/api/plugins/updates")
     def check_updates():
         """Check all plugins for available git updates."""
-        with _PLUGINS_LOCK:
+        with PLUGINS_LOCK:
             snapshot = list(LOADED_PLUGINS)
         updates = {}
         for p in snapshot:
@@ -683,7 +683,7 @@ def register_plugin_api(app: FastAPI):
     @app.post("/api/plugins/{plugin_id}/update")
     def update_plugin(plugin_id: str):
         """Pull latest changes for a plugin. Stashes local edits first."""
-        with _PLUGINS_LOCK:
+        with PLUGINS_LOCK:
             snapshot = list(LOADED_PLUGINS)
         for p in snapshot:
             if p["id"] == plugin_id:
@@ -715,7 +715,7 @@ def register_plugin_api(app: FastAPI):
 
     @app.get("/api/plugins/{plugin_id}/screen.html")
     def plugin_screen_html(plugin_id: str):
-        with _PLUGINS_LOCK:
+        with PLUGINS_LOCK:
             snapshot = list(LOADED_PLUGINS)
         for p in snapshot:
             if p["id"] == plugin_id:
@@ -726,7 +726,7 @@ def register_plugin_api(app: FastAPI):
 
     @app.get("/api/plugins/{plugin_id}/screen.js")
     def plugin_screen_js(plugin_id: str):
-        with _PLUGINS_LOCK:
+        with PLUGINS_LOCK:
             snapshot = list(LOADED_PLUGINS)
         for p in snapshot:
             if p["id"] == plugin_id:
@@ -737,7 +737,7 @@ def register_plugin_api(app: FastAPI):
 
     @app.get("/api/plugins/{plugin_id}/settings.html")
     def plugin_settings_html(plugin_id: str):
-        with _PLUGINS_LOCK:
+        with PLUGINS_LOCK:
             snapshot = list(LOADED_PLUGINS)
         for p in snapshot:
             if p["id"] == plugin_id:
