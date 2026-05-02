@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, Response
@@ -12,6 +13,10 @@ from fastapi.responses import HTMLResponse, Response
 
 PLUGINS_DIR = Path(__file__).parent
 LOADED_PLUGINS = []
+# Guards all mutations of and snapshots from LOADED_PLUGINS so the
+# background plugin-loader thread and the event-loop request handlers
+# never race on the list.
+_PLUGINS_LOCK = threading.RLock()
 
 # Persistent pip install location (survives container restarts)
 _PIP_TARGET = Path(os.environ.get("CONFIG_DIR", "/config")) / "pip_packages"
@@ -444,6 +449,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         total=len(plugin_load_specs),
     )
 
+    # Accumulate into a local list and publish atomically once all
+    # plugins are loaded, so concurrent readers never see a partially
+    # populated LOADED_PLUGINS.
+    _loaded_batch: list = []
+
     for idx, (plugin_id, plugin_dir, manifest) in enumerate(plugin_load_specs):
         _emit_progress(
             "plugin-start",
@@ -543,7 +553,7 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 import traceback
                 traceback.print_exc()
 
-        LOADED_PLUGINS.append({
+        _loaded_batch.append({
             "id": plugin_id,
             "name": manifest.get("name", plugin_id),
             "nav": manifest.get("nav"),
@@ -572,6 +582,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             loaded=idx + 1,
             total=len(plugin_load_specs),
         )
+
+    # Publish all plugins atomically so concurrent readers never observe
+    # a partially-populated list during the loading window.
+    with _PLUGINS_LOCK:
+        LOADED_PLUGINS.extend(_loaded_batch)
 
     _emit_progress(
         "plugins-complete",
@@ -619,6 +634,8 @@ def register_plugin_api(app: FastAPI):
 
     @app.get("/api/plugins")
     def list_plugins():
+        with _PLUGINS_LOCK:
+            snapshot = list(LOADED_PLUGINS)
         return [
             {
                 "id": p["id"],
@@ -633,14 +650,16 @@ def register_plugin_api(app: FastAPI):
                 "has_script": p["has_script"],
                 "has_settings": p["has_settings"],
             }
-            for p in LOADED_PLUGINS
+            for p in snapshot
         ]
 
     @app.get("/api/plugins/updates")
     def check_updates():
         """Check all plugins for available git updates."""
+        with _PLUGINS_LOCK:
+            snapshot = list(LOADED_PLUGINS)
         updates = {}
-        for p in LOADED_PLUGINS:
+        for p in snapshot:
             info = _check_plugin_update(p["_dir"])
             if info and info["behind"] > 0:
                 updates[p["id"]] = {
@@ -654,7 +673,9 @@ def register_plugin_api(app: FastAPI):
     @app.post("/api/plugins/{plugin_id}/update")
     def update_plugin(plugin_id: str):
         """Pull latest changes for a plugin. Stashes local edits first."""
-        for p in LOADED_PLUGINS:
+        with _PLUGINS_LOCK:
+            snapshot = list(LOADED_PLUGINS)
+        for p in snapshot:
             if p["id"] == plugin_id:
                 git_dir = p["_dir"] / ".git"
                 if not git_dir.exists():
@@ -684,7 +705,9 @@ def register_plugin_api(app: FastAPI):
 
     @app.get("/api/plugins/{plugin_id}/screen.html")
     def plugin_screen_html(plugin_id: str):
-        for p in LOADED_PLUGINS:
+        with _PLUGINS_LOCK:
+            snapshot = list(LOADED_PLUGINS)
+        for p in snapshot:
             if p["id"] == plugin_id:
                 screen_file = p["_dir"] / p["_manifest"].get("screen", "screen.html")
                 if screen_file.exists():
@@ -693,7 +716,9 @@ def register_plugin_api(app: FastAPI):
 
     @app.get("/api/plugins/{plugin_id}/screen.js")
     def plugin_screen_js(plugin_id: str):
-        for p in LOADED_PLUGINS:
+        with _PLUGINS_LOCK:
+            snapshot = list(LOADED_PLUGINS)
+        for p in snapshot:
             if p["id"] == plugin_id:
                 script_file = p["_dir"] / p["_manifest"].get("script", "screen.js")
                 if script_file.exists():
@@ -702,7 +727,9 @@ def register_plugin_api(app: FastAPI):
 
     @app.get("/api/plugins/{plugin_id}/settings.html")
     def plugin_settings_html(plugin_id: str):
-        for p in LOADED_PLUGINS:
+        with _PLUGINS_LOCK:
+            snapshot = list(LOADED_PLUGINS)
+        for p in snapshot:
             if p["id"] == plugin_id:
                 settings = p["_manifest"].get("settings", {})
                 settings_file = p["_dir"] / (settings.get("html", "settings.html") if isinstance(settings, dict) else "settings.html")

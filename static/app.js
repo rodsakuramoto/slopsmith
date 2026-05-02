@@ -2276,7 +2276,8 @@ async function waitForPluginStartupComplete(timeoutMs = 180000) {
         }
         await new Promise((r) => setTimeout(r, 800));
     }
-    return last || { running: false, phase: 'timeout', message: 'Plugin startup timed out' };
+    setPluginLoadingState(false);
+    return { running: false, phase: 'timeout', message: 'Plugin startup timed out' };
 }
 
 async function loadPlugins() {
@@ -2444,7 +2445,7 @@ async function loadPlugins() {
 async function bootstrapPluginsAndUi() {
     setPluginLoadingState(true, 'Loading plugins...');
     const startup = await waitForPluginStartupComplete();
-    if (startup && startup.phase === 'error') {
+    if (startup && (startup.phase === 'error' || startup.phase === 'timeout')) {
         const msg = startup.error || startup.message || 'Plugin startup failed';
         setPluginLoadingState(false, '');
         console.warn('Plugin startup reported error:', msg);
