@@ -18,7 +18,48 @@ function showScreen(id) {
 }
 
 // ── Library ──────────────────────────────────────────────────────────────
-let libView = 'grid';
+
+// Persist the view toggle (grid vs tree), sort selection, and format
+// filter across reloads. Stored as separate keys (rather than one
+// blob) so future controls can opt in independently and a corrupted
+// single value doesn't wipe the rest. Validation lives at the read
+// site — we coerce unknown values back to safe defaults rather than
+// trusting whatever happens to be in localStorage.
+const _LIB_VIEW_KEY = 'slopsmith.libView';
+const _LIB_SORT_KEY = 'slopsmith.libSort';
+const _LIB_FORMAT_KEY = 'slopsmith.libFormat';
+const _LIB_VIEW_VALUES = new Set(['grid', 'tree']);
+const _LIB_SORT_VALUES = new Set([
+    'artist', 'artist-desc', 'title', 'title-desc',
+    'recent', 'year-desc', 'year', 'tuning',
+]);
+const _LIB_FORMAT_VALUES = new Set(['', 'psarc', 'sloppak']);
+// Tree-view expand/collapse persistence. Three states per tree:
+//   '1'  → user asked to expand all
+//   '0'  → user asked to collapse all
+//   null → no explicit choice; renderTreeInto's existing heuristic
+//          (auto-open when search active or few artists) wins
+//
+// Library and Favorites are separate trees with separate
+// Expand/Collapse buttons, so each gets its own key — toggling one
+// must not flip the other's persisted state.
+const _LIB_TREE_EXPAND_KEY = 'slopsmith.libTreeExpand';
+const _FAV_TREE_EXPAND_KEY = 'slopsmith.favTreeExpand';
+const _LIB_TREE_EXPAND_VALUES = new Set(['1', '0']);
+
+function _readPersistedChoice(key, allowed, fallback) {
+    try {
+        const v = localStorage.getItem(key);
+        return v !== null && allowed.has(v) ? v : fallback;
+    } catch {
+        return fallback;
+    }
+}
+function _writePersistedChoice(key, value) {
+    try { localStorage.setItem(key, value); } catch { /* private mode / quota */ }
+}
+
+let libView = _readPersistedChoice(_LIB_VIEW_KEY, _LIB_VIEW_VALUES, 'grid');
 let currentPage = 0;
 const PAGE_SIZE = 24;
 let _treeLetter = '';
@@ -31,8 +72,333 @@ let _gridObserver = null;
 // they've been superseded and skip rendering stale results.
 let _libEpoch = 0;
 
+// ── Library filters (slopsmith#129/#69) ────────────────────────────────
+//
+// Filter state lives in a single object so the active set can be
+// serialized to localStorage as one key. Each axis is OR-within (Lead
+// + Rhythm = "has Lead OR Rhythm"); cross-axis is AND. Tri-state pills
+// translate to `_has` / `_lacks` lists on the wire so the server's
+// SQL doesn't have to encode the third "any" state.
+const _ARRANGEMENTS = ['Lead', 'Rhythm', 'Bass', 'Combo'];
+// Stem ids match the bare strings sloppak manifests use ("drums",
+// "bass", etc.). `full` is intentionally omitted from the filter UI:
+// it's the fallback mix every sloppak ships with, so filtering by it
+// would match all sloppaks and confuse users.
+const _STEM_DEFS = [
+    { id: 'drums', label: 'Drums' },
+    { id: 'bass', label: 'Bass' },
+    { id: 'vocals', label: 'Vocals' },
+    { id: 'guitar', label: 'Guitar' },
+    { id: 'piano', label: 'Piano' },
+    { id: 'other', label: 'Other' },
+];
+const _LIB_FILTERS_KEY = 'slopsmith.libFilters';
+let _libFilters = _loadLibFilters();
+let _tuningNames = null;  // cached from /api/library/tuning-names
+
+function _defaultLibFilters() {
+    return {
+        arrHas: [], arrLacks: [],
+        stemsHas: [], stemsLacks: [],
+        lyrics: null,             // null | 1 | 0
+        tunings: [],
+    };
+}
+
+function _normalizeStringArray(v) {
+    return Array.isArray(v) ? v.filter(x => typeof x === 'string' && x) : [];
+}
+
+function _normalizeLibFilters(parsed) {
+    // Defensive: a stale or hand-edited localStorage payload could have
+    // any shape. Without normalization a later `.join` or `.includes`
+    // on a non-array would throw at filter-apply time. Coerce each
+    // field back to its expected type, dropping anything we don't
+    // recognize. Slopsmith#134 review.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return _defaultLibFilters();
+    }
+    const lyrics = parsed.lyrics;
+    return {
+        arrHas: _normalizeStringArray(parsed.arrHas),
+        arrLacks: _normalizeStringArray(parsed.arrLacks),
+        stemsHas: _normalizeStringArray(parsed.stemsHas),
+        stemsLacks: _normalizeStringArray(parsed.stemsLacks),
+        lyrics: lyrics === 0 || lyrics === 1 ? lyrics : null,
+        tunings: _normalizeStringArray(parsed.tunings),
+    };
+}
+
+function _loadLibFilters() {
+    try {
+        const raw = localStorage.getItem(_LIB_FILTERS_KEY);
+        if (!raw) return _defaultLibFilters();
+        return _normalizeLibFilters(JSON.parse(raw));
+    } catch {
+        return _defaultLibFilters();
+    }
+}
+
+function _saveLibFilters() {
+    try { localStorage.setItem(_LIB_FILTERS_KEY, JSON.stringify(_libFilters)); }
+    catch { /* private mode / quota — ignore, in-memory state still works */ }
+}
+
+function _libActiveCount() {
+    let n = 0;
+    if (_libFilters.arrHas.length) n++;
+    if (_libFilters.arrLacks.length) n++;
+    if (_libFilters.stemsHas.length) n++;
+    if (_libFilters.stemsLacks.length) n++;
+    if (_libFilters.lyrics !== null) n++;
+    if (_libFilters.tunings.length) n++;
+    return n;
+}
+
+function _applyLibFiltersToParams(params) {
+    if (_libFilters.arrHas.length) params.set('arrangements_has', _libFilters.arrHas.join(','));
+    if (_libFilters.arrLacks.length) params.set('arrangements_lacks', _libFilters.arrLacks.join(','));
+    if (_libFilters.stemsHas.length) params.set('stems_has', _libFilters.stemsHas.join(','));
+    if (_libFilters.stemsLacks.length) params.set('stems_lacks', _libFilters.stemsLacks.join(','));
+    if (_libFilters.lyrics !== null) params.set('has_lyrics', String(_libFilters.lyrics));
+    if (_libFilters.tunings.length) params.set('tunings', _libFilters.tunings.join(','));
+    return params;
+}
+
+function _pillState(item, hasList, lacksList) {
+    if (hasList.includes(item)) return 'require';
+    if (lacksList.includes(item)) return 'exclude';
+    return 'any';
+}
+
+function _cyclePill(item, hasKey, lacksKey) {
+    // Cycle: any -> require -> exclude -> any. Mutates _libFilters in place.
+    const hasList = _libFilters[hasKey];
+    const lacksList = _libFilters[lacksKey];
+    const inHas = hasList.indexOf(item);
+    const inLacks = lacksList.indexOf(item);
+    if (inHas === -1 && inLacks === -1) {
+        hasList.push(item);
+    } else if (inHas !== -1) {
+        hasList.splice(inHas, 1);
+        lacksList.push(item);
+    } else {
+        lacksList.splice(inLacks, 1);
+    }
+    _saveLibFilters();
+    _renderLibFilterDrawer();
+    _renderLibFilterChips();
+    _libEpoch++;
+    currentPage = 0;
+    _treeStats = null;  // letter bar counts depend on filters now
+    loadLibrary(0);
+}
+
+function _renderPillRow(containerId, items, hasKey, lacksKey, labelFor) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    c.innerHTML = '';
+    for (const it of items) {
+        const id = typeof it === 'string' ? it : it.id;
+        const label = labelFor ? labelFor(it) : id;
+        const state = _pillState(id, _libFilters[hasKey], _libFilters[lacksKey]);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `filter-pill state-${state}`;
+        btn.textContent = label;
+        btn.onclick = () => _cyclePill(id, hasKey, lacksKey);
+        c.appendChild(btn);
+    }
+}
+
+function _renderLyricsPill() {
+    // Single tri-state pill matching the arrangement / stem pattern.
+    // Cycle: any (null) -> require (1) -> exclude (0) -> any.
+    const c = document.getElementById('filter-lyrics');
+    if (!c) return;
+    c.innerHTML = '';
+    const v = _libFilters.lyrics;
+    const state = v === 1 ? 'require' : v === 0 ? 'exclude' : 'any';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `filter-pill state-${state}`;
+    btn.textContent = 'Lyrics';
+    btn.onclick = () => {
+        _libFilters.lyrics = v === null ? 1 : v === 1 ? 0 : null;
+        _saveLibFilters();
+        _renderLyricsPill();
+        _renderLibFilterChips();
+        _libEpoch++;
+        currentPage = 0;
+        _treeStats = null;
+        loadLibrary(0);
+    };
+    c.appendChild(btn);
+}
+
+async function _renderTuningList() {
+    const c = document.getElementById('filter-tunings');
+    if (!c) return;
+    let fetchError = null;
+    if (!_tuningNames) {
+        c.innerHTML = '<div class="text-xs text-gray-500 px-2">Loading...</div>';
+        try {
+            const resp = await fetch('/api/library/tuning-names');
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            _tuningNames = Array.isArray(data.tunings) ? data.tunings : [];
+        } catch (e) {
+            // Distinguish a server / network failure from "the DB
+            // genuinely has no tunings indexed". The latter wants a
+            // Full Rescan; the former just wants a retry. Don't cache
+            // the failure — leave _tuningNames null so reopening the
+            // drawer triggers a fresh attempt.
+            _tuningNames = null;
+            fetchError = e.message || 'request failed';
+        }
+    }
+    c.innerHTML = '';
+    if (fetchError) {
+        c.innerHTML = `<div class="text-xs text-red-400 px-2">Failed to load tunings (${esc(fetchError)}). Reopen the drawer to retry.</div>`;
+        return;
+    }
+    if (!_tuningNames.length) {
+        c.innerHTML = '<div class="text-xs text-gray-500 px-2">No tunings indexed yet — try Full Rescan.</div>';
+        return;
+    }
+    for (const t of _tuningNames) {
+        const checked = _libFilters.tunings.includes(t.name);
+        const row = document.createElement('label');
+        row.className = 'tuning-row';
+        row.innerHTML =
+            `<input type="checkbox" ${checked ? 'checked' : ''} class="rounded border-gray-600 bg-dark-700 text-accent">` +
+            `<span class="flex-1">${esc(t.name)}</span>` +
+            `<span class="tuning-count">${t.count}</span>`;
+        const cb = row.querySelector('input');
+        cb.onchange = () => {
+            const i = _libFilters.tunings.indexOf(t.name);
+            if (cb.checked && i === -1) _libFilters.tunings.push(t.name);
+            else if (!cb.checked && i !== -1) _libFilters.tunings.splice(i, 1);
+            _saveLibFilters();
+            _updateLibFiltersBadge();
+            _renderLibFilterChips();
+            _renderTuningSummary();
+            _libEpoch++;
+            currentPage = 0;
+            _treeStats = null;
+            loadLibrary(0);
+        };
+        c.appendChild(row);
+    }
+    _renderTuningSummary();
+}
+
+function _renderTuningSummary() {
+    const s = document.getElementById('filter-tunings-summary');
+    if (!s) return;
+    if (!_libFilters.tunings.length) { s.textContent = 'All tunings'; return; }
+    if (_libFilters.tunings.length === 1) { s.textContent = _libFilters.tunings[0]; return; }
+    s.textContent = `${_libFilters.tunings[0]} +${_libFilters.tunings.length - 1}`;
+}
+
+function _updateLibFiltersBadge() {
+    const badge = document.getElementById('lib-filters-count');
+    if (!badge) return;
+    const n = _libActiveCount();
+    badge.textContent = String(n);
+    badge.classList.toggle('hidden', n === 0);
+}
+
+function _renderLibFilterDrawer() {
+    _renderPillRow('filter-arrangements', _ARRANGEMENTS, 'arrHas', 'arrLacks');
+    _renderPillRow('filter-stems', _STEM_DEFS, 'stemsHas', 'stemsLacks', s => s.label);
+    _renderLyricsPill();
+    // Stems section dimmed when format=psarc (no stems exist).
+    const stemsSection = document.getElementById('filter-stems-section');
+    if (stemsSection) {
+        const fmt = (document.getElementById('lib-format') || {}).value || '';
+        stemsSection.classList.toggle('opacity-40', fmt === 'psarc');
+        stemsSection.classList.toggle('pointer-events-none', fmt === 'psarc');
+    }
+    _updateLibFiltersBadge();
+}
+
+function _renderLibFilterChips() {
+    const row = document.getElementById('lib-filter-chips');
+    if (!row) return;
+    const chips = [];
+    for (const a of _libFilters.arrHas) chips.push({ label: a, kind: 'require', remove: () => _libFilters.arrHas = _libFilters.arrHas.filter(x => x !== a) });
+    for (const a of _libFilters.arrLacks) chips.push({ label: `no ${a}`, kind: 'exclude', remove: () => _libFilters.arrLacks = _libFilters.arrLacks.filter(x => x !== a) });
+    for (const s of _libFilters.stemsHas) {
+        const def = _STEM_DEFS.find(d => d.id === s);
+        chips.push({ label: def ? def.label : s, kind: 'require', remove: () => _libFilters.stemsHas = _libFilters.stemsHas.filter(x => x !== s) });
+    }
+    for (const s of _libFilters.stemsLacks) {
+        const def = _STEM_DEFS.find(d => d.id === s);
+        chips.push({ label: `no ${def ? def.label : s}`, kind: 'exclude', remove: () => _libFilters.stemsLacks = _libFilters.stemsLacks.filter(x => x !== s) });
+    }
+    if (_libFilters.lyrics === 1) chips.push({ label: 'has lyrics', kind: 'require', remove: () => _libFilters.lyrics = null });
+    if (_libFilters.lyrics === 0) chips.push({ label: 'no lyrics', kind: 'exclude', remove: () => _libFilters.lyrics = null });
+    for (const t of _libFilters.tunings) chips.push({ label: t, kind: 'require', remove: () => _libFilters.tunings = _libFilters.tunings.filter(x => x !== t) });
+
+    row.innerHTML = '';
+    if (!chips.length) {
+        row.classList.add('hidden');
+        return;
+    }
+    row.classList.remove('hidden');
+    for (const c of chips) {
+        const el = document.createElement('span');
+        el.className = `chip ${c.kind === 'exclude' ? 'chip-exclude' : ''}`;
+        // The "×" glyph isn't a reliable accessible name; assistive tech
+        // also can't depend on `title` alone. Spell out the action plus
+        // the chip's label in `aria-label` so screen-reader users hear
+        // "Remove filter: Lead" instead of "button" or just "×".
+        const ariaLabel = `Remove filter: ${c.label}`;
+        el.innerHTML =
+            `${esc(c.label)}<button type="button" title="${esc(ariaLabel)}" aria-label="${esc(ariaLabel)}">×</button>`;
+        el.querySelector('button').onclick = () => {
+            c.remove();
+            _saveLibFilters();
+            _renderLibFilterDrawer();
+            _renderLibFilterChips();
+            _libEpoch++;
+            currentPage = 0;
+            _treeStats = null;
+            loadLibrary(0);
+        };
+        row.appendChild(el);
+    }
+}
+
+function toggleLibFilters(force) {
+    const drawer = document.getElementById('lib-filter-drawer');
+    const overlay = document.getElementById('lib-filter-overlay');
+    if (!drawer) return;
+    const open = force === undefined ? !drawer.classList.contains('open') : !!force;
+    drawer.classList.toggle('open', open);
+    overlay.classList.toggle('hidden', !open);
+    if (open) {
+        _renderLibFilterDrawer();
+        _renderTuningList();
+    }
+}
+
+function clearLibFilters() {
+    _libFilters = _defaultLibFilters();
+    _saveLibFilters();
+    _renderLibFilterDrawer();
+    _renderTuningList();
+    _renderLibFilterChips();
+    _libEpoch++;
+    currentPage = 0;
+    _treeStats = null;
+    loadLibrary(0);
+}
+
 function setLibView(view) {
     libView = view;
+    if (_LIB_VIEW_VALUES.has(view)) _writePersistedChoice(_LIB_VIEW_KEY, view);
     document.getElementById('lib-grid').classList.toggle('hidden', view !== 'grid');
     document.getElementById('lib-tree').classList.toggle('hidden', view !== 'tree');
     document.querySelectorAll('.lib-grid-ctrl').forEach(el => el.classList.toggle('hidden', view !== 'grid'));
@@ -58,13 +424,33 @@ function filterLibrary() {
         _libEpoch++;
         currentPage = 0;
         _treeLetter = '';
+        // Letter-bar counts depend on `q` and the active filter set —
+        // any change to those must invalidate the tree-view stats
+        // cache or the next switch to tree view will render stale
+        // letter counts (slopsmith#134 review).
+        _treeStats = null;
         loadLibrary(0);
     }, 250);
 }
 
 function sortLibrary() {
+    // Persist whichever of the two dropdowns just changed so the next
+    // page load can restore both. Both selects route through this
+    // handler today; reading both is cheap and keeps the function
+    // single-purpose.
+    const sortEl = document.getElementById('lib-sort');
+    if (sortEl && _LIB_SORT_VALUES.has(sortEl.value)) {
+        _writePersistedChoice(_LIB_SORT_KEY, sortEl.value);
+    }
+    const fmtEl = document.getElementById('lib-format');
+    if (fmtEl && _LIB_FORMAT_VALUES.has(fmtEl.value)) {
+        _writePersistedChoice(_LIB_FORMAT_KEY, fmtEl.value);
+    }
     _libEpoch++;
     currentPage = 0;
+    // Same reason as filterLibrary: format dropdown changes the stats
+    // payload, so the cache must drop too.
+    _treeStats = null;
     loadLibrary(0);
 }
 
@@ -77,6 +463,7 @@ async function loadGridPage(page = 0) {
     const format = (document.getElementById('lib-format') || {}).value || '';
     const params = new URLSearchParams({ q, page, size: PAGE_SIZE, sort });
     if (format) params.set('format', format);
+    _applyLibFiltersToParams(params);
     const resp = await fetch(`/api/library?${params}`);
     const data = await resp.json();
     if (myEpoch !== _libEpoch) return; // filter/sort/view changed mid-fetch
@@ -206,7 +593,14 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
 
 async function loadTreeView() {
     if (!_treeStats) {
-        const resp = await fetch('/api/library/stats');
+        const q = document.getElementById('lib-filter').value.trim();
+        const format = (document.getElementById('lib-format') || {}).value || '';
+        const sp = new URLSearchParams();
+        if (q) sp.set('q', q);
+        if (format) sp.set('format', format);
+        _applyLibFiltersToParams(sp);
+        const qs = sp.toString();
+        const resp = await fetch(`/api/library/stats${qs ? '?' + qs : ''}`);
         _treeStats = await resp.json();
     }
     const q = document.getElementById('lib-filter').value.trim();
@@ -246,6 +640,7 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
     if (favoritesOnly) params.set('favorites', '1');
     const format = (document.getElementById('lib-format') || {}).value || '';
     if (format) params.set('format', format);
+    if (!favoritesOnly) _applyLibFiltersToParams(params);
     params.set('page', page);
     params.set('size', TREE_PAGE_SIZE);
     const resp = await fetch(`/api/library/artists?${params}`);
@@ -260,8 +655,22 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
     document.getElementById(countId).textContent =
         `${totalArtists} artists (${songCount} songs on this page)${pageInfo}`;
 
+    // A previous Expand/Collapse-All click is persisted as '1'/'0' and
+    // overrides the auto-open heuristic for both artists and albums.
+    // Library and Favorites have independent buttons and independent
+    // keys (slopsmith.libTreeExpand vs slopsmith.favTreeExpand) — fed
+    // off the favoritesOnly flag — so toggling one doesn't flip the
+    // other's state. Falsy / unset key → fall back to the existing
+    // heuristic (open when there's an active search or few rows).
+    const expandKey = favoritesOnly ? _FAV_TREE_EXPAND_KEY : _LIB_TREE_EXPAND_KEY;
+    const savedExpand = _readPersistedChoice(expandKey, _LIB_TREE_EXPAND_VALUES, null);
+    const forceArtistOpen = savedExpand === '1';
+    const forceArtistClosed = savedExpand === '0';
+
     for (const artist of artists) {
-        const openClass = q || artists.length <= 5 ? ' open' : '';
+        const heuristicOpen = q || artists.length <= 5;
+        const isOpen = forceArtistOpen ? true : forceArtistClosed ? false : heuristicOpen;
+        const openClass = isOpen ? ' open' : '';
         html += `<div class="artist-row${openClass}">`;
         html += `<div class="artist-header" onclick="this.parentElement.classList.toggle('open')">`;
         html += chevron;
@@ -271,7 +680,9 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
 
         for (const album of artist.albums) {
             const artUrl = `/api/song/${encodeURIComponent(album.songs[0].filename)}/art${album.songs[0].mtime ? `?v=${Math.floor(album.songs[0].mtime)}` : ''}`;
-            const albumOpen = q || artist.albums.length === 1 ? ' open' : '';
+            const albumHeuristicOpen = q || artist.albums.length === 1;
+            const albumIsOpen = forceArtistOpen ? true : forceArtistClosed ? false : albumHeuristicOpen;
+            const albumOpen = albumIsOpen ? ' open' : '';
             html += `<div class="album-group${albumOpen}">`;
             html += `<div class="album-header" onclick="this.parentElement.classList.toggle('open')">`;
             html += chevron;
@@ -349,9 +760,27 @@ function filterTreeLetter(letter) {
     loadTreeView();
 }
 
+function _toggleAllInTree(containerId, expand, persistKey) {
+    // Scope the open/close to the named tree's container so toggling
+    // Library doesn't flip the (offscreen) Favorites DOM and vice
+    // versa — they share `.artist-row` / `.album-group` classes.
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.querySelectorAll('.artist-row').forEach(el => el.classList.toggle('open', expand));
+    container.querySelectorAll('.album-group').forEach(el => el.classList.toggle('open', expand));
+    // Persist the explicit choice so the next page reload (or letter
+    // change, which re-runs renderTreeInto) honors it instead of
+    // falling back to the auto-open heuristic. Stored as '1'/'0' so a
+    // missing key reliably means "no explicit choice".
+    _writePersistedChoice(persistKey, expand ? '1' : '0');
+}
+
 function toggleAllArtists(expand) {
-    document.querySelectorAll('.artist-row').forEach(el => el.classList.toggle('open', expand));
-    document.querySelectorAll('.album-group').forEach(el => el.classList.toggle('open', expand));
+    _toggleAllInTree('lib-tree', expand, _LIB_TREE_EXPAND_KEY);
+}
+
+function toggleAllFavoriteArtists(expand) {
+    _toggleAllInTree('fav-tree', expand, _FAV_TREE_EXPAND_KEY);
 }
 
 function esc(s) {
@@ -581,6 +1010,154 @@ async function saveSettings() {
     document.getElementById('settings-status').textContent = data.message || data.error;
 }
 
+// ── Settings export / import (slopsmith#113) ─────────────────────────────────
+//
+// Bundles server config + every localStorage key + opted-in plugin server
+// files into a single JSON file.
+//
+// Apply semantics — phased, NOT all-or-nothing across the two stores:
+//   1. Server first (/api/settings/import). Phase-1 validation guards
+//      the whole bundle; phase-2 disk commit is per-file but ordered
+//      so a mid-apply failure surfaces a `partial` field. A server
+//      failure short-circuits before any localStorage write, so the
+//      browser side stays untouched on validation refusals.
+//   2. localStorage second, only after the server returns ok. Applied
+//      as a MERGE (no clear): bundled keys overwrite, locally-present
+//      keys absent from the bundle are preserved (so a plugin
+//      installed after the export keeps its first-run defaults).
+//      A localStorage exception here (quota / private mode) is
+//      surfaced verbatim — server state is already committed and we
+//      don't pretend the import was clean.
+//
+// In short: the server side is atomic in phase 1 and surface-partial in
+// phase 2; the localStorage side is best-effort merge after server
+// success. Failures are reported, never silenced.
+
+async function exportSettings() {
+    const status = document.getElementById('backup-status');
+    status.textContent = 'Exporting...';
+    try {
+        const resp = await fetch('/api/settings/export');
+        if (!resp.ok) {
+            status.textContent = `Export failed (HTTP ${resp.status})`;
+            return;
+        }
+        const bundle = await resp.json();
+        // Layer in the browser's localStorage. Use the standard Storage
+        // iteration API (length + key(i)) rather than Object.keys —
+        // Object.keys on a Storage instance is not deterministic across
+        // browsers and can both miss entries and include non-entry
+        // properties depending on the implementation. Keys are preserved
+        // verbatim as strings; that's how localStorage stores them, and
+        // round-trip fidelity matters more than re-typing values that
+        // were never typed in the first place.
+        const localStorageData = {};
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key === null) continue;
+            const value = localStorage.getItem(key);
+            if (value !== null) localStorageData[key] = value;
+        }
+        bundle.local_storage = localStorageData;
+
+        // Trigger download via blob + temporary <a download>. We honor the
+        // server's Content-Disposition filename when present, otherwise
+        // fall back to a date-stamped default.
+        let filename = 'slopsmith-settings.json';
+        const disposition = resp.headers.get('Content-Disposition');
+        if (disposition) {
+            const match = /filename="([^"]+)"/.exec(disposition);
+            if (match) filename = match[1];
+        }
+        const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        status.textContent = `Exported ${filename}`;
+    } catch (e) {
+        status.textContent = `Export failed: ${e.message}`;
+    }
+}
+
+async function importSettings(file) {
+    if (!file) return;
+    const status = document.getElementById('backup-status');
+    if (!confirm('Import will overwrite settings present in the bundle (server config, browser preferences, and opted-in plugin data) and reload the page. Settings not in the bundle (e.g. from plugins installed after the export) are preserved. Continue?')) {
+        status.textContent = 'Import cancelled';
+        return;
+    }
+    let bundle;
+    try {
+        bundle = JSON.parse(await file.text());
+    } catch (e) {
+        status.textContent = `Import failed: not valid JSON (${e.message})`;
+        return;
+    }
+
+    status.textContent = 'Importing...';
+    let resp, data;
+    try {
+        resp = await fetch('/api/settings/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(bundle),
+        });
+        data = await resp.json();
+    } catch (e) {
+        status.textContent = `Import failed: ${e.message}`;
+        return;
+    }
+    // Two failure shapes to surface: our own validation handler
+    // returns `{ok: false, error: "..."}`, but if the body fails
+    // FastAPI's request-level validation (e.g. top-level value is
+    // an array, not an object), the response is the framework's
+    // `{detail: ...}` shape with no `ok` key. `resp.ok` distinguishes
+    // both from success without depending on which path produced
+    // the failure.
+    if (!resp.ok || data.ok === false) {
+        let msg = data.error;
+        if (!msg && data.detail) {
+            msg = typeof data.detail === 'string'
+                ? data.detail
+                : JSON.stringify(data.detail);
+        }
+        status.textContent = `Import failed: ${msg || `HTTP ${resp.status}`}`;
+        return;
+    }
+
+    // Server applied successfully. Now apply the localStorage portion as
+    // a MERGE (not clear+restore): keys in the bundle overwrite, keys
+    // present locally but absent from the bundle are preserved. This
+    // matters when a plugin was installed *after* the export — wiping
+    // its localStorage would erase first-run defaults the plugin set on
+    // load, leaving it in a worse state than before the import. The
+    // tradeoff is that orphan keys from removed plugins or renamed key
+    // schemes also linger; cleaning those up is the user's job.
+    const ls = bundle.local_storage;
+    if (ls && typeof ls === 'object') {
+        try {
+            for (const [key, value] of Object.entries(ls)) {
+                if (typeof value === 'string') localStorage.setItem(key, value);
+            }
+        } catch (e) {
+            // Quota exceeded / private mode etc. Server side already
+            // committed, so we surface the partial state rather than
+            // pretending it succeeded.
+            status.textContent = `Server applied, but localStorage write failed: ${e.message}`;
+            return;
+        }
+    }
+
+    const warnings = (data.warnings || []).join('; ');
+    status.textContent = warnings ? `Imported with warnings: ${warnings}. Reloading...` : 'Imported. Reloading...';
+    setTimeout(() => location.reload(), 800);
+}
+
 async function rescanLibrary() {
     const btn = document.getElementById('btn-rescan');
     const status = document.getElementById('rescan-status');
@@ -603,6 +1180,7 @@ async function rescanLibrary() {
             btn.textContent = 'Rescan Library';
             status.textContent = sd.error ? `Error: ${sd.error}` : 'Done!';
             _treeStats = null;
+            _tuningNames = null;  // re-fetch on next drawer open
             loadLibrary();
         }
     }, 1000);
@@ -630,6 +1208,7 @@ async function fullRescanLibrary() {
             btn.textContent = 'Full Rescan';
             status.textContent = sd.error ? `Error: ${sd.error}` : 'Done!';
             _treeStats = null;
+            _tuningNames = null;  // re-fetch on next drawer open
             loadLibrary();
         }
     }, 1000);
@@ -775,25 +1354,25 @@ window.slopsmith = Object.assign(new EventTarget(), {
 });
 
 // Initialise volume from persisted preference (matches lefty / invertHighway /
-// renderScale / showLyrics convention). Falls back to the slider's default.
-(function _initVolume() {
-    const slider = document.getElementById('volume');
-    const label = document.getElementById('vol-label');
-    const stored = parseFloat(localStorage.getItem('volume'));
-    const v = Number.isFinite(stored) ? stored : parseFloat(slider.value);
-    slider.value = v;
-    label.textContent = v + '%';
-    audio.volume = v / 100;
-})();
+// renderScale / showLyrics convention). The mixer popover (audio-mixer.js)
+// owns the UI surface; this just hydrates audio.volume on boot.
+function _readSongVolume() {
+    try {
+        const stored = parseFloat(localStorage.getItem('volume'));
+        return Number.isFinite(stored) ? Math.min(100, Math.max(0, stored)) : 80;
+    } catch (e) {
+        return 80;
+    }
+}
+audio.volume = _readSongVolume() / 100;
 
-// Re-sync audio volume from the slider every time a new source finishes
-// loading metadata. Belt + suspenders — some combinations of plugin audio-
-// graph routing and media-element swaps reset audio.volume to 1.0, which
-// would leave the slider showing one value while audio plays at another
-// (see slopsmith#54).
+// Re-sync audio.volume from the persisted setting whenever a new source
+// finishes loading metadata. Belt + suspenders — some combinations of plugin
+// audio-graph routing and media-element swaps reset audio.volume to 1.0
+// (slopsmith#54). Delegates to audio-mixer's readSongVolume when loaded so
+// the in-memory fallback (for storage-blocked contexts) is authoritative.
 audio.addEventListener('loadedmetadata', () => {
-    const slider = document.getElementById('volume');
-    if (slider) audio.volume = parseFloat(slider.value) / 100;
+    audio.volume = (window.slopsmith?.audio?.readSongVolume?.() ?? _readSongVolume()) / 100;
 });
 
 // Debug audio issues
@@ -900,11 +1479,6 @@ function togglePlay() {
 }
 
 function seekBy(s) { audio.currentTime = Math.max(0, audio.currentTime + s); }
-function setVolume(v) {
-    audio.volume = v / 100;
-    document.getElementById('vol-label').textContent = v + '%';
-    localStorage.setItem('volume', String(v));
-}
 function setSpeed(v) {
     audio.playbackRate = parseFloat(v);
     document.getElementById('speed-label').textContent = parseFloat(v).toFixed(2) + 'x';
@@ -1865,10 +2439,32 @@ async function bootstrapPluginsAndUi() {
     return plugins;
 }
 
-// Load library on start. loadSettings is awaited so persisted values
-// (A/V offset, mastery, etc.) are applied before playback starts.
+// Load library on start. loadSettings is awaited alongside so persisted
+// values (A/V offset, mastery, etc.) are applied to the highway + HUD
+// before any playSong runs — otherwise a fast click could start
+// playback with stale settings before /api/settings returned.
 (async () => {
-    setLibView('grid');
+    // Restore library-filter UI state from localStorage before the first
+    // grid fetch so the badge/chips are accurate immediately
+    // (slopsmith#129).
+    _renderLibFilterChips();
+    _updateLibFiltersBadge();
+    // Restore the persisted sort and format-filter dropdowns BEFORE
+    // the first setLibView() call — setLibView triggers loadLibrary,
+    // which reads `lib-sort` / `lib-format` to build the API query
+    // string. Without this, the first page would always load with
+    // "Artist A-Z" / "All formats" regardless of what the user had
+    // picked previously.
+    const savedSort = _readPersistedChoice(_LIB_SORT_KEY, _LIB_SORT_VALUES, 'artist');
+    const savedFormat = _readPersistedChoice(_LIB_FORMAT_KEY, _LIB_FORMAT_VALUES, '');
+    const sortEl = document.getElementById('lib-sort');
+    const fmtEl = document.getElementById('lib-format');
+    if (sortEl) sortEl.value = savedSort;
+    if (fmtEl) fmtEl.value = savedFormat;
+    // `libView` was already initialized from localStorage at module
+    // load; passing it through setLibView replays the visibility
+    // toggling and triggers the initial load.
+    setLibView(libView);
     try { await loadSettings(); } catch (e) { console.warn('initial loadSettings failed:', e); }
     checkScanAndLoad();
 

@@ -42,13 +42,23 @@ Plugins are the primary extension point. Each plugin lives in `plugins/<name>/` 
   "screen": "screen.html",
   "script": "screen.js",
   "routes": "routes.py",
-  "settings": { "html": "settings.html" }
+  "settings": {
+    "html": "settings.html",
+    "server_files": ["my_plugin.db", "my_plugin_models/"]
+  }
 }
 ```
 
 All fields except `id` and `name` are optional. Plugins can have any combination of frontend (screen/script), backend (routes), and settings.
 
 `version` and `private` are advisory metadata — the plugin loader does not currently consume them, but plugins commonly include them for publishing/tooling purposes.
+
+`settings.server_files` is the **opt-in** for the unified Settings export/import flow (slopsmith#113). It's a list of relpaths under `context["config_dir"]` that the plugin wants included in user-triggered backups. A trailing `/` denotes a directory (recurse). Plugins that omit this field have no server-side files exported; their state lives entirely in browser `localStorage`, which is bundled wholesale on every export. Rules:
+- Relpaths only. Absolute paths, drive letters, `..` segments, and backslashes are rejected at load time with a `[Plugin]` warning.
+- The same allowlist is consulted at both export and import: a bundle that references a file the *importing host*'s manifest no longer declares is skipped with a warning (handles plugin updates between export and import). A bundle that references a file your host's manifest never declared is also skipped — no surprise writes.
+- Files are encoded as `{"encoding": "json", "data": <parsed>}` for `.json` files that parse cleanly (diff-friendly), `{"encoding": "base64", "data": "..."}` otherwise (sqlite, model blobs, IRs).
+- Plugins own their internal data migration. Importing a bundle whose data schema predates your current code restores bytes verbatim — your plugin must cope at next load.
+- Symlinks are skipped on export and never followed on import.
 
 `type` is an optional role hint (slopsmith#36). Supported values:
 - `"visualization"` — plugin provides a highway renderer. Declaring this makes the plugin eligible for the main-player viz picker AND splitscreen's per-panel picker. Must pair with a `window.slopsmithViz_<id>` factory exporting the setRenderer contract below.
@@ -202,6 +212,34 @@ Reference: [fretboard plugin](https://github.com/byrongamatos/slopsmith-plugin-f
 **Why two?** setRenderer plugs into an existing highway — main-player or splitscreen-panel — reusing its WebSocket and data parsing, so the common "I want a different look for the same data" case is zero boilerplate AND multi-instance for free. Overlays compose with whatever renderer is active — they decorate rather than replace, so multiple can stack (fretboard + chord labels + practice feedback) without fighting over the canvas.
 
 A previous standalone-pane contract (`window.createMyVisualization({ container })` with its own WebSocket per pane) was used by splitscreen pre-Wave-C. It's been retired now that splitscreen calls `setRenderer` on per-panel `createHighway()` instances; if you find references in older plugin docs or external integration guides, those describe the legacy path.
+
+### Audio mixer fader registration (slopsmith#87)
+
+Plugins that produce audio outside the song's `<audio>` element (NAM amp output, synth voices, etc.) can register a labeled fader so users can balance them against the song from one mixer popover in the player controls.
+
+```js
+function _registerFader() {
+    const api = window.slopsmith && window.slopsmith.audio;
+    if (!api) return;
+    api.registerFader({
+        id: 'my_plugin',           // unique key
+        label: 'My Plugin',        // shown above the fader
+        unit: 'dB',                // optional suffix shown next to the value (e.g. '%', 'dB')
+        min: 0, max: 2, step: 0.05,
+        defaultValue: 1.0,
+        getValue: () => _myCurrentVolume,        // read current value
+        setValue: (v) => _setMyVolume(v),         // write + persist + apply
+    });
+}
+
+if (window.slopsmith && window.slopsmith.audio) {
+    _registerFader();
+} else {
+    window.addEventListener('slopsmith:audio:ready', _registerFader, { once: true });
+}
+```
+
+The plugin owns persistence — the registry calls `getValue()` when the popover opens, and also after each `setValue()` during slider drags to re-sync the displayed value. Keep `getValue()` cheap and side-effect-free, and make sure `setValue()` updates whatever backing state `getValue()` reads synchronously. Pair `setValue` with whatever your plugin already does internally (write the GainNode, persist to localStorage, update any in-plugin label). Use `unregisterFader(id)` when your plugin is teardown-able and you want the strip to disappear; otherwise keep it registered so the user's setting persists across toggle states.
 
 ### General plugin guidelines
 

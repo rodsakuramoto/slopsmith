@@ -31,7 +31,13 @@ try:
 except OSError:
     pass  # Read-only in packaged installs
 
-DLC_DIR = Path(os.environ.get("DLC_DIR", ""))
+# Distinguish "env not set / empty" from "explicitly set". Path("") collapses
+# to Path(".") so we can't recover that signal after the cast — capture the
+# raw env-var string up front and let _get_dlc_dir() consult both. This way
+# `DLC_DIR=.` remains a valid opt-in for cwd while `DLC_DIR=""` (or unset)
+# falls through to the config.json fallback.
+_DLC_DIR_ENV = os.environ.get("DLC_DIR", "").strip()
+DLC_DIR = Path(_DLC_DIR_ENV) if _DLC_DIR_ENV else Path("")
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", str(Path.home() / ".local" / "share" / "rocksmith-cdlc")))
 
 # Writable cache directories (use CONFIG_DIR, not STATIC_DIR which may be read-only)
@@ -62,20 +68,33 @@ class MetadataDB:
                 arrangements TEXT,
                 has_lyrics INTEGER DEFAULT 0,
                 format TEXT DEFAULT 'psarc',
-                stem_count INTEGER DEFAULT 0
+                stem_count INTEGER DEFAULT 0,
+                stem_ids TEXT DEFAULT '[]',
+                tuning_name TEXT DEFAULT '',
+                tuning_sort_key INTEGER DEFAULT 0
             )
         """)
-        # Idempotent migration for installs that predate the format column.
-        try:
-            self.conn.execute("ALTER TABLE songs ADD COLUMN format TEXT DEFAULT 'psarc'")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            self.conn.execute("ALTER TABLE songs ADD COLUMN stem_count INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
+        # Idempotent migrations for installs that predate each column.
+        for ddl in (
+            "ALTER TABLE songs ADD COLUMN format TEXT DEFAULT 'psarc'",
+            "ALTER TABLE songs ADD COLUMN stem_count INTEGER DEFAULT 0",
+            # slopsmith#129: per-stem filter needs the id list, not just count.
+            "ALTER TABLE songs ADD COLUMN stem_ids TEXT DEFAULT '[]'",
+            # slopsmith#69 + #22: denormalized canonical tuning name + numeric
+            # sort key (sum of offsets). The existing `tuning` text column
+            # stays — these are caches, repopulated on rescan.
+            "ALTER TABLE songs ADD COLUMN tuning_name TEXT DEFAULT ''",
+            "ALTER TABLE songs ADD COLUMN tuning_sort_key INTEGER DEFAULT 0",
+        ):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_artist ON songs(artist COLLATE NOCASE)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_title ON songs(title COLLATE NOCASE)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_tuning_name ON songs(tuning_name COLLATE NOCASE)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_tuning_sort_key ON songs(tuning_sort_key)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_year ON songs(year)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS favorites (filename TEXT PRIMARY KEY)")
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS loops (
@@ -110,7 +129,8 @@ class MetadataDB:
 
     def get(self, filename: str, mtime: float, size: int) -> dict | None:
         row = self.conn.execute(
-            "SELECT mtime, size, title, artist, album, year, duration, tuning, arrangements, has_lyrics, format, stem_count "
+            "SELECT mtime, size, title, artist, album, year, duration, tuning, arrangements, has_lyrics, "
+            "format, stem_count, stem_ids, tuning_name, tuning_sort_key "
             "FROM songs WHERE filename = ?", (filename,)
         ).fetchone()
         if row and row[0] == mtime and row[1] == size and row[2]:
@@ -121,6 +141,9 @@ class MetadataDB:
                 "has_lyrics": bool(row[9]),
                 "format": row[10] or "psarc",
                 "stem_count": int(row[11] or 0),
+                "stem_ids": json.loads(row[12]) if row[12] else [],
+                "tuning_name": row[13] or "",
+                "tuning_sort_key": int(row[14] or 0),
             }
         return None
 
@@ -128,14 +151,18 @@ class MetadataDB:
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO songs "
-                "(filename, mtime, size, title, artist, album, year, duration, tuning, arrangements, has_lyrics, format, stem_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(filename, mtime, size, title, artist, album, year, duration, tuning, arrangements, "
+                "has_lyrics, format, stem_count, stem_ids, tuning_name, tuning_sort_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (filename, mtime, size, meta.get("title", ""), meta.get("artist", ""),
                  meta.get("album", ""), meta.get("year", ""), meta.get("duration", 0),
                  meta.get("tuning", ""), json.dumps(meta.get("arrangements", [])),
                  1 if meta.get("has_lyrics") else 0,
                  meta.get("format", "psarc"),
-                 int(meta.get("stem_count", 0) or 0)),
+                 int(meta.get("stem_count", 0) or 0),
+                 json.dumps(meta.get("stem_ids", []) or []),
+                 meta.get("tuning_name", "") or "",
+                 int(meta.get("tuning_sort_key", 0) or 0)),
             )
             self.conn.commit()
 
@@ -163,13 +190,32 @@ class MetadataDB:
             originals.add(fname.replace("_EStd_", "_").replace("_DropD_", "_"))
         return originals
 
-    def query_page(self, q: str = "", page: int = 0, size: int = 24,
-                   sort: str = "artist", direction: str = "asc",
-                   favorites_only: bool = False,
-                   format_filter: str = "") -> tuple[list[dict], int]:
-        """Server-side paginated search. Returns (songs, total_count)."""
+    # Manifest-allowed filter values. Whitelisted before binding so a
+    # malformed query string can't push arbitrary text through to SQL —
+    # parameters are bound, but capping the input space is still cheap
+    # defense-in-depth (see slopsmith#129).
+    _ALLOWED_ARRANGEMENT_NAMES = {"Lead", "Rhythm", "Bass", "Combo"}
+    # Stem ids match the bare strings sloppak manifests use today —
+    # `full`, `guitar`, `bass`, `drums`, `vocals`, `piano`, `other`. The
+    # frontend filter UI omits `full` (it's the always-on fallback mix
+    # and would match every sloppak), but the server-side whitelist
+    # keeps it so a hand-rolled API client can still ask for it.
+    _ALLOWED_STEM_IDS = {"full", "guitar", "bass", "drums", "vocals", "piano", "other"}
+
+    def _build_where(self, q: str = "", favorites_only: bool = False,
+                     format_filter: str = "",
+                     arrangements_has: list[str] | None = None,
+                     arrangements_lacks: list[str] | None = None,
+                     stems_has: list[str] | None = None,
+                     stems_lacks: list[str] | None = None,
+                     has_lyrics: int | None = None,
+                     tunings: list[str] | None = None) -> tuple[str, list]:
+        """Shared WHERE-clause builder for query_page / query_artists /
+        query_stats. Returns (where_sql, params). Leading 'WHERE' is
+        included so callers paste it directly. See slopsmith#129/#69.
+        """
         where = "WHERE title != ''"
-        params = []
+        params: list = []
         if favorites_only:
             where += " AND filename IN (SELECT filename FROM favorites)"
         if format_filter:
@@ -178,19 +224,120 @@ class MetadataDB:
         if q:
             where += " AND (title LIKE ? COLLATE NOCASE OR artist LIKE ? COLLATE NOCASE OR album LIKE ? COLLATE NOCASE)"
             params += [f"%{q}%"] * 3
+        # arrangements_has: OR within axis (any-of). Uses JSON1's
+        # json_each which yields one row per arrangement, then matches
+        # the `name` field. The whole subquery is wrapped in EXISTS so
+        # we don't multiply rows in the outer SELECT.
+        arr_has = [a for a in (arrangements_has or []) if a in self._ALLOWED_ARRANGEMENT_NAMES]
+        if arr_has:
+            placeholders = ",".join(["?"] * len(arr_has))
+            where += (" AND EXISTS (SELECT 1 FROM json_each(songs.arrangements) "
+                      f"WHERE json_extract(value, '$.name') IN ({placeholders}))")
+            params += arr_has
+        arr_lacks = [a for a in (arrangements_lacks or []) if a in self._ALLOWED_ARRANGEMENT_NAMES]
+        if arr_lacks:
+            placeholders = ",".join(["?"] * len(arr_lacks))
+            where += (" AND NOT EXISTS (SELECT 1 FROM json_each(songs.arrangements) "
+                      f"WHERE json_extract(value, '$.name') IN ({placeholders}))")
+            params += arr_lacks
+        stems_h = [s for s in (stems_has or []) if s in self._ALLOWED_STEM_IDS]
+        if stems_h:
+            placeholders = ",".join(["?"] * len(stems_h))
+            where += (" AND EXISTS (SELECT 1 FROM json_each(songs.stem_ids) "
+                      f"WHERE value IN ({placeholders}))")
+            params += stems_h
+        stems_l = [s for s in (stems_lacks or []) if s in self._ALLOWED_STEM_IDS]
+        if stems_l:
+            placeholders = ",".join(["?"] * len(stems_l))
+            where += (" AND NOT EXISTS (SELECT 1 FROM json_each(songs.stem_ids) "
+                      f"WHERE value IN ({placeholders}))")
+            params += stems_l
+        if has_lyrics in (0, 1):
+            where += " AND has_lyrics = ?"
+            params.append(has_lyrics)
+        if tunings:
+            # Keep the input cap conservative (32) so a hostile caller
+            # can't blow out the parameter list. Real tuning sets in the
+            # wild number in the low double digits.
+            tn = [t for t in tunings if isinstance(t, str) and t][:32]
+            if tn:
+                placeholders = ",".join(["?"] * len(tn))
+                where += f" AND tuning_name COLLATE NOCASE IN ({placeholders})"
+                params += tn
+        return where, params
+
+    def query_page(self, q: str = "", page: int = 0, size: int = 24,
+                   sort: str = "artist", direction: str = "asc",
+                   favorites_only: bool = False,
+                   format_filter: str = "",
+                   arrangements_has: list[str] | None = None,
+                   arrangements_lacks: list[str] | None = None,
+                   stems_has: list[str] | None = None,
+                   stems_lacks: list[str] | None = None,
+                   has_lyrics: int | None = None,
+                   tunings: list[str] | None = None) -> tuple[list[dict], int]:
+        """Server-side paginated search. Returns (songs, total_count)."""
+        where, params = self._build_where(
+            q=q, favorites_only=favorites_only, format_filter=format_filter,
+            arrangements_has=arrangements_has, arrangements_lacks=arrangements_lacks,
+            stems_has=stems_has, stems_lacks=stems_lacks,
+            has_lyrics=has_lyrics, tunings=tunings,
+        )
 
         sort_map = {
             "artist": "artist COLLATE NOCASE", "artist-desc": "artist COLLATE NOCASE DESC",
             "title": "title COLLATE NOCASE", "title-desc": "title COLLATE NOCASE DESC",
-            "recent": "mtime DESC", "tuning": "tuning COLLATE NOCASE",
+            "recent": "mtime DESC",
+            # Tuning sort uses musical distance from E Standard
+            # (slopsmith#22 — was alphabetical). `tuning_sort_key` is
+            # the sum of per-string offsets, so |sort_key| is the
+            # magnitude of the down/up-tune. ABS ascending puts E
+            # Standard (0) first, then ±2 (Drop D, F Standard), then
+            # ±6 (Eb Standard, F# Standard), and so on. Within a
+            # magnitude tier we break ties by signed key ASC so the
+            # negative (down-tuned) variant comes before the positive
+            # (up-tuned) one — Eb Standard before F Standard, matching
+            # how Rocksmith groups its tuning list. Final tiebreak by
+            # name keeps the order fully deterministic.
+            #
+            # Leading term pushes pre-migration / unscanned rows to
+            # the bottom — without it ABS(0) collides with E
+            # Standard's 0 and unindexed rows would sort first.
+            # COALESCE on every column the clause references guards
+            # against NULL values — SQLite's literal-constant ADD
+            # COLUMN does backfill on most versions, but raw SQL
+            # inserts that bypass `put()`, edge-case migration paths,
+            # or future code that writes None could still leave NULLs
+            # behind, and a NULL `tuning_name` in `(tuning_name = '')`
+            # evaluates to NULL itself (which sorts ahead of 0 in
+            # ASC), defeating the push-to-bottom intent.
+            "tuning": (
+                "(COALESCE(tuning_name, '') = '') ASC, "
+                "ABS(COALESCE(tuning_sort_key, 0)), "
+                "COALESCE(tuning_sort_key, 0) ASC, "
+                "COALESCE(tuning_name, '') COLLATE NOCASE"
+            ),
+            # Year sort (slopsmith#128). Empty-year rows pushed to the
+            # bottom for both directions; otherwise CAST so '2010' >
+            # '2005' rather than alphabetic.
+            "year": "(year = '') ASC, CAST(year AS INTEGER) ASC",
+            "year-desc": "(year = '') ASC, CAST(year AS INTEGER) DESC",
         }
         order = sort_map.get(sort, "artist COLLATE NOCASE")
-        if direction == "desc" and "DESC" not in order:
+        # Legacy `dir=desc` toggle: only safe to append on simple sort
+        # clauses that don't already encode a direction. Compound /
+        # multi-term entries above (tuning, year, year-desc) bake their
+        # ASC/DESC into the clause, so a global ` DESC` append would
+        # produce invalid SQL like `CAST(year AS INTEGER) ASC DESC`.
+        # Skip the append in that case — clients flipping direction on
+        # those sorts use the explicit `-desc` sort key instead.
+        if direction == "desc" and " ASC" not in order and " DESC" not in order:
             order += " DESC"
 
         total = self.conn.execute(f"SELECT COUNT(*) FROM songs {where}", params).fetchone()[0]
         rows = self.conn.execute(
-            f"SELECT filename, title, artist, album, year, duration, tuning, arrangements, has_lyrics, mtime, format, stem_count "
+            f"SELECT filename, title, artist, album, year, duration, tuning, arrangements, has_lyrics, mtime, "
+            f"format, stem_count, stem_ids, tuning_name "
             f"FROM songs {where} ORDER BY {order} LIMIT ? OFFSET ?",
             params + [size, page * size]
         ).fetchall()
@@ -206,6 +353,8 @@ class MetadataDB:
                 "has_lyrics": bool(r[8]), "mtime": r[9],
                 "format": r[10] or "psarc",
                 "stem_count": int(r[11] or 0),
+                "stem_ids": json.loads(r[12]) if r[12] else [],
+                "tuning_name": r[13] or "",
                 "has_estd": r[0] in estd, "favorite": r[0] in favs,
             })
         return songs, total
@@ -213,23 +362,25 @@ class MetadataDB:
     def query_artists(self, letter: str = "", q: str = "",
                       favorites_only: bool = False,
                       page: int = 0, size: int = 50,
-                      format_filter: str = "") -> tuple[list[dict], int]:
+                      format_filter: str = "",
+                      arrangements_has: list[str] | None = None,
+                      arrangements_lacks: list[str] | None = None,
+                      stems_has: list[str] | None = None,
+                      stems_lacks: list[str] | None = None,
+                      has_lyrics: int | None = None,
+                      tunings: list[str] | None = None) -> tuple[list[dict], int]:
         """Get artists grouped by letter with their albums and songs. Returns (artists, total_artists)."""
-        where = "WHERE title != ''"
-        params = []
-        if favorites_only:
-            where += " AND filename IN (SELECT filename FROM favorites)"
-        if format_filter:
-            where += " AND format = ?"
-            params.append(format_filter)
+        where, params = self._build_where(
+            q=q, favorites_only=favorites_only, format_filter=format_filter,
+            arrangements_has=arrangements_has, arrangements_lacks=arrangements_lacks,
+            stems_has=stems_has, stems_lacks=stems_lacks,
+            has_lyrics=has_lyrics, tunings=tunings,
+        )
         if letter == "#":
             where += " AND artist NOT GLOB '[A-Za-z]*'"
         elif letter:
             where += " AND UPPER(SUBSTR(artist, 1, 1)) = ?"
             params.append(letter.upper())
-        if q:
-            where += " AND (title LIKE ? COLLATE NOCASE OR artist LIKE ? COLLATE NOCASE OR album LIKE ? COLLATE NOCASE)"
-            params += [f"%{q}%"] * 3
 
         # Get paginated distinct artists
         total_artists = self.conn.execute(
@@ -251,7 +402,8 @@ class MetadataDB:
         song_params = params + artist_names
 
         rows = self.conn.execute(
-            f"SELECT filename, title, artist, album, year, duration, tuning, arrangements, has_lyrics, format, stem_count "
+            f"SELECT filename, title, artist, album, year, duration, tuning, arrangements, has_lyrics, "
+            f"format, stem_count, stem_ids, tuning_name "
             f"FROM songs {song_where} ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE",
             song_params
         ).fetchall()
@@ -277,6 +429,8 @@ class MetadataDB:
                 "has_lyrics": bool(r[8]),
                 "format": r[9] or "psarc",
                 "stem_count": int(r[10] or 0),
+                "stem_ids": json.loads(r[11]) if r[11] else [],
+                "tuning_name": r[12] or "",
                 "has_estd": r[0] in estd,
                 "favorite": r[0] in favs,
             })
@@ -291,14 +445,35 @@ class MetadataDB:
                            "song_count": sum(len(a["songs"]) for a in albums), "albums": albums})
         return result, total_artists
 
-    def query_stats(self, favorites_only: bool = False) -> dict:
-        """Aggregate stats for the letter bar."""
-        filt = " AND filename IN (SELECT filename FROM favorites)" if favorites_only else ""
-        total = self.conn.execute(f"SELECT COUNT(*) FROM songs WHERE title != ''{filt}").fetchone()[0]
-        artist_count = self.conn.execute(f"SELECT COUNT(DISTINCT artist) FROM songs WHERE title != ''{filt}").fetchone()[0]
+    def query_stats(self, favorites_only: bool = False,
+                    q: str = "", format_filter: str = "",
+                    arrangements_has: list[str] | None = None,
+                    arrangements_lacks: list[str] | None = None,
+                    stems_has: list[str] | None = None,
+                    stems_lacks: list[str] | None = None,
+                    has_lyrics: int | None = None,
+                    tunings: list[str] | None = None) -> dict:
+        """Aggregate stats for the letter bar. Accepts the same filter
+        params as query_page so the letter counts stay synchronized
+        with the grid when filters are active."""
+        where, params = self._build_where(
+            q=q, favorites_only=favorites_only, format_filter=format_filter,
+            arrangements_has=arrangements_has, arrangements_lacks=arrangements_lacks,
+            stems_has=stems_has, stems_lacks=stems_lacks,
+            has_lyrics=has_lyrics, tunings=tunings,
+        )
+        total = self.conn.execute(f"SELECT COUNT(*) FROM songs {where}", params).fetchone()[0]
+        # NOCASE collation here mirrors `query_artists` and the per-
+        # letter `COUNT(DISTINCT artist COLLATE NOCASE)` below — without
+        # it, an artist stored under two different casings would inflate
+        # `total_artists` against the letter-bar breakdown the UI
+        # renders next to it.
+        artist_count = self.conn.execute(
+            f"SELECT COUNT(DISTINCT artist COLLATE NOCASE) FROM songs {where}", params
+        ).fetchone()[0]
         rows = self.conn.execute(
             f"SELECT UPPER(SUBSTR(artist, 1, 1)) as letter, COUNT(DISTINCT artist COLLATE NOCASE) "
-            f"FROM songs WHERE title != ''{filt} GROUP BY letter"
+            f"FROM songs {where} GROUP BY letter", params
         ).fetchall()
         letters = {}
         for letter, count in rows:
@@ -313,15 +488,21 @@ meta_db = MetadataDB()
 
 
 def _get_dlc_dir() -> Path | None:
-    if DLC_DIR.is_dir():
+    # Only consider DLC_DIR if the env var was non-empty. `Path("")` collapses
+    # to `.` and reports `.is_dir() == True`, which would silently shadow the
+    # config.json fallback. Checking the raw env string preserves
+    # `DLC_DIR=.` as a valid opt-in for cwd while keeping unset/empty out.
+    if _DLC_DIR_ENV and DLC_DIR.is_dir():
         return DLC_DIR
     config_file = CONFIG_DIR / "config.json"
     if config_file.exists():
         try:
             cfg = json.loads(config_file.read_text())
-            p = Path(cfg.get("dlc_dir", ""))
-            if p.is_dir():
-                return p
+            raw = str(cfg.get("dlc_dir", "")).strip()
+            if raw:
+                p = Path(raw)
+                if p.is_dir():
+                    return p
         except Exception:
             pass
     return None
@@ -336,6 +517,10 @@ def _extract_meta_fast(psarc_path: Path) -> dict:
     title = artist = album = year = ""
     duration = 0.0
     tuning = "E Standard"
+    # Track the offsets for the tuning we ultimately keep so we can
+    # compute tuning_sort_key (#22) without re-deriving it from the
+    # name. Defaults to E Standard offsets.
+    tuning_offsets: list[int] = [0] * 6
     _tuning_from_guitar = False
     arrangements = []
     has_lyrics = False
@@ -372,6 +557,7 @@ def _extract_meta_fast(psarc_path: Path) -> dict:
                         is_guitar = arr_name in ("Lead", "Rhythm", "Combo")
                         if tuning == "E Standard" or (is_guitar and not _tuning_from_guitar):
                             tuning = tun_name
+                            tuning_offsets = offsets
                             if is_guitar:
                                 _tuning_from_guitar = True
                     notes = attrs.get("NotesHard", 0) or attrs.get("NotesMedium", 0) or 0
@@ -404,6 +590,14 @@ def _extract_meta_fast(psarc_path: Path) -> dict:
         "title": title, "artist": artist, "album": album, "year": year,
         "duration": duration, "tuning": tuning,
         "arrangements": arrangements, "has_lyrics": has_lyrics,
+        # PSARCs have no stems; emit an empty list so the column round-
+        # trips uniformly with sloppaks (slopsmith#129).
+        "stem_ids": [],
+        # Cached tuning fields (slopsmith#22 / #69). The text `tuning`
+        # column above stays the source of truth for display; these are
+        # the indexable / filterable forms.
+        "tuning_name": tuning,
+        "tuning_sort_key": sum(tuning_offsets),
     }
 
 
@@ -411,8 +605,14 @@ def _extract_meta_sloppak(path: Path) -> dict:
     """Extract metadata for a sloppak (file or directory)."""
     meta = sloppak_mod.extract_meta(path)
     offsets = meta.pop("tuning_offsets", None) or [0] * 6
-    meta["tuning"] = tuning_name(offsets)
+    name = tuning_name(offsets)
+    meta["tuning"] = name
+    meta["tuning_name"] = name
+    meta["tuning_sort_key"] = sum(offsets)
     meta["format"] = "sloppak"
+    # `extract_meta` already populates `stem_ids` (slopsmith#129);
+    # default to empty for older callers / mocks.
+    meta.setdefault("stem_ids", [])
     return meta
 
 
@@ -432,8 +632,10 @@ def _extract_meta_for_file(psarc_path: Path) -> dict:
         unpack_psarc(str(psarc_path), tmp)
         song = load_song(tmp)
         tuning = "E Standard"
+        tuning_offsets: list[int] = [0] * 6
         if song.arrangements and song.arrangements[0].tuning:
-            tuning = tuning_name(song.arrangements[0].tuning)
+            tuning_offsets = list(song.arrangements[0].tuning)
+            tuning = tuning_name(tuning_offsets)
         arrangements = [
             {"index": i, "name": a.name,
              "notes": len(a.notes) + sum(len(c.notes) for c in a.chords)}
@@ -452,6 +654,9 @@ def _extract_meta_for_file(psarc_path: Path) -> dict:
             "album": song.album, "year": str(song.year) if song.year else "",
             "duration": song.song_length, "tuning": tuning,
             "arrangements": arrangements, "has_lyrics": has_lyrics,
+            "stem_ids": [],
+            "tuning_name": tuning,
+            "tuning_sort_key": sum(tuning_offsets),
         }
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -730,32 +935,117 @@ def trigger_full_rescan():
 
 # ── Library API ───────────────────────────────────────────────────────────────
 
+def _split_csv(raw: str) -> list[str]:
+    """Parse a comma-separated query-string list. Empty / whitespace-only
+    entries are dropped so `arrangements_has=` (no value) and
+    `arrangements_has=,` both mean 'no filter'."""
+    if not raw:
+        return []
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def _parse_has_lyrics(raw: str) -> int | None:
+    """Tri-state parse for has_lyrics. `1` → require, `0` → exclude,
+    anything else (including empty) → no filter."""
+    if raw == "1":
+        return 1
+    if raw == "0":
+        return 0
+    return None
+
+
 @app.get("/api/library")
 def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist",
-                 dir: str = "asc", favorites: int = 0, format: str = ""):
+                 dir: str = "asc", favorites: int = 0, format: str = "",
+                 arrangements_has: str = "", arrangements_lacks: str = "",
+                 stems_has: str = "", stems_lacks: str = "",
+                 has_lyrics: str = "", tunings: str = ""):
     """Paginated library search, queried from SQLite."""
     size = min(size, 100)
     fmt = format if format in ("psarc", "sloppak") else ""
-    songs, total = meta_db.query_page(q=q, page=page, size=size, sort=sort,
-                                       direction=dir, favorites_only=bool(favorites),
-                                       format_filter=fmt)
+    songs, total = meta_db.query_page(
+        q=q, page=page, size=size, sort=sort,
+        direction=dir, favorites_only=bool(favorites), format_filter=fmt,
+        arrangements_has=_split_csv(arrangements_has),
+        arrangements_lacks=_split_csv(arrangements_lacks),
+        stems_has=_split_csv(stems_has),
+        stems_lacks=_split_csv(stems_lacks),
+        has_lyrics=_parse_has_lyrics(has_lyrics),
+        tunings=_split_csv(tunings),
+    )
     return {"songs": songs, "total": total, "page": page, "size": size}
 
 
 @app.get("/api/library/artists")
 def list_artists(letter: str = "", q: str = "", favorites: int = 0, page: int = 0, size: int = 50,
-                 format: str = ""):
+                 format: str = "",
+                 arrangements_has: str = "", arrangements_lacks: str = "",
+                 stems_has: str = "", stems_lacks: str = "",
+                 has_lyrics: str = "", tunings: str = ""):
     """Get artists grouped by letter with albums and songs (for tree view)."""
     fmt = format if format in ("psarc", "sloppak") else ""
-    artists, total = meta_db.query_artists(letter=letter, q=q, favorites_only=bool(favorites),
-                                           page=page, size=min(size, 100), format_filter=fmt)
+    artists, total = meta_db.query_artists(
+        letter=letter, q=q, favorites_only=bool(favorites),
+        page=page, size=min(size, 100), format_filter=fmt,
+        arrangements_has=_split_csv(arrangements_has),
+        arrangements_lacks=_split_csv(arrangements_lacks),
+        stems_has=_split_csv(stems_has),
+        stems_lacks=_split_csv(stems_lacks),
+        has_lyrics=_parse_has_lyrics(has_lyrics),
+        tunings=_split_csv(tunings),
+    )
     return {"artists": artists, "total_artists": total, "page": page, "size": size}
 
 
 @app.get("/api/library/stats")
-def library_stats(favorites: int = 0):
-    """Aggregate stats for the UI."""
-    return meta_db.query_stats(favorites_only=bool(favorites))
+def library_stats(favorites: int = 0, q: str = "", format: str = "",
+                  arrangements_has: str = "", arrangements_lacks: str = "",
+                  stems_has: str = "", stems_lacks: str = "",
+                  has_lyrics: str = "", tunings: str = ""):
+    """Aggregate stats for the UI. Accepts the same filter params as
+    /api/library so the letter bar mirrors the active grid filter set."""
+    fmt = format if format in ("psarc", "sloppak") else ""
+    return meta_db.query_stats(
+        favorites_only=bool(favorites), q=q, format_filter=fmt,
+        arrangements_has=_split_csv(arrangements_has),
+        arrangements_lacks=_split_csv(arrangements_lacks),
+        stems_has=_split_csv(stems_has),
+        stems_lacks=_split_csv(stems_lacks),
+        has_lyrics=_parse_has_lyrics(has_lyrics),
+        tunings=_split_csv(tunings),
+    )
+
+
+@app.get("/api/library/tuning-names")
+def list_tuning_names():
+    """Distinct tuning names present in the library, with per-tuning
+    counts. Powers the tuning multi-select. Sorted by `tuning_sort_key`
+    so names appear in the same musical order the sort uses
+    (slopsmith#22) — E Standard first, then nearest neighbors."""
+    rows = meta_db.conn.execute(
+        "SELECT tuning_name, MIN(tuning_sort_key), COUNT(*) "
+        # NULL/empty-name rows are excluded entirely from the picker —
+        # users can't usefully filter by an unknown tuning. Once they
+        # rescan, the rows acquire a name and join the list.
+        "FROM songs WHERE title != '' AND COALESCE(tuning_name, '') != '' "
+        "GROUP BY tuning_name COLLATE NOCASE "
+        # Same ordering as `sort=tuning` in `query_page`: distance
+        # from E Standard first, then signed-key ASC so the down-
+        # tuned variant precedes the up-tuned one at equal distance
+        # (Eb Standard before F Standard at distance 6). Final
+        # alphabetical tiebreak keeps the order deterministic.
+        # COALESCE around the sort_key guards against NULL the same
+        # way the main tuning sort does.
+        "ORDER BY ABS(COALESCE(MIN(tuning_sort_key), 0)), "
+        "COALESCE(MIN(tuning_sort_key), 0) ASC, "
+        "tuning_name COLLATE NOCASE"
+    ).fetchall()
+    return {
+        "tunings": [
+            {"name": name, "sort_key": int(sk or 0), "count": count}
+            for name, sk, count in rows
+        ],
+    }
 
 
 @app.post("/api/favorites/toggle")
@@ -816,7 +1106,12 @@ def _default_settings():
     unreadable. Also used to seed a fresh cfg on first-run POSTs so a
     single-key write (e.g. the difficulty slider) can't silently wipe
     defaults that subsequent GETs would have exposed."""
-    return {"dlc_dir": str(DLC_DIR) if DLC_DIR.is_dir() else ""}
+    # Same `_DLC_DIR_ENV` truthy check as `_get_dlc_dir`: an empty env
+    # var collapses to `Path(".")` whose `.is_dir()` is True, so without
+    # the explicit guard we'd surface `"."` to /api/settings — and any
+    # partial-update POST would then persist that into config.json,
+    # silently undoing the env-var fix on the next load.
+    return {"dlc_dir": str(DLC_DIR) if (_DLC_DIR_ENV and DLC_DIR.is_dir()) else ""}
 
 
 def _load_config(config_file):
@@ -928,6 +1223,557 @@ def save_settings(data: dict):
 
     config_file.write_text(json.dumps(cfg, indent=2))
     return {"message": ". ".join(messages) if messages else "Settings saved"}
+
+
+# ── Settings export/import (slopsmith#113) ───────────────────────────────────
+
+# Bumped only when the bundle JSON shape changes incompatibly. Importer
+# refuses anything but this exact value — version mismatches are warned
+# but not blocked, schema mismatches ARE blocked.
+SETTINGS_BUNDLE_SCHEMA = 1
+
+
+def _running_version() -> str:
+    """Same lookup chain `/api/version` uses, factored out so the export
+    bundle records what shipped this file. Kept as a helper so future
+    changes (e.g. baked-in version) only have to touch one site."""
+    env_version = os.environ.get("APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+    version_file = Path(__file__).parent / "VERSION"
+    if version_file.exists():
+        try:
+            return version_file.read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            pass
+    return "unknown"
+
+
+def _validate_server_config_types(cfg: dict) -> str | None:
+    """Type-and-range gate for the server_config block of an import
+    bundle, mirroring the per-key checks in `POST /api/settings`. The
+    importer writes config.json verbatim, so without this gate a
+    hand-edited bundle could persist a non-string `demucs_server_url`
+    (which downstream code calls `.rstrip('/')` on and crashes) or an
+    out-of-range `master_difficulty` (which bypasses the slider's
+    clamp). Returns None on success, an error string on the first
+    violation. Filesystem-existence checks (e.g. dlc_dir is_dir) are
+    NOT performed here — restoring a bundle on a different machine
+    legitimately may reference paths that don't exist locally yet,
+    and the `POST /api/settings` interactive endpoint is the right
+    place for that ergonomic check, not the bulk-restore path.
+    Unknown keys are passed through so future settings (and per-plugin
+    keys that may be added later) round-trip without code changes
+    here."""
+    if "dlc_dir" in cfg:
+        v = cfg["dlc_dir"]
+        if v is not None and not isinstance(v, str):
+            return "server_config.dlc_dir must be a string"
+    for key in ("default_arrangement", "demucs_server_url"):
+        if key in cfg:
+            v = cfg[key]
+            if v is not None and not isinstance(v, str):
+                return f"server_config.{key} must be a string"
+    if "master_difficulty" in cfg:
+        v = cfg["master_difficulty"]
+        # bool is an int subclass — reject explicitly so True/False
+        # don't quietly persist as 1/0 difficulty values.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return "server_config.master_difficulty must be a number between 0 and 100"
+        if not (0 <= v <= 100):
+            return "server_config.master_difficulty must be between 0 and 100"
+    if "av_offset_ms" in cfg:
+        v = cfg["av_offset_ms"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return "server_config.av_offset_ms must be a number between -1000 and 1000"
+        if not (-1000 <= v <= 1000):
+            return "server_config.av_offset_ms must be between -1000 and 1000"
+    return None
+
+
+class _UndeclaredFile(ValueError):
+    """Raised when a relpath would otherwise be safe but isn't covered by
+    the plugin's manifest allowlist. Distinct from the generic
+    `ValueError` so the import handler can warn-and-skip this case
+    without resorting to message-string matching (which would silently
+    change behavior on a future error-text refactor)."""
+
+
+def _matches_allowlist(relpath: str, allowed: list[str]) -> bool:
+    """Return True if `relpath` is covered by an entry in the manifest's
+    `_export_paths`. Entries ending in `/` are directory rules
+    (strict prefix-match); other entries are exact-file rules. Both
+    `relpath` and `allowed` are POSIX strings already normalized
+    through `_normalize_export_paths` on the loader side. Caller is
+    expected to pass an already-normalized relpath — `_validate_relpath`
+    enforces this so a bundle can't satisfy a prefix rule with a
+    string that later normalizes to a different target."""
+    for allow in allowed:
+        if allow.endswith("/"):
+            # Strict prefix match only. We deliberately reject
+            # `relpath == prefix.rstrip("/")` — a directory entry
+            # never authorizes writing AT the directory itself, and
+            # accepting that would let phase 2 try to `os.replace()`
+            # over an existing directory and crash mid-apply.
+            if relpath.startswith(allow):
+                return True
+        elif relpath == allow:
+            return True
+    return False
+
+
+def _validate_relpath(relpath: str, allowed: list[str], config_dir: Path) -> Path:
+    """Resolve `relpath` to an absolute path under `config_dir`, raising
+    on anything that smells like path-traversal, an absolute path, or
+    a manifest-undeclared file. Layered defenses:
+
+      1. String-level: reject backslash, drive letter, absolute, and
+         any `.` / `..` segment in the *raw* input — BEFORE any
+         normalization. Critically, this catches the
+         `allowed_dir/../config.json` shape: the raw string starts
+         with `allowed_dir/`, so a naive prefix-match would accept
+         it; if we then normalized first, the `..` would collapse
+         away and the segment guard would have nothing to reject. By
+         refusing pre-normalization any input containing a `.` or
+         `..` segment, we make it impossible for a normalize-then-
+         resolve pass to "launder" a hostile prefix into a different
+         target.
+      2. Allowlist match against the now-known-clean relpath.
+         Allowlist-miss raises `_UndeclaredFile` (a `ValueError`
+         subclass) so the caller can distinguish "manifest changed
+         between export and import" from "this looks like an attack"
+         without string-matching the error message.
+      3. Realpath check: after resolving under config_dir, the target
+         must still live inside config_dir. This catches symlinks-
+         under-config_dir attacks where someone planted a symlink
+         pointing out and tried to import a file "under" it.
+      4. Symlink rejection: even when a symlink (or symlinked
+         directory component) resolves to a path that *still* lives
+         inside config_dir, importing through it would let an
+         allowlisted relpath redirect the write to a different
+         in-config file — bypassing the manifest's intent. We probe
+         every path component from `config_dir` down to the target
+         using `lstat`, refusing if any link is set on the chain.
+         This matches the documented "symlinks are never followed on
+         import" guarantee.
+
+    Returns the resolved absolute path (caller writes there in phase 2).
+    """
+    if not isinstance(relpath, str) or not relpath or relpath != relpath.strip():
+        raise ValueError(f"illegal relpath: {relpath!r}")
+    # Reject backslashes outright — manifest entries are POSIX, and
+    # accepting `foo\bar` here on a platform whose Path treats `\` as
+    # a separator would let a hostile bundle smuggle traversal past
+    # the part-by-part check below.
+    if "\\" in relpath:
+        raise ValueError(f"relpath uses non-POSIX separator: {relpath!r}")
+    # Absolute / drive-letter check before splitting.
+    if relpath.startswith("/") or (len(relpath) >= 2 and relpath[1] == ":"):
+        raise ValueError(f"relpath must be relative: {relpath!r}")
+    raw_parts = relpath.split("/")
+    # Empty parts catch `foo//bar` and a trailing `/`. `.` / `..` catch
+    # both leading and embedded forms (`./x`, `a/./b`, `allow/../escape`).
+    if any(part in ("", ".", "..") for part in raw_parts):
+        raise ValueError(f"relpath contains illegal segment: {relpath!r}")
+    # Defense-in-depth: any leading `.` segment (e.g. dotfile-disguised
+    # paths like `.git/config`) is also rejected — config_dir isn't a
+    # place plugins should be writing dotfiles, and accepting them here
+    # would let one plugin claim a global filename like `.npmrc`.
+    if raw_parts[0].startswith("."):
+        raise ValueError(f"relpath starts with dotfile segment: {relpath!r}")
+
+    if not _matches_allowlist(relpath, allowed):
+        raise _UndeclaredFile(
+            f"relpath not declared in plugin manifest: {relpath!r}"
+        )
+
+    target = (config_dir / relpath).resolve()
+    config_root = config_dir.resolve()
+    # `target == config_root` would mean the relpath resolved to the
+    # config dir itself, which can't be a file write target — reject.
+    if target == config_root:
+        raise ValueError(f"relpath resolves to config_dir itself: {relpath!r}")
+    if config_root not in target.parents:
+        raise ValueError(f"relpath escapes config_dir: {relpath!r}")
+
+    # Walk every component from config_dir down to (but not including)
+    # the target file, refusing if any is a symlink. The target itself
+    # is checked too — a symlinked file inside config_dir could still
+    # redirect the write to another in-config file, defeating the
+    # manifest's allowlist intent. `lstat` is the right primitive: it
+    # reports the link itself rather than the link's destination, so a
+    # broken or self-referential symlink won't slip through. Missing
+    # intermediate dirs are fine — `_atomic_write_file` mkdirs them
+    # under config_dir, and a path that doesn't exist yet trivially
+    # isn't a symlink.
+    probe = config_dir
+    for part in relpath.split("/"):
+        probe = probe / part
+        try:
+            st = os.lstat(probe)
+        except FileNotFoundError:
+            # Component doesn't exist yet → can't be a symlink. Any
+            # remaining components also don't exist, so we're done.
+            break
+        import stat as _stat
+        if _stat.S_ISLNK(st.st_mode):
+            raise ValueError(
+                f"relpath traverses or targets a symlink: {relpath!r}"
+            )
+    return target
+
+
+def _encode_file(abs_path: Path) -> dict:
+    """Encode a single file for the export bundle. JSON files that parse
+    cleanly use the `json` encoding so the bundle stays diff-friendly;
+    everything else (sqlite, NAM models, IRs, binary blobs) falls back
+    to base64. Symlinks are skipped at the caller — we never reach this
+    helper for them."""
+    import base64
+    raw = abs_path.read_bytes()
+    if abs_path.suffix.lower() == ".json":
+        try:
+            return {"encoding": "json", "data": json.loads(raw.decode("utf-8"))}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # Fall through to base64 — file claimed `.json` but isn't
+            # valid JSON; preserve bytes verbatim rather than refusing.
+            pass
+    return {"encoding": "base64", "data": base64.b64encode(raw).decode("ascii")}
+
+
+def _decode_entry(entry: dict) -> bytes:
+    """Inverse of `_encode_file`. Raises ValueError on malformed entries
+    so phase 1 of the importer can refuse the whole bundle without
+    having written anything."""
+    import base64
+    if not isinstance(entry, dict):
+        raise ValueError(f"file entry must be an object, got {type(entry).__name__}")
+    encoding = entry.get("encoding")
+    data = entry.get("data")
+    if encoding == "base64":
+        if not isinstance(data, str):
+            raise ValueError("base64 entry: 'data' must be a string")
+        try:
+            return base64.b64decode(data, validate=True)
+        except Exception as e:
+            raise ValueError(f"base64 entry: invalid payload ({e})")
+    if encoding == "json":
+        # We re-serialize the parsed value with stable formatting. Round
+        # trips with the original byte stream aren't guaranteed (key
+        # order, whitespace), but the file's *meaning* is preserved.
+        try:
+            return json.dumps(data, indent=2).encode("utf-8")
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"json entry: cannot re-serialize ({e})")
+    raise ValueError(f"unknown encoding: {encoding!r}")
+
+
+def _walk_export_paths(allowed: list[str], config_dir: Path) -> dict:
+    """Expand a plugin's `_export_paths` against disk and return a
+    `{relpath: encoded_entry}` dict. Missing files are silently skipped
+    (intentional — manifests can list optional files). Symlinks are
+    skipped with no entry. Directories are walked recursively; their
+    contained files surface as POSIX-joined relpaths.
+
+    Symlink policy is "skipped and never followed" at every depth:
+    `os.walk(..., followlinks=False)` ensures we don't *recurse* into
+    symlinked subdirectories, but we additionally drop any symlinked
+    entry from `dirnames` (so its name isn't even reported to the
+    caller, even though the walker wouldn't descend) and skip files
+    whose path is itself a symlink. Without those extra filters, a
+    planted symlink directory under an allowed prefix could leak data
+    from outside `config_dir` into the export bundle.
+    """
+    out: dict[str, dict] = {}
+    for entry in allowed:
+        is_dir = entry.endswith("/")
+        rel = entry.rstrip("/")
+        abs_target = config_dir / rel
+        if abs_target.is_symlink():
+            continue
+        if is_dir:
+            if not abs_target.is_dir():
+                continue
+            collected: list[Path] = []
+            for dirpath, dirnames, filenames in os.walk(
+                str(abs_target), followlinks=False
+            ):
+                # Strip symlinked subdirs from `dirnames` in-place so
+                # the walker neither yields their names nor descends.
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not os.path.islink(os.path.join(dirpath, d))
+                ]
+                for fname in filenames:
+                    full = os.path.join(dirpath, fname)
+                    if os.path.islink(full) or not os.path.isfile(full):
+                        continue
+                    collected.append(Path(full))
+            # Sort for deterministic bundle output (test fixtures and
+            # diffs both rely on stable ordering).
+            for child in sorted(collected):
+                # POSIX-joined relpath relative to config_dir keeps the
+                # bundle cross-platform — Windows-authored bundles can
+                # be applied on Linux and vice versa.
+                child_rel = child.relative_to(config_dir).as_posix()
+                out[child_rel] = _encode_file(child)
+        else:
+            if not abs_target.is_file():
+                continue
+            out[rel] = _encode_file(abs_target)
+    return out
+
+
+def _atomic_write_file(target: Path, payload: bytes):
+    """Write `payload` to `target` via a uniquely-named sibling temp file
+    + os.replace. `os.replace` is atomic on both POSIX and Win32 —
+    readers see either the old file or the new one, never a half-written
+    state.
+
+    The temp name is generated by `tempfile.mkstemp` so two concurrent
+    imports (or two workers sharing the same config volume) can't race
+    on the same `<target>.tmp.import` path and clobber each other's
+    in-flight writes. On any failure between mkstemp and the successful
+    `os.replace`, we remove the temp file so a failed import doesn't
+    leave `.tmp.import` litter under config_dir."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent),
+        prefix=target.name + ".",
+        suffix=".tmp.import",
+    )
+    tmp = Path(tmp_name)
+    # Hand fd to os.fdopen inside its own try, so a failure to wrap
+    # the descriptor (rare — typically EMFILE / ENOMEM) doesn't leak
+    # the raw fd. On Windows an open fd would also keep the temp file
+    # locked and undeletable. Once `with` enters, the fdopen'd file
+    # owns close responsibility.
+    try:
+        f = os.fdopen(fd, "wb")
+    except Exception:
+        os.close(fd)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    try:
+        with f:
+            f.write(payload)
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+@app.get("/api/settings/export")
+def export_settings():
+    """Build a settings bundle covering server config + opted-in plugin
+    server-side files. Frontend layers in `local_storage` before
+    triggering the download. See slopsmith#113."""
+    import datetime
+    from plugins import LOADED_PLUGINS
+
+    config_file = CONFIG_DIR / "config.json"
+    server_config = _load_config(config_file)
+    if server_config is None:
+        server_config = _default_settings()
+
+    plugin_blocks: dict[str, dict] = {}
+    for p in LOADED_PLUGINS:
+        allowed = p.get("_export_paths") or []
+        plugin_blocks[p["id"]] = {"files": _walk_export_paths(allowed, CONFIG_DIR)}
+
+    # Capture the timestamp once so the bundle's `exported_at` and the
+    # download filename's date prefix can't disagree if the request
+    # crosses midnight UTC between the two formats.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    bundle = {
+        "schema": SETTINGS_BUNDLE_SCHEMA,
+        "exported_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "slopsmith_version": _running_version(),
+        "server_config": server_config,
+        "plugin_server_configs": plugin_blocks,
+    }
+    filename = f"slopsmith-settings-{now.strftime('%Y-%m-%d')}.json"
+    return JSONResponse(
+        bundle,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/settings/import")
+def import_settings(bundle: dict):
+    """Apply a previously exported settings bundle. Validates the entire
+    bundle in phase 1 (no disk writes); only on full success does
+    phase 2 commit each file via temp+rename. The frontend reads
+    `local_storage` itself — server ignores it. See slopsmith#113."""
+    from plugins import LOADED_PLUGINS
+
+    if not isinstance(bundle, dict):
+        return JSONResponse({"ok": False, "error": "bundle must be a JSON object"}, status_code=400)
+
+    # ── Phase 1: validate everything before touching disk ────────────
+    schema = bundle.get("schema")
+    if schema != SETTINGS_BUNDLE_SCHEMA:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"unsupported schema {schema!r}; this server speaks schema {SETTINGS_BUNDLE_SCHEMA}",
+            },
+            status_code=400,
+        )
+
+    server_config = bundle.get("server_config")
+    if not isinstance(server_config, dict):
+        return JSONResponse(
+            {"ok": False, "error": "server_config must be an object"},
+            status_code=400,
+        )
+    cfg_err = _validate_server_config_types(server_config)
+    if cfg_err is not None:
+        return JSONResponse(
+            {"ok": False, "error": cfg_err},
+            status_code=400,
+        )
+
+    plugin_blocks = bundle.get("plugin_server_configs") or {}
+    if not isinstance(plugin_blocks, dict):
+        return JSONResponse(
+            {"ok": False, "error": "plugin_server_configs must be an object"},
+            status_code=400,
+        )
+
+    warnings: list[str] = []
+    bundle_version = bundle.get("slopsmith_version")
+    running = _running_version()
+    if bundle_version and bundle_version != running:
+        warnings.append(
+            f"version mismatch: bundle {bundle_version!r} vs running {running!r}; importing anyway"
+        )
+
+    by_id = {p["id"]: p for p in LOADED_PLUGINS}
+
+    # Stage every (display_relpath, target_abs_path, payload) tuple before
+    # writing. The relpath is what we surface in the `partial` field on a
+    # mid-apply failure — absolute paths would leak the deployment's
+    # config_dir layout, while the relpath is the same identifier the
+    # bundle itself used and is portable across machines.
+    staged: list[tuple[str, Path, bytes]] = []
+    applied_plugins: list[str] = []
+    for plugin_id, block in plugin_blocks.items():
+        if not isinstance(plugin_id, str) or not plugin_id:
+            return JSONResponse(
+                {"ok": False, "error": f"invalid plugin id key: {plugin_id!r}"},
+                status_code=400,
+            )
+        plugin = by_id.get(plugin_id)
+        if plugin is None:
+            warnings.append(f"plugin {plugin_id!r} not loaded; skipping its files")
+            continue
+        if not isinstance(block, dict):
+            return JSONResponse(
+                {"ok": False, "error": f"plugin {plugin_id!r}: block must be an object"},
+                status_code=400,
+            )
+        files = block.get("files") or {}
+        if not isinstance(files, dict):
+            return JSONResponse(
+                {"ok": False, "error": f"plugin {plugin_id!r}: files must be an object"},
+                status_code=400,
+            )
+        allowed = plugin.get("_export_paths") or []
+        skipped_for_plugin: list[str] = []
+        applied_for_plugin = False
+        for relpath, file_entry in files.items():
+            try:
+                target = _validate_relpath(relpath, allowed, CONFIG_DIR)
+            except _UndeclaredFile:
+                # Manifest-allowlist miss is a normal outcome of a
+                # plugin update between export and import — warn-and-
+                # skip so the rest of the bundle still applies.
+                skipped_for_plugin.append(relpath)
+                continue
+            except ValueError as e:
+                # Path-traversal / absolute-path / illegal-segment /
+                # backslash / dotfile errors are hard failures: we
+                # never want to apply a bundle that contains those,
+                # even partially. Caught AFTER `_UndeclaredFile`
+                # because that's a `ValueError` subclass — Python
+                # would otherwise route it through this branch.
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"plugin {plugin_id!r}, file {relpath!r}: {e}",
+                    },
+                    status_code=400,
+                )
+            try:
+                payload = _decode_entry(file_entry)
+            except ValueError as e:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"plugin {plugin_id!r}, file {relpath!r}: {e}",
+                    },
+                    status_code=400,
+                )
+            # Display key prefixes the plugin id so a partial-failure
+            # report is unambiguous when two plugins happen to declare
+            # files with the same relpath.
+            display = f"{plugin_id}/{relpath}"
+            staged.append((display, target, payload))
+            applied_for_plugin = True
+        if skipped_for_plugin:
+            warnings.append(
+                f"plugin {plugin_id!r}: skipped {len(skipped_for_plugin)} file(s) "
+                f"no longer declared in manifest: {skipped_for_plugin}"
+            )
+        if applied_for_plugin:
+            applied_plugins.append(plugin_id)
+
+    # ── Phase 2: commit ──────────────────────────────────────────────
+    written: list[str] = []
+    try:
+        for display, target, payload in staged:
+            _atomic_write_file(target, payload)
+            written.append(display)
+        # Server config last so a write failure on a plugin file
+        # doesn't leave config.json mismatched against the (untouched)
+        # plugin state. Full-replace: caller is responsible for the
+        # whole dict — this is restore semantics, not partial-update.
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _atomic_write_file(
+            CONFIG_DIR / "config.json",
+            json.dumps(server_config, indent=2).encode("utf-8"),
+        )
+    except OSError as e:
+        # Phase-1 validation should have caught all foreseeable
+        # failures; an OSError here means disk-level trouble (ENOSPC,
+        # permission). We can't roll back already-replaced files
+        # because we didn't snapshot them — surface what got written
+        # (as relpaths, not absolute server paths) so the user knows
+        # the state is partial without leaking deployment layout.
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"write failed mid-apply: {e}",
+                "partial": written,
+            },
+            status_code=500,
+        )
+
+    return {
+        "ok": True,
+        "warnings": warnings,
+        "applied": {
+            "server_config": True,
+            "plugins": applied_plugins,
+        },
+    }
 
 
 # ── Plugin-provided routes are registered at startup via plugins/__init__.py ─
