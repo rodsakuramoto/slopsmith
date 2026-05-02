@@ -861,7 +861,8 @@ async def startup_events():
                 try:
                     fut.result(timeout=60)
                 except concurrent.futures.TimeoutError:
-                    print("[Plugin] WARNING: route registration timed out after 60 s; continuing startup", flush=True)
+                    _pid = getattr(fn, "_plugin_id", "unknown")
+                    print(f"[Plugin] WARNING: route registration for '{_pid}' timed out after 60 s; continuing startup", flush=True)
 
             _set_startup_status(
                 running=True,

@@ -546,7 +546,9 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                         # the callable is safe regardless of when/how
                         # route_setup_fn dispatches it — avoids late-binding
                         # closure bugs if the caller defers execution.
-                        route_setup_fn(lambda rm=routes_module, ctx=plugin_context: rm.setup(app, ctx))
+                        _fn = lambda rm=routes_module, ctx=plugin_context: rm.setup(app, ctx)
+                        _fn._plugin_id = plugin_id
+                        route_setup_fn(_fn)
                     else:
                         routes_module.setup(app, plugin_context)
                     print(f"[Plugin] Loaded routes for '{plugin_id}'")
