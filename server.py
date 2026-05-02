@@ -845,8 +845,11 @@ async def startup_events():
                 FastAPI/Starlette router mutation is not thread-safe, so the
                 actual setup() call is marshalled back onto the event loop via
                 call_soon_threadsafe.  The background thread blocks until the
-                registration completes (or raises) so load_plugins() still
-                observes errors synchronously.
+                registration completes, raises, or a 60 s timeout elapses.
+
+                On timeout, startup continues normally.  Any exception that
+                eventually arrives (after the timeout) is logged via a
+                done-callback so it is never silently dropped.
                 """
                 fut: concurrent.futures.Future = concurrent.futures.Future()
 
@@ -863,6 +866,16 @@ async def startup_events():
                 except concurrent.futures.TimeoutError:
                     _pid = getattr(fn, "_plugin_id", "unknown")
                     print(f"[Plugin] WARNING: route registration for '{_pid}' timed out after 60 s; continuing startup", flush=True)
+
+                    def _log_deferred(f: concurrent.futures.Future):
+                        try:
+                            exc = f.exception()
+                        except concurrent.futures.CancelledError:
+                            return
+                        if exc is not None:
+                            print(f"[Plugin] ERROR: deferred route registration for '{_pid}' raised: {exc}", flush=True)
+
+                    fut.add_done_callback(_log_deferred)
 
             _set_startup_status(
                 running=True,

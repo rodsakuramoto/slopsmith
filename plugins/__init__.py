@@ -596,8 +596,12 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         )
 
     # Publish all plugins atomically so concurrent readers never observe
-    # a partially-populated list during the loading window.
+    # a partially-populated list during the loading window.  We clear
+    # first so that repeated load_plugins() calls (tests, dev reloads,
+    # future "reload plugins" feature) never accumulate duplicate entries
+    # while keeping the list object identity stable.
     with PLUGINS_LOCK:
+        LOADED_PLUGINS.clear()
         LOADED_PLUGINS.extend(_loaded_batch)
 
     _emit_progress(
