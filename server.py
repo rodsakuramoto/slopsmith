@@ -813,7 +813,7 @@ async def startup_events():
 
     # Load plugins asynchronously so HTTP routes and the desktop window can
     # come up immediately while heavy plugin imports/install steps continue.
-    _sync_mode = bool(os.environ.get("SLOPSMITH_SYNC_STARTUP"))
+    _sync_mode = os.environ.get("SLOPSMITH_SYNC_STARTUP", "").lower() in {"1", "true", "yes", "on"}
 
     def _load_plugins_background():
         try:
