@@ -39,6 +39,46 @@ html { scroll-behavior: smooth; }
     transform: translateY(-4px);
     box-shadow: 0 12px 40px rgba(0,0,0,0.4), 0 0 0 1px rgba(64,128,224,0.1);
 }
+/* Keyboard-focused card: ring without the lift, since the lift is a
+   pointer affordance and would feel jumpy when arrow-keying through.
+   :focus is a fallback for environments without :focus-visible
+   support so keyboard users always see SOMETHING; modern browsers
+   that do support :focus-visible only show the ring on keyboard
+   focus, not on click, because the same rule applies via the more
+   specific :focus-visible selector below. */
+.song-card { outline: none; }
+.song-card:focus,
+.song-card:focus-visible {
+    border-color: rgba(64,128,224,0.7);
+    box-shadow: 0 0 0 2px rgba(64,128,224,0.5), 0 0 24px rgba(64,128,224,0.3);
+}
+/* In :focus-visible-supporting browsers, suppress the focus ring on
+   click-derived focus so card hover/selection stays the dominant
+   visual on mouse use. */
+.song-card:focus:not(:focus-visible) {
+    border-color: rgba(255,255,255,0.04);
+    box-shadow: none;
+}
+/* Persistent selection (survives focus loss). Slightly heavier than
+   focus alone so the user can glance back and still see where they
+   were after clicking away. */
+.song-card.selected {
+    border-color: rgba(64,128,224,0.6);
+    box-shadow: 0 0 0 2px rgba(64,128,224,0.4), 0 8px 32px rgba(64,128,224,0.18);
+}
+/* When a selected card also has keyboard-visible focus, keep the
+   persistent selection styling but restore a stronger focus ring so
+   keyboard focus remains visually distinct from selection. */
+.song-card.selected:focus-visible {
+    border-color: rgba(64,128,224,0.7);
+    box-shadow: 0 0 0 3px rgba(64,128,224,0.55), 0 0 24px rgba(64,128,224,0.3), 0 8px 32px rgba(64,128,224,0.18);
+}
+/* In :focus-visible-supporting browsers, keep click-focused selected
+   cards looking selected without reintroducing the stronger focus ring. */
+.song-card.selected:focus:not(:focus-visible) {
+    border-color: rgba(64,128,224,0.6);
+    box-shadow: 0 0 0 2px rgba(64,128,224,0.4), 0 8px 32px rgba(64,128,224,0.18);
+}
 .song-card .card-art {
     aspect-ratio: 1;
     background: linear-gradient(135deg, #1a1a30 0%, #0f0f1e 100%);
@@ -76,6 +116,28 @@ html { scroll-behavior: smooth; }
     padding: 12px 16px;
     cursor: pointer;
     user-select: none;
+    outline: none;
+}
+.artist-header:focus,
+.artist-header:focus-visible {
+    background: rgba(64,128,224,0.14);
+    box-shadow: inset 0 0 0 2px rgba(64,128,224,0.55);
+}
+.artist-header:focus:not(:focus-visible) {
+    background: transparent;
+    box-shadow: none;
+}
+.artist-header.selected {
+    background: rgba(64,128,224,0.10);
+    box-shadow: inset 3px 0 0 rgba(64,128,224,0.7);
+}
+.artist-header.selected:focus-visible {
+    background: rgba(64,128,224,0.14);
+    box-shadow: inset 3px 0 0 rgba(64,128,224,0.7), inset 0 0 0 2px rgba(64,128,224,0.55);
+}
+.artist-header.selected:focus:not(:focus-visible) {
+    background: rgba(64,128,224,0.10);
+    box-shadow: inset 3px 0 0 rgba(64,128,224,0.7);
 }
 .artist-header .chevron {
     transition: transform 0.2s;
@@ -105,6 +167,28 @@ html { scroll-behavior: smooth; }
     padding: 8px 12px;
     cursor: pointer;
     user-select: none;
+    outline: none;
+}
+.album-header:focus,
+.album-header:focus-visible {
+    background: rgba(64,128,224,0.13);
+    box-shadow: inset 0 0 0 2px rgba(64,128,224,0.5);
+}
+.album-header:focus:not(:focus-visible) {
+    background: transparent;
+    box-shadow: none;
+}
+.album-header.selected {
+    background: rgba(64,128,224,0.09);
+    box-shadow: inset 3px 0 0 rgba(64,128,224,0.6);
+}
+.album-header.selected:focus-visible {
+    background: rgba(64,128,224,0.13);
+    box-shadow: inset 3px 0 0 rgba(64,128,224,0.6), inset 0 0 0 2px rgba(64,128,224,0.5);
+}
+.album-header.selected:focus:not(:focus-visible) {
+    background: rgba(64,128,224,0.09);
+    box-shadow: inset 3px 0 0 rgba(64,128,224,0.6);
 }
 .album-header .chevron {
     transition: transform 0.2s;
@@ -137,9 +221,31 @@ html { scroll-behavior: smooth; }
     border-radius: 8px;
     cursor: pointer;
     transition: background 0.15s;
+    outline: none;
 }
 .song-row:hover {
     background: rgba(64,128,224,0.08);
+}
+.song-row:focus,
+.song-row:focus-visible {
+    background: rgba(64,128,224,0.14);
+    box-shadow: 0 0 0 1px rgba(64,128,224,0.5);
+}
+.song-row:focus:not(:focus-visible) {
+    background: transparent;
+    box-shadow: none;
+}
+.song-row.selected {
+    background: rgba(64,128,224,0.12);
+    box-shadow: inset 2px 0 0 rgba(64,128,224,0.7);
+}
+.song-row.selected:focus-visible {
+    background: rgba(64,128,224,0.14);
+    box-shadow: inset 2px 0 0 rgba(64,128,224,0.7), 0 0 0 1px rgba(64,128,224,0.5);
+}
+.song-row.selected:focus:not(:focus-visible) {
+    background: rgba(64,128,224,0.12);
+    box-shadow: inset 2px 0 0 rgba(64,128,224,0.7);
 }
 
 /* Search result items */

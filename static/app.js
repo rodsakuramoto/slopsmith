@@ -1,12 +1,719 @@
 // Demo analytics — real impl set by demo.js; no-op in normal builds
 window.slopsmithDemoTrack = window.slopsmithDemoTrack ?? null;
 
+// ── Global keyboard shortcuts ─────────────────────────────────────────────
+//
+// `/` focuses the active screen's search input (Library / Favorites);
+// `Esc` while focused blurs and clears it. Mirrors the GitHub / Gmail
+// convention. The listener bails when the user is already typing in
+// any text-accepting element so it can't intercept normal typing —
+// including inputs inside the filters drawer, plugin settings, or
+// modal dialogs.
+function _isTextInput(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === 'INPUT') {
+        // Some <input> types (button, checkbox, radio, range, ...) don't
+        // accept text; only intercept the ones that do.
+        const t = (el.type || 'text').toLowerCase();
+        return ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(t);
+    }
+    if (tag === 'TEXTAREA') return true;
+    if (tag === 'SELECT') return true;
+    if (el.isContentEditable) return true;
+    return false;
+}
+
+function _activeSearchInput() {
+    // Pick the search field for whichever screen is currently active.
+    // No match (e.g. on the player or settings screen) means `/` does
+    // nothing — the shortcut only fires where a search box exists.
+    const active = document.querySelector('.screen.active');
+    if (!active) return null;
+    if (active.id === 'home') return document.getElementById('lib-filter');
+    if (active.id === 'favorites') return document.getElementById('fav-filter');
+    return null;
+}
+
+// ── Library keyboard navigation ──────────────────────────────────────────
+//
+// Arrow keys move a single "selected" item among the visible cards
+// (grid view) or song rows (tree view). Enter plays the selected
+// song. The selected element gets:
+//   - native keyboard focus via .focus() so :focus-visible draws the
+//     accessible ring (announced by screen readers, follows scroll)
+//   - a `.selected` class that persists when focus drifts elsewhere
+//     so the user can glance back and still see their place.
+//
+// Grid columns are inferred from the live computed grid template at
+// the moment of navigation, so up/down works correctly across all
+// breakpoints (1 / 2 / 3 / 4 cols depending on viewport).
+
+function _isElementVisible(el) {
+    // Walk ancestors looking for display:none. Handles collapsed
+    // `.album-body` / `.artist-body` subtrees (hidden via CSS class
+    // rules). Using a DOM walk rather than `offsetParent` avoids the
+    // false-negative for `position:fixed` elements whose offsetParent
+    // is null even when they are perfectly visible.
+    if (!el) return false;
+    let node = el;
+    while (node && node !== document.body) {
+        if (getComputedStyle(node).display === 'none') return false;
+        node = node.parentElement;
+    }
+    return true;
+}
+
+// `_libNavItems` is consulted on every arrow / Enter / Space / Home /
+// End / activation press, including during autorepeat. Re-running
+// `querySelectorAll` + visibility filtering on every keypress is the
+// dominant cost on large libraries (hundreds of nodes × per-keypress
+// layout reads), so the result is memoised against a generation
+// counter that's bumped only when the underlying DOM actually
+// changes shape: render functions and `_toggleHeader` bump
+// `_libNavGeneration`. Cache misses fall through to a fresh query.
+let _libNavGeneration = 0;
+let _libNavItemsCache = { gen: -1, items: [], container: null, mode: null, scope: null };
+function _bumpLibNavGeneration() { _libNavGeneration++; }
+
+function _libNavItems() {
+    const active = document.querySelector('.screen.active');
+    if (!active) return { items: [], container: null, mode: null };
+    let tree, grid;
+    if (active.id === 'home') {
+        tree = document.getElementById('lib-tree');
+        grid = document.getElementById('lib-grid');
+    } else if (active.id === 'favorites') {
+        tree = document.getElementById('fav-tree');
+        grid = document.getElementById('fav-grid');
+    } else {
+        return { items: [], container: null, mode: null };
+    }
+    const treeMode = tree && !tree.classList.contains('hidden');
+    const scope = treeMode ? tree : grid;
+    // Cache key includes the active container — switching grid↔tree or
+    // home↔favorites must miss even if the generation hasn't ticked.
+    if (
+        _libNavItemsCache.gen === _libNavGeneration &&
+        _libNavItemsCache.scope === scope &&
+        scope && document.body.contains(scope)
+    ) {
+        return {
+            items: _libNavItemsCache.items,
+            container: _libNavItemsCache.container,
+            mode: _libNavItemsCache.mode,
+        };
+    }
+    let items, container, mode;
+    if (treeMode) {
+        // List mode — include artist headers, album headers, and song
+        // rows so arrow nav still works when artists/albums are
+        // collapsed (only the headers are visible then). Filter to
+        // the currently-displayed nodes so collapsed children don't
+        // count as targets the keyboard can land on.
+        const all = Array.from(tree.querySelectorAll(
+            '.artist-header, .album-header, .song-row[data-play]'
+        ));
+        items = all.filter(_isElementVisible);
+        container = tree;
+        mode = 'list';
+    } else {
+        items = Array.from((grid || document).querySelectorAll('.song-card[data-play]'));
+        container = grid;
+        mode = 'grid';
+    }
+    _libNavItemsCache = { gen: _libNavGeneration, items, container, mode, scope };
+    return { items, container, mode };
+}
+
+function _gridColumns(container) {
+    // Count columns by grouping the first row of children by their
+    // top coordinate. Robust against any grid-template-columns syntax
+    // (`repeat(...)`, `auto-fit`, named lines, etc.) where naively
+    // splitting `getComputedStyle().gridTemplateColumns` on whitespace
+    // would miscount because of spaces inside `repeat(...)` /
+    // `minmax(...)`. Falls back to 1 when the container is empty
+    // so callers' max(1, ...) clamps stay valid.
+    if (!container) return 1;
+    const children = Array.from(container.children).filter(
+        c => c && c.offsetParent !== null
+    );
+    if (!children.length) return 1;
+    const firstTop = children[0].getBoundingClientRect().top;
+    let cols = 0;
+    for (const c of children) {
+        // Allow ~1px slop for sub-pixel rounding so two children that
+        // would visually align still group together.
+        if (Math.abs(c.getBoundingClientRect().top - firstTop) < 1.5) cols++;
+        else break;
+    }
+    return Math.max(1, cols);
+}
+
+// Tracked separately from `document.activeElement` so the persistent
+// `.selected` highlight survives focus drifting elsewhere (clicks
+// outside the grid, drawer opening, etc). Also lets us avoid a global
+// `querySelectorAll('.selected')` on every arrow press — large
+// libraries make that a noticeable hot path.
+let _lastLibSelected = null;
+
+// One-shot flag set in `showScreen` when the user enters Home or
+// Favorites. Consumed by the very next library render so the
+// restored selection scrolls into view exactly once on screen entry
+// (player → home, hard reload). Routine re-renders driven by
+// search / sort / filter changes leave the user's scroll position
+// alone — the highlight still re-applies, but they aren't yanked.
+const _libScrollOnNextRender = { home: false, favorites: false };
+
+// localStorage keys for "remember the last selection across reloads
+// and after returning from the player". One key per screen so the
+// Library and Favorites trees don't fight over the same slot. Only
+// song-row / song-card selections are persisted — header selections
+// in the tree are ephemeral by design (re-derived from arrow nav).
+const _LIB_SELECTED_KEY = 'slopsmith.libLastSelected';
+const _FAV_SELECTED_KEY = 'slopsmith.favLastSelected';
+function _selectedKeyForActiveScreen() {
+    const active = document.querySelector('.screen.active');
+    if (!active) return null;
+    if (active.id === 'home') return _LIB_SELECTED_KEY;
+    if (active.id === 'favorites') return _FAV_SELECTED_KEY;
+    return null;
+}
+function _persistLibSelection(el) {
+    if (!el || !el.dataset || !el.dataset.play) return;
+    const key = _selectedKeyForActiveScreen();
+    if (!key) return;
+    // Stored as JSON `{f, a}` — `f` (filename) drives the
+    // restore-by-attribute lookup; `a` (artist) is recorded for
+    // future use (e.g. cross-page restore that needs to fetch the
+    // saved artist's letter bucket) but currently unread. The bare-
+    // string filename format older builds wrote is still tolerated
+    // in `_loadPersistedLibSelection`.
+    const artist = el.dataset.artist || '';
+    try {
+        localStorage.setItem(key, JSON.stringify({ f: el.dataset.play, a: artist }));
+    } catch { /* private mode / quota */ }
+}
+
+function _loadPersistedLibSelection(key) {
+    let raw = null;
+    try { raw = localStorage.getItem(key); } catch { return null; }
+    if (!raw) return null;
+    // Tolerate the older bare-string format (just the encoded
+    // filename) — older builds wrote that and we'd rather upgrade
+    // silently than orphan the user's saved selection.
+    if (raw[0] !== '{') return { f: raw, a: '' };
+    try {
+        const o = JSON.parse(raw);
+        return (o && typeof o === 'object') ? { f: o.f || '', a: o.a || '' } : null;
+    } catch { return null; }
+}
+
+
+function _setLibSelection(el, { focus = true } = {}) {
+    if (!el) return;
+    // Only the previously-tracked element needs its `.selected` class
+    // cleared. classList.remove on an element that no longer carries
+    // the class is a no-op, so a stale `_lastLibSelected` from a
+    // re-render is harmless. Avoids the global `querySelectorAll`
+    // pass that the earlier implementation ran on every keypress.
+    if (_lastLibSelected && _lastLibSelected !== el) {
+        _lastLibSelected.classList.remove('selected');
+    }
+    el.classList.add('selected');
+    _lastLibSelected = el;
+    // Save song selections to localStorage so a reload (or returning
+    // from the player) can restore the highlight. Headers don't get
+    // persisted — they don't carry a stable id and the tree's auto-
+    // open heuristic re-derives them on each render anyway.
+    _persistLibSelection(el);
+    if (focus) {
+        // `preventScroll: true` skips the browser's native focus-scroll,
+        // then we run a single `scrollIntoView` so we don't double-jank
+        // when the element is partially in view. The browser's default
+        // focus scroll uses `block: 'nearest'` too but isn't smoothable
+        // and can interact poorly with sticky headers.
+        el.focus({ preventScroll: true });
+    }
+    _scrollSelectionIntoView(el);
+}
+
+// Scroll the selected element to keep it inside a margin from the
+// viewport edges. Plain `scrollIntoView({block:'nearest'})` only
+// reacts when the element is fully off-screen, so during arrow nav
+// the selection drifts to the edge and stays partially visible
+// until it falls off — feels laggy. Centering when the row enters
+// the buffer zone keeps it comfortably on-screen as the user holds
+// the arrow keys.
+const _SCROLL_EDGE_MARGIN = 96;
+function _scrollSelectionIntoView(el) {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    if (r.top < _SCROLL_EDGE_MARGIN || r.bottom > vh - _SCROLL_EDGE_MARGIN) {
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    }
+}
+
+function _restoreLibSelection(scopeEl, screen, { scroll = true } = {}) {
+    // Re-apply the persistent `.selected` class to whichever song
+    // matches the saved filename. For the tree we also walk up and
+    // open every collapsed ancestor so the restored row is actually
+    // visible — the user shouldn't have to hunt for their place
+    // inside a collapsed artist node.
+    if (!scopeEl) return null;
+    const key = screen === 'favorites' ? _FAV_SELECTED_KEY : _LIB_SELECTED_KEY;
+    const saved = _loadPersistedLibSelection(key);
+    if (!saved || !saved.f) return null;
+    // Match `data-play` exactly — both are the encoded form, so no
+    // decoding needed. Avoid interpolating persisted data into a CSS
+    // selector so malformed localStorage cannot make querySelector
+    // throw and break rendering.
+    const candidates = scopeEl.querySelectorAll('.song-card[data-play], .song-row[data-play]');
+    const el = Array.from(candidates).find((node) => node.dataset.play === saved.f);
+    if (!el) return null;
+    // Open every collapsed ancestor in the tree so the restored row
+    // is on-screen; harmless on the grid since cards have no such
+    // ancestors. Sync `aria-expanded` on the matching header inside
+    // each ancestor too — bypassing `_toggleHeader` here would leave
+    // assistive tech reporting "collapsed" while the visual is open.
+    let n = el.parentElement;
+    while (n && n !== scopeEl) {
+        if (n.classList.contains('artist-row') || n.classList.contains('album-group')) {
+            n.classList.add('open');
+            const header = Array.from(n.children).find(c => c.classList.contains('artist-header') || c.classList.contains('album-header'));
+            if (header) header.setAttribute('aria-expanded', 'true');
+        }
+        n = n.parentElement;
+    }
+    if (_lastLibSelected && _lastLibSelected !== el) {
+        _lastLibSelected.classList.remove('selected');
+    }
+    el.classList.add('selected');
+    _lastLibSelected = el;
+    // Center the restored element in the viewport so the user's eye
+    // lands on it instead of having to scan up from the bottom edge.
+    // `block: 'center'` is forgiving of items already on-screen — the
+    // browser only scrolls when needed to bring the requested
+    // alignment into view.
+    // Skip when the caller opts out (e.g. during search/filter/sort
+    // re-renders, where the user's scroll position should be left
+    // alone and only the `.selected` class is re-applied).
+    if (scroll) {
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    }
+    return el;
+}
+
+function _moveSelectionInItems(items, deltaIdx) {
+    // Items are passed in by the caller so we don't re-query the DOM
+    // twice per keypress (handler queries `_libNavItems`, then we'd
+    // query it again).
+    if (!items.length) return false;
+    const current = document.activeElement && items.includes(document.activeElement)
+        ? document.activeElement
+        : (_lastLibSelected && items.includes(_lastLibSelected) ? _lastLibSelected : null);
+    let idx = current ? items.indexOf(current) : -1;
+    let next;
+    if (idx === -1) {
+        // No current selection — first arrow lands on the first item
+        // regardless of direction. Saves a press.
+        next = items[0];
+    } else {
+        next = items[Math.max(0, Math.min(items.length - 1, idx + deltaIdx))];
+    }
+    _setLibSelection(next);
+    return true;
+}
+
+function _isInsideInteractiveControl(el) {
+    // Bail when the user is interacting with anything that has its
+    // own keyboard semantics — form controls (checkbox / select /
+    // button) consume arrow keys for their own behavior, and the
+    // filters drawer is a focus trap of those. Without this guard the
+    // library's arrow nav would steal arrow presses from a focused
+    // tuning checkbox or sort dropdown.
+    if (!el) return false;
+    const tag = el.tagName;
+    if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(tag)) return true;
+    if (el.isContentEditable) return true;
+    if (el.closest && el.closest('#lib-filter-drawer, [role="dialog"], #edit-modal')) return true;
+    return false;
+}
+
+function _handleLibArrowNav(e) {
+    // Space (' ') is the standard activation key for focusable
+    // elements alongside Enter — without it, a screen-reader user
+    // hitting Space on a focused card would just scroll the page
+    // instead of activating it. We treat Space identically to Enter
+    // inside this handler.
+    const isActivate = e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar';
+    if (!isActivate &&
+        !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
+        return false;
+    }
+    if (_isInsideInteractiveControl(document.activeElement)) return false;
+    const { items, container, mode } = _libNavItems();
+    if (!items.length) return false;
+
+    const currentTarget = (document.activeElement && items.includes(document.activeElement))
+        ? document.activeElement
+        : (_lastLibSelected && items.includes(_lastLibSelected) ? _lastLibSelected : null);
+
+    if (isActivate) {
+        if (!currentTarget) return false;
+        e.preventDefault();
+        // Sync persistent selection before activating so Tab-then-Enter
+        // (no prior arrow nav or mouse click) still lights up the `.selected`
+        // ring and updates `_lastLibSelected`/localStorage — consistent with
+        // the click delegate at the bottom of this file.
+        _setLibSelection(currentTarget, { focus: false });
+        if (currentTarget.classList.contains('song-row') ||
+            currentTarget.classList.contains('song-card')) {
+            // Song row OR card → play it. Pass `dataset.play` raw to
+            // match the click delegate; `playSong` handles decoding
+            // internally so decoding here would double-decode and
+            // throw `URIError` on filenames containing `%`.
+            playSong(currentTarget.dataset.play);
+        } else if (currentTarget.classList.contains('artist-header') ||
+                   currentTarget.classList.contains('album-header')) {
+            // Header row → toggle the parent open/closed and re-derive
+            // visible items so the next arrow press lands correctly.
+            // `_toggleHeader` keeps `aria-expanded` in sync for
+            // assistive tech.
+            _toggleHeader(currentTarget);
+            // Keep keyboard focus on the header we just toggled —
+            // browsers sometimes drop focus to body when the
+            // surrounding subtree changes display.
+            currentTarget.focus({ preventScroll: true });
+        }
+        return true;
+    }
+
+    if (e.key === 'Home') { e.preventDefault(); _setLibSelection(items[0]); return true; }
+    if (e.key === 'End')  { e.preventDefault(); _setLibSelection(items[items.length - 1]); return true; }
+
+    if (mode === 'list') {
+        if (e.key === 'ArrowDown') { e.preventDefault(); _moveSelectionInItems(items, 1); return true; }
+        if (e.key === 'ArrowUp')   { e.preventDefault(); _moveSelectionInItems(items, -1); return true; }
+        // Right/Left expand and collapse the artist/album under focus,
+        // file-manager style. With nothing selected yet, both keys
+        // initialize selection on the first visible item (matches
+        // Up/Down behavior in `_moveSelectionInItems`) so the first
+        // press doesn't fall through to native scroll.
+        if (!currentTarget && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+            e.preventDefault();
+            _setLibSelection(items[0]);
+            return true;
+        }
+        if (e.key === 'ArrowRight' && currentTarget) {
+            const parent = (currentTarget.classList.contains('artist-header') ||
+                            currentTarget.classList.contains('album-header'))
+                ? currentTarget.parentElement : null;
+            if (parent && !parent.classList.contains('open')) {
+                e.preventDefault();
+                // Use the shared toggle path so aria-expanded stays
+                // synced with the visual state for screen readers.
+                _toggleHeader(currentTarget);
+                currentTarget.focus({ preventScroll: true });
+                return true;
+            }
+            // Already open — step to the next visible item (which is
+            // the first child of this header).
+            e.preventDefault();
+            _moveSelectionInItems(items, 1);
+            return true;
+        }
+        if (e.key === 'ArrowLeft' && currentTarget) {
+            // If on an open header, collapse it. If on a song row or
+            // closed header, jump to the nearest enclosing header.
+            const isHeader = currentTarget.classList.contains('artist-header') ||
+                             currentTarget.classList.contains('album-header');
+            const headerParent = isHeader ? currentTarget.parentElement : null;
+            if (headerParent && headerParent.classList.contains('open')) {
+                e.preventDefault();
+                _toggleHeader(currentTarget);
+                currentTarget.focus({ preventScroll: true });
+                return true;
+            }
+            // Walk up to the nearest .album-header / .artist-header
+            // ancestor's sibling header. Closest album-group → its
+            // header; otherwise closest artist-row → its header.
+            const albumGroup = currentTarget.closest('.album-group');
+            if (albumGroup && albumGroup.contains(currentTarget) &&
+                !currentTarget.classList.contains('album-header')) {
+                e.preventDefault();
+                _setLibSelection(albumGroup.querySelector('.album-header'));
+                return true;
+            }
+            const artistRow = currentTarget.closest('.artist-row');
+            if (artistRow && !currentTarget.classList.contains('artist-header')) {
+                e.preventDefault();
+                _setLibSelection(artistRow.querySelector('.artist-header'));
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+    // Grid mode: 2D nav. Columns are read from the live CSS grid so
+    // we follow the responsive breakpoints automatically.
+    const cols = _gridColumns(container);
+    if (e.key === 'ArrowRight') { e.preventDefault(); _moveSelectionInItems(items, 1); return true; }
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); _moveSelectionInItems(items, -1); return true; }
+    if (e.key === 'ArrowDown')  { e.preventDefault(); _moveSelectionInItems(items, cols); return true; }
+    if (e.key === 'ArrowUp')    { e.preventDefault(); _moveSelectionInItems(items, -cols); return true; }
+    return false;
+}
+
+// Focus trap: keep Tab / Shift+Tab cycling inside `modal` so focus
+// can't escape to the content underneath while the overlay is open.
+// Call this once after the modal is in the DOM and initial focus is set.
+function _trapFocusInModal(modal) {
+    const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    modal.addEventListener('keydown', (e) => {
+        if (e.key !== 'Tab') return;
+        const els = Array.from(modal.querySelectorAll(FOCUSABLE)).filter(el => {
+            if (!_isElementVisible(el)) return false;
+            if (getComputedStyle(el).visibility === 'hidden') return false;
+            if (el.disabled) return false;
+            return true;
+        });
+        if (!els.length) return;
+        const first = els[0];
+        const last = els[els.length - 1];
+        if (e.shiftKey) {
+            if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+        } else {
+            if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+    });
+}
+
+// Shortcut cheat-sheet overlay. Opens on `?` (Shift+/), closes on
+// Esc (handled by the generic modal close path) or on backdrop /
+// close-button click. The list mirrors the canonical shortcut table
+// in this file's keydown handler — when a shortcut changes here, the
+// table below should change too. We keep it inline rather than
+// fetching a separate file so the cheat sheet can never disagree
+// with the version of app.js the user actually loaded.
+function _openShortcutsModal() {
+    if (document.getElementById('shortcuts-modal')) return;
+    const SHORTCUTS = [
+        ['Library', [
+            ['/',          'Focus search'],
+            ['↑ ↓ ← →',    'Move selection (grid 2D, tree vertical)'],
+            ['→',          'Tree: expand header / step into open one'],
+            ['←',          'Tree: collapse header / jump to parent'],
+            ['Home / End', 'Jump to first / last item'],
+            ['Enter / Space', 'Play song; toggle artist / album header'],
+            ['c',          'Convert PSARC entry to .sloppak'],
+            ['f',          'Toggle favorite'],
+            ['e',          'Edit metadata'],
+            ['?',          'Show this cheat sheet'],
+        ]],
+        ['Modals', [
+            ['Esc',        'Close the open modal (edit metadata, this overlay)'],
+            ['Esc',        'Otherwise: clear + blur the focused search box'],
+        ]],
+    ];
+
+    const modal = document.createElement('div');
+    modal.id = 'shortcuts-modal';
+    modal.className = 'slopsmith-modal fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-sm';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'Keyboard shortcuts');
+    // Record the element that triggered the modal so Esc / close can
+    // return focus to the correct entry even if _lastLibSelected drifts.
+    // Scope to the active screen so a stale _lastLibSelected from a
+    // different screen (e.g. Library vs Favorites) doesn't receive focus.
+    const _scModal = document.querySelector('.screen.active');
+    modal._opener = (_lastLibSelected && document.body.contains(_lastLibSelected)
+        && _scModal && _scModal.contains(_lastLibSelected))
+        ? _lastLibSelected : null;
+
+    const sections = SHORTCUTS.map(([heading, rows]) => {
+        const items = rows.map(([keys, desc]) => `
+            <div class="flex items-baseline justify-between gap-4 py-1.5">
+                <span class="text-sm text-gray-300">${esc(desc)}</span>
+                <kbd class="text-xs font-mono px-2 py-0.5 rounded bg-dark-600 border border-gray-700 text-gray-200 whitespace-nowrap">${esc(keys)}</kbd>
+            </div>
+        `).join('');
+        return `
+            <section class="mb-4 last:mb-0">
+                <h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">${esc(heading)}</h4>
+                ${items}
+            </section>
+        `;
+    }).join('');
+
+    modal.innerHTML = `
+        <div class="bg-dark-700 border border-gray-700 rounded-2xl p-6 w-full max-w-md mx-4 shadow-2xl">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-bold text-white">Keyboard shortcuts</h3>
+                <button type="button" data-shortcuts-close
+                        class="text-gray-500 hover:text-white transition" aria-label="Close shortcuts">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            ${sections}
+            <p class="text-[11px] text-gray-500 mt-4">Tip: shortcuts bail out while you're typing in inputs, so you can always type the literal keys.</p>
+        </div>
+    `;
+
+    // Click outside the inner panel (i.e. on the backdrop) closes the
+    // modal — matches the conventional dialog UX.
+    modal.addEventListener('click', (ev) => {
+        if (ev.target === modal || ev.target.closest('[data-shortcuts-close]')) {
+            const opener = modal._opener;
+            modal.remove();
+            const focusTarget = (opener && document.body.contains(opener)) ? opener
+                : (_lastLibSelected && document.body.contains(_lastLibSelected) ? _lastLibSelected : null);
+            if (focusTarget) focusTarget.focus({ preventScroll: true });
+        }
+    });
+
+    document.body.appendChild(modal);
+    // Move focus into the dialog so background shortcuts (and arrow
+    // nav) can't fire on the underlying library entry while the
+    // overlay is open. Close button is the safe default — there's no
+    // primary input to focus on a read-only cheat sheet.
+    const closeBtn = modal.querySelector('[data-shortcuts-close]');
+    if (closeBtn) closeBtn.focus({ preventScroll: true });
+    // Trap Tab / Shift+Tab inside the modal so focus can't escape to
+    // the library content underneath while the overlay is open.
+    _trapFocusInModal(modal);
+}
+
+document.addEventListener('keydown', (e) => {
+    // Modifier-key combos belong to the browser / OS shortcuts; never
+    // intercept those.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    if (_handleLibArrowNav(e)) return;
+
+    if (e.key === '/') {
+        if (_isTextInput(document.activeElement)) return;
+        // Also bail when focus is inside the filter drawer, a dialog, or
+        // any other interactive region — those contexts have their own
+        // keyboard semantics and shouldn't be hijacked by the search
+        // shortcut (e.g. a focused checkbox inside the filters drawer).
+        if (_isInsideInteractiveControl(document.activeElement)) return;
+        const search = _activeSearchInput();
+        if (!search) return;
+        e.preventDefault();  // suppress the literal '/' the input would receive
+        search.focus();
+        // Move caret to end without mutating .value — round-tripping
+        // the value resets the browser's undo stack and can fire
+        // unexpected input events on some engines. setSelectionRange
+        // is the no-side-effects path.
+        try {
+            const len = search.value.length;
+            search.setSelectionRange(len, len);
+        } catch {
+            // Some input types (search/email/tel) don't support
+            // selection APIs in older browsers; the focus alone is
+            // still useful, just no caret-end guarantee.
+        }
+        return;
+    }
+
+    // `?` (Shift+/) opens the keyboard-shortcuts cheat sheet. Same
+    // bail rules as the other shortcuts so typing a literal `?` in
+    // any input or drawer still works.
+    if (e.key === '?') {
+        if (_isInsideInteractiveControl(document.activeElement)) return;
+        e.preventDefault();
+        _openShortcutsModal();
+        return;
+    }
+
+    // Single-letter shortcuts that act on the focused / selected
+    // library entry — works on both grid cards and tree rows. Each
+    // dispatches to a button class that the entry markup already
+    // exposes, so plugins can keep owning the actual behavior:
+    //   c → .sloppak-convert-btn  (Sloppak Converter plugin)
+    //   f → .fav-btn              (favorite heart toggle)
+    //   e → .edit-btn             (edit metadata modal)
+    // No-op when no entry is currently focused / selected, when the
+    // entry doesn't expose the requested button (e.g. a sloppak
+    // entry has no convert button), or when the button is disabled.
+    // Bails on text input / drawer focus so single-letter typing in
+    // inputs still works.
+    const entryShortcut = { c: 'button.sloppak-convert-btn', f: 'button.fav-btn', e: 'button.edit-btn' }[e.key.toLowerCase()];
+    if (entryShortcut) {
+        if (_isInsideInteractiveControl(document.activeElement)) return;
+        const ae = document.activeElement;
+        const activeScreen = document.querySelector('.screen.active');
+        const isEntry = el => el && el.classList && (el.classList.contains('song-card') || el.classList.contains('song-row'));
+        // Scope both candidates to the active screen so that a stale
+        // _lastLibSelected from Library doesn't fire when the user is
+        // on Favorites (or vice-versa), and so pressing f/e/c on a
+        // hidden screen can't accidentally persist that filename into
+        // the current screen's localStorage key.
+        const inActiveScreen = el => activeScreen && activeScreen.contains(el);
+        const target = (isEntry(ae) && inActiveScreen(ae)) ? ae
+            : (isEntry(_lastLibSelected) && inActiveScreen(_lastLibSelected) ? _lastLibSelected : null);
+        if (!target) return;
+        const btn = target.querySelector(entryShortcut);
+        if (!btn || btn.disabled) return;
+        e.preventDefault();
+        // Sync the persistent selection to the acted-on entry so that
+        // Esc-to-close-modal returns focus to the correct element and
+        // the `.selected` highlight stays consistent with the action.
+        _setLibSelection(target, { focus: false });
+        btn.click();
+        return;
+    }
+
+    if (e.key === 'Escape') {
+        // Modal-first: close the topmost open modal (edit-metadata,
+        // shortcuts cheat sheet, future modals) so Esc dismisses
+        // from anywhere — including when keyboard focus is inside
+        // a form field within the modal. Restores focus to the
+        // element that opened the modal (tracked in modal._opener)
+        // so arrow nav resumes without an extra Tab; falls back to
+        // _lastLibSelected when the opener is no longer in the DOM.
+        const modals = document.querySelectorAll('[role="dialog"][aria-modal="true"].slopsmith-modal');
+        if (modals.length) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const modal = modals[modals.length - 1];
+            const opener = modal._opener;
+            modal.remove();
+            const focusTarget = (opener && document.body.contains(opener)) ? opener
+                : (_lastLibSelected && document.body.contains(_lastLibSelected) ? _lastLibSelected : null);
+            if (focusTarget) focusTarget.focus({ preventScroll: true });
+            return;
+        }
+        // Esc while typing in either search box clears + blurs. Other Esc
+        // semantics (drawer close, screen back) are handled elsewhere; we
+        // only act when a search box is the focused element.
+        const ae = document.activeElement;
+        if (ae && (ae.id === 'lib-filter' || ae.id === 'fav-filter')) {
+            if (ae.value) {
+                ae.value = '';
+                ae.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            ae.blur();
+        }
+    }
+});
+
 // ── Screen Navigation ─────────────────────────────────────────────────────
 function showScreen(id) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
     document.getElementById(id).classList.add('active');
-    if (id === 'home') loadLibrary();
-    if (id === 'favorites') loadFavorites();
+    // Mark the next render as a screen-entry so it scrolls the
+    // restored selection into view exactly once. Routine renders
+    // (search / sort / filter typing) won't have this flag set and
+    // so won't yank the viewport. Also bump the nav-items
+    // generation so the next keypress doesn't reuse a cache built
+    // against a now-hidden screen's container.
+    _bumpLibNavGeneration();
+    if (id === 'home') { _libScrollOnNextRender.home = true; loadLibrary(); }
+    if (id === 'favorites') { _libScrollOnNextRender.favorites = true; loadFavorites(); }
     if (id === 'settings') loadSettings();
     if (id !== 'player') {
         highway.stop();
@@ -65,7 +772,22 @@ function _writePersistedChoice(key, value) {
 let libView = _readPersistedChoice(_LIB_VIEW_KEY, _LIB_VIEW_VALUES, 'grid');
 let currentPage = 0;
 const PAGE_SIZE = 24;
-let _treeLetter = '';
+// Tree letter selection persists across reloads / coming back from
+// the player so the user lands on the same alphabet group they
+// picked. Validation: any single uppercase letter, or `#` for
+// non-alphabetical artists, or `''` for the All bucket.
+const _LIB_TREE_LETTER_KEY = 'slopsmith.libTreeLetter';
+const _FAV_TREE_LETTER_KEY = 'slopsmith.favTreeLetter';
+function _readPersistedLetter(key) {
+    let v = null;
+    try { v = localStorage.getItem(key); } catch { return ''; }
+    if (v === null) return '';
+    return (v === '' || v === '#' || /^[A-Z]$/.test(v)) ? v : '';
+}
+function _writePersistedLetter(key, value) {
+    try { localStorage.setItem(key, value || ''); } catch { /* private mode / quota */ }
+}
+let _treeLetter = _readPersistedLetter(_LIB_TREE_LETTER_KEY);
 let _treeStats = null;
 let _debounceTimer = null;
 let _loadingMore = false;
@@ -410,6 +1132,10 @@ function setLibView(view) {
     document.getElementById('view-tree-btn').className = `px-3 py-2.5 text-sm transition ${view === 'tree' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
     if (view !== 'grid') stopInfiniteScroll();
     _libEpoch++;
+    // View toggle changes which container `_libNavItems` resolves
+    // to (tree vs grid) — drop the cache so the next keypress
+    // re-derives.
+    _bumpLibNavGeneration();
     loadLibrary();
 }
 
@@ -551,7 +1277,8 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
                 ⬆ Convert to Drop D</button>`
             : '';
         const fmtBadge = formatBadge(s.format, s.stem_count);
-        return `<div class="song-card group" data-play="${encodeURIComponent(s.filename)}">
+        const ariaLabel = `Play ${title || s.filename}${artist ? ' by ' + artist : ''}`;
+        return `<div class="song-card group" data-play="${encodeURIComponent(s.filename)}" data-artist="${_escAttr(artist || '')}" tabindex="0" role="button" aria-label="${_escAttr(ariaLabel)}">
             <div class="card-art">
                 <img src="${artUrl}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
                 <span class="placeholder" style="display:none">🎸</span>
@@ -589,6 +1316,27 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
         grid.insertAdjacentHTML('beforeend', html);
     } else {
         grid.innerHTML = html;
+    }
+    // Items list invalidation: any DOM mutation to the grid changes
+    // the result of the next `_libNavItems` call.
+    _bumpLibNavGeneration();
+    // Re-apply the persistent selection after a fresh render so the
+    // user's last picked card stays highlighted across reloads / a
+    // round-trip through the player. Skip this during `append` mode
+    // (infinite scroll) so restoring selection can't re-center the
+    // viewport and yank the user away from the newly loaded page.
+    // When a search input is focused the user is actively filtering —
+    // re-apply the highlight but don't move the viewport (they didn't
+    // leave the page and their scroll position should be preserved).
+    if (mode !== 'append') {
+        const screen = containerId.startsWith('fav') ? 'favorites' : 'home';
+        // Scroll only on the first render after a screen entry —
+        // routine search / sort / filter renders re-apply the
+        // highlight without moving the viewport. The flag is
+        // one-shot and consumed here.
+        const scroll = _libScrollOnNextRender[screen];
+        if (scroll) _libScrollOnNextRender[screen] = false;
+        _restoreLibSelection(grid, screen, { scroll });
     }
 }
 
@@ -674,8 +1422,9 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
         const heuristicOpen = q || artists.length <= 5;
         const isOpen = forceArtistOpen ? true : forceArtistClosed ? false : heuristicOpen;
         const openClass = isOpen ? ' open' : '';
+        const artistAria = _escAttr(`Toggle artist ${artist.name}`);
         html += `<div class="artist-row${openClass}">`;
-        html += `<div class="artist-header" onclick="this.parentElement.classList.toggle('open')">`;
+        html += `<div class="artist-header" tabindex="0" role="button" aria-expanded="${isOpen ? 'true' : 'false'}" aria-label="${artistAria}" onclick="_onHeaderClick(this)">`;
         html += chevron;
         html += `<span class="text-white font-semibold text-sm flex-1">${esc(artist.name)}</span>`;
         html += `<span class="text-xs text-gray-600">${artist.song_count} song${artist.song_count !== 1 ? 's' : ''} · ${artist.album_count} album${artist.album_count !== 1 ? 's' : ''}</span>`;
@@ -686,8 +1435,9 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
             const albumHeuristicOpen = q || artist.albums.length === 1;
             const albumIsOpen = forceArtistOpen ? true : forceArtistClosed ? false : albumHeuristicOpen;
             const albumOpen = albumIsOpen ? ' open' : '';
+            const albumAria = _escAttr(`Toggle album ${album.name}`);
             html += `<div class="album-group${albumOpen}">`;
-            html += `<div class="album-header" onclick="this.parentElement.classList.toggle('open')">`;
+            html += `<div class="album-header" tabindex="0" role="button" aria-expanded="${albumIsOpen ? 'true' : 'false'}" aria-label="${albumAria}" onclick="_onHeaderClick(this)">`;
             html += chevron;
             html += `<img src="${artUrl}" alt="" class="album-art-sm" loading="lazy" onerror="this.style.display='none'">`;
             html += `<span class="text-gray-300 text-sm flex-1">${esc(album.name)}</span>`;
@@ -705,7 +1455,8 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
                     ['Drop C', 'Drop C#', 'Drop Bb', 'Drop A'].includes(tuning);
                 const canRetune = stdRetune || dropRetune;
                 const retuneTarget = stdRetune ? 'E Standard' : 'Drop D';
-                html += `<div class="song-row" data-play="${encodeURIComponent(s.filename)}">`;
+                const rowAria = _escAttr(`Play ${title}${artist.name ? ' by ' + artist.name : ''}`);
+                html += `<div class="song-row" data-play="${encodeURIComponent(s.filename)}" data-artist="${_escAttr(artist.name || '')}" tabindex="0" role="button" aria-label="${rowAria}">`;
                 html += `<div class="flex-1 min-w-0 flex items-center gap-2"><span class="text-sm text-white truncate block">${esc(title)}</span>${formatBadgeInline(s.format, s.stem_count)}</div>`;
                 html += `<div class="flex items-center gap-1.5 flex-shrink-0 text-xs">`;
                 for (const a of (s.arrangements || [])) {
@@ -749,6 +1500,17 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
     }
 
     container.innerHTML = html;
+    // Items list invalidation — see grid render counterpart.
+    _bumpLibNavGeneration();
+    // Re-apply the persisted selection. For the tree we also expand
+    // every collapsed ancestor of the saved row so the highlight is
+    // actually visible — see _restoreLibSelection. Scroll only on
+    // the first render after a screen entry (one-shot flag set in
+    // showScreen) so routine renders don't yank the viewport.
+    const screen = favoritesOnly ? 'favorites' : 'home';
+    const scroll = _libScrollOnNextRender[screen];
+    if (scroll) _libScrollOnNextRender[screen] = false;
+    _restoreLibSelection(container, screen, { scroll });
 }
 
 function goTreePage(p) {
@@ -760,6 +1522,7 @@ function goTreePage(p) {
 function filterTreeLetter(letter) {
     _treeLetter = (_treeLetter === letter) ? '' : letter;
     _treePage = 0;
+    _writePersistedLetter(_LIB_TREE_LETTER_KEY, _treeLetter);
     loadTreeView();
 }
 
@@ -771,6 +1534,12 @@ function _toggleAllInTree(containerId, expand, persistKey) {
     if (!container) return;
     container.querySelectorAll('.artist-row').forEach(el => el.classList.toggle('open', expand));
     container.querySelectorAll('.album-group').forEach(el => el.classList.toggle('open', expand));
+    // Bulk open/close changes which song-rows pass the visibility
+    // filter in `_libNavItems` — same reason `_toggleHeader` bumps
+    // the generation. Without this, a stale cached items list from
+    // before the toggle would let arrow nav step into now-hidden
+    // rows.
+    _bumpLibNavGeneration();
     // Persist the explicit choice so the next page reload (or letter
     // change, which re-runs renderTreeInto) honors it instead of
     // falling back to the auto-open heuristic. Stored as '1'/'0' so a
@@ -792,10 +1561,45 @@ function esc(s) {
     return d.innerHTML;
 }
 
+// `esc()` escapes the HTML-content metacharacters (<, >, &) but not
+// quotes — fine for text-node interpolation but unsafe when the
+// result is used as an attribute value, where a literal `"` ends the
+// attribute early. Use `_escAttr` for any `attr="${...}"` site.
+function _escAttr(s) {
+    return esc(s == null ? '' : String(s))
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// Toggle an artist/album header's parent `.open` state and keep
+// `aria-expanded` on the header itself in sync so screen readers
+// announce the collapsed/expanded transition correctly. Used by
+// both the inline onclick (mouse) and the keyboard handlers.
+function _toggleHeader(headerEl) {
+    if (!headerEl) return;
+    const parent = headerEl.parentElement;
+    if (!parent) return;
+    parent.classList.toggle('open');
+    headerEl.setAttribute('aria-expanded', parent.classList.contains('open') ? 'true' : 'false');
+    // Toggling open/closed changes which song-rows pass the
+    // visibility filter in `_libNavItems`, so the cached items list
+    // is now stale.
+    _bumpLibNavGeneration();
+}
+
+// Called by the inline onclick on artist- and album-headers so the
+// mouse-click path also syncs the persistent `.selected` state —
+// keeps arrow-nav resuming from the last-clicked header rather than
+// from a stale highlight on a different element.
+function _onHeaderClick(el) {
+    _toggleHeader(el);
+    _setLibSelection(el, { focus: false });
+}
+
 // ── Favorites ────────────────────────────────────────────────────────────
 let favView = 'grid';
 let favPage = 0;
-let _favTreeLetter = '';
+let _favTreeLetter = _readPersistedLetter(_FAV_TREE_LETTER_KEY);
 let _favTreePage = 0;
 let _favTreeStats = null;
 let _favDebounce = null;
@@ -832,6 +1636,9 @@ function setFavView(view) {
     document.getElementById('fav-view-tree-btn').className = `px-3 py-2.5 text-sm transition ${view === 'tree' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
     const pag = document.getElementById('fav-pagination');
     if (pag && view !== 'grid') pag.innerHTML = '';
+    // Same reason as setLibView: dropping the items cache so the
+    // next keypress re-derives against the now-active container.
+    _bumpLibNavGeneration();
     loadFavorites();
 }
 
@@ -899,6 +1706,7 @@ async function loadFavTreeView() {
 function filterFavTreeLetter(letter) {
     _favTreeLetter = (_favTreeLetter === letter) ? '' : letter;
     _favTreePage = 0;
+    _writePersistedLetter(_FAV_TREE_LETTER_KEY, _favTreeLetter);
     loadFavTreeView();
 }
 
@@ -2022,11 +2830,29 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Edit metadata modal ─────────────────────────────────────────────────
-function openEditModal(songData) {
+function openEditModal(songData, openerEl) {
     const artUrl = `/api/song/${encodeURIComponent(songData.f)}/art?t=${Date.now()}`;
     const modal = document.createElement('div');
     modal.id = 'edit-modal';
-    modal.className = 'fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-sm';
+    modal.className = 'slopsmith-modal fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-sm';
+    // role=dialog: assistive tech announces it as a modal; also lets
+    // the global keyboard listener's `_isInsideInteractiveControl`
+    // bail when typing inside the modal so Library shortcuts don't
+    // hijack keys from the edit form.
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'Edit song metadata');
+    // Record the element that triggered the modal so Esc / Cancel can
+    // return focus to the exact entry the user was on, even if
+    // _lastLibSelected changes before the modal closes.
+    // Prefer the explicitly-passed openerEl (from the edit-btn click
+    // handler, which has the exact [data-play] parent) over
+    // _lastLibSelected, which may not have been updated when the
+    // click's stopPropagation() prevented the card-click handler.
+    const _emActive = document.querySelector('.screen.active');
+    const _emLast = (_lastLibSelected && document.body.contains(_lastLibSelected)
+        && _emActive && _emActive.contains(_lastLibSelected)) ? _lastLibSelected : null;
+    modal._opener = (openerEl && document.body.contains(openerEl)) ? openerEl : _emLast;
     modal.innerHTML = `
         <div class="bg-dark-700 border border-gray-700 rounded-2xl p-6 w-full max-w-md mx-4 shadow-2xl">
             <h3 class="text-lg font-bold text-white mb-4">Edit Song</h3>
@@ -2043,37 +2869,62 @@ function openEditModal(songData) {
                 </div>
                 <div>
                     <label class="text-xs text-gray-400 mb-1 block">Title</label>
-                    <input type="text" id="edit-title" value="${esc(songData.t)}"
+                    <input type="text" id="edit-title" value="${_escAttr(songData.t)}"
                         class="w-full bg-dark-600 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-accent/50">
                 </div>
                 <div>
                     <label class="text-xs text-gray-400 mb-1 block">Artist</label>
-                    <input type="text" id="edit-artist" value="${esc(songData.a)}"
+                    <input type="text" id="edit-artist" value="${_escAttr(songData.a)}"
                         class="w-full bg-dark-600 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-accent/50">
                 </div>
                 <div>
                     <label class="text-xs text-gray-400 mb-1 block">Album</label>
-                    <input type="text" id="edit-album" value="${esc(songData.al)}"
+                    <input type="text" id="edit-album" value="${_escAttr(songData.al)}"
                         class="w-full bg-dark-600 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-accent/50">
                 </div>
             </div>
             <div class="flex gap-3 mt-5">
                 <button onclick="saveEditModal('${encodeURIComponent(songData.f)}')"
                     class="flex-1 bg-accent hover:bg-accent-light px-4 py-2 rounded-xl text-sm font-semibold text-white transition">Save</button>
-                <button onclick="document.getElementById('edit-modal').remove()"
+                <button data-edit-close
                     class="px-4 py-2 bg-dark-600 hover:bg-dark-500 rounded-xl text-sm text-gray-300 transition">Cancel</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
+
+    // Move focus into the dialog's first text input so background
+    // shortcuts (and arrow nav) can't fire on the underlying library
+    // entry while the edit form is open. Title is the natural primary
+    // field — most edits are correcting spelling there. Caret-end
+    // selection so the user can keep typing rather than overtype the
+    // current value.
+    const titleInput = document.getElementById('edit-title');
+    if (titleInput) {
+        titleInput.focus({ preventScroll: true });
+        try {
+            const len = titleInput.value.length;
+            titleInput.setSelectionRange(len, len);
+        } catch { /* some browsers reject selection on certain input types */ }
+    }
+
+    // Trap Tab / Shift+Tab inside the modal so focus can't escape to
+    // the library content underneath while the edit form is open.
+    _trapFocusInModal(modal);
 
     // Click on art triggers file input
     document.getElementById('edit-art-wrapper').addEventListener('click', () => {
         document.getElementById('edit-art-file').click();
     });
 
-    // Close on backdrop click
+    // Close on backdrop click or Cancel button; restore focus to opener.
     modal.addEventListener('click', (e) => {
-        if (e.target === modal) modal.remove();
+        if (e.target === modal || e.target.closest('[data-edit-close]')) {
+            const opener = modal._opener;
+            modal.remove();
+            const focusTarget = (opener && document.body.contains(opener)) ? opener
+                : (_lastLibSelected && document.body.contains(_lastLibSelected) ? _lastLibSelected : null);
+            if (focusTarget) focusTarget.focus({ preventScroll: true });
+        }
     });
 }
 
@@ -2114,7 +2965,14 @@ async function saveEditModal(encodedFilename) {
         reader.readAsDataURL(fileInput.files[0]);
     }
 
-    document.getElementById('edit-modal').remove();
+    const modal = document.getElementById('edit-modal');
+    const opener = modal ? modal._opener : null;
+    if (modal) modal.remove();
+    // Restore focus to the entry the modal was opened from so subsequent
+    // keyboard navigation resumes correctly (same as Esc / Cancel paths).
+    const focusTarget = (opener && document.body.contains(opener)) ? opener
+        : (_lastLibSelected && document.body.contains(_lastLibSelected) ? _lastLibSelected : null);
+    if (focusTarget) focusTarget.focus({ preventScroll: true });
     // Refresh current view
     const activeScreen = document.querySelector('.screen.active');
     if (activeScreen?.id === 'favorites') loadFavorites();
@@ -2127,7 +2985,8 @@ document.addEventListener('click', e => {
     const edit = e.target.closest('.edit-btn');
     if (edit) {
         e.stopPropagation();
-        openEditModal(JSON.parse(edit.dataset.edit));
+        const entry = edit.closest('[data-play]');
+        openEditModal(JSON.parse(edit.dataset.edit), entry);
         return;
     }
     // Favorite button
@@ -2144,9 +3003,18 @@ document.addEventListener('click', e => {
         retuneSong(btn.dataset.retune, decodeURIComponent(btn.dataset.title), btn.dataset.tuning, btn.dataset.target || 'E Standard');
         return;
     }
-    // Song card
+    // Song card / row — keep persistent selection in sync with mouse
+    // clicks so arrow-keying after a click resumes from where the
+    // user clicked, not from a stale highlight.
+    // Guard: if the click originated from any <button> inside the
+    // entry (e.g. a plugin-provided .sloppak-convert-btn that has no
+    // own stopPropagation handler above), don't treat it as a play
+    // action. Known action buttons (.fav-btn, .edit-btn, .retune-btn)
+    // already return early via stopPropagation() above; this catches
+    // any remaining button that bubbles through.
     const card = e.target.closest('[data-play]');
-    if (card) {
+    if (card && !e.target.closest('button')) {
+        _setLibSelection(card, { focus: false });
         playSong(card.dataset.play);
     }
 });
@@ -2527,6 +3395,14 @@ async function bootstrapPluginsAndUi() {
     const fmtEl = document.getElementById('lib-format');
     if (sortEl) sortEl.value = savedSort;
     if (fmtEl) fmtEl.value = savedFormat;
+    // Treat the initial page load the same as a screen entry so the
+    // restored selection scrolls into view exactly once on hard
+    // reload. Without this, the scroll-on-screen-entry flag only
+    // ever triggered when the user navigated away and back via
+    // showScreen — a hard refresh in tree mode would land on the
+    // top of the tree and force the user to scroll back to find
+    // their selection.
+    _libScrollOnNextRender.home = true;
     // `libView` was already initialized from localStorage at module
     // load; passing it through setLibView replays the visibility
     // toggling and triggers the initial load.
