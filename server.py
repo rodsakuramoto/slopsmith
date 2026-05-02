@@ -793,7 +793,9 @@ register_plugin_api(app)
 
 
 @app.on_event("startup")
-def startup_events():
+async def startup_events():
+    loop = asyncio.get_event_loop()
+
     _set_startup_status(
         running=True,
         phase="starting",
@@ -830,6 +832,27 @@ def startup_events():
                     error=error,
                 )
 
+            def _route_setup_on_main(fn):
+                """Schedule plugin route registration on the event-loop thread.
+
+                FastAPI/Starlette router mutation is not thread-safe, so the
+                actual setup() call is marshalled back onto the event loop via
+                call_soon_threadsafe.  The background thread blocks until the
+                registration completes (or raises) so load_plugins() still
+                observes errors synchronously.
+                """
+                fut: concurrent.futures.Future = concurrent.futures.Future()
+
+                def _do():
+                    try:
+                        fn()
+                        fut.set_result(None)
+                    except BaseException as exc:  # noqa: BLE001
+                        fut.set_exception(exc)
+
+                loop.call_soon_threadsafe(_do)
+                fut.result(timeout=30)
+
             _set_startup_status(
                 running=True,
                 phase="plugins-loading",
@@ -839,7 +862,8 @@ def startup_events():
                 total=0,
                 error=None,
             )
-            load_plugins(app, plugin_context, progress_cb=_on_progress)
+            load_plugins(app, plugin_context, progress_cb=_on_progress,
+                         route_setup_fn=_route_setup_on_main)
             status = _get_startup_status()
             _set_startup_status(
                 running=False,

@@ -2246,10 +2246,13 @@ function setPluginLoadingState(loading, message) {
 async function waitForPluginStartupComplete(timeoutMs = 180000) {
     const start = Date.now();
     let last = null;
+    let failCount = 0;
+    const MAX_CONSECUTIVE_FAILURES = 5;
     while (Date.now() - start < timeoutMs) {
         try {
             const resp = await fetch('/api/startup-status');
             if (resp.ok) {
+                failCount = 0;
                 const status = await resp.json();
                 last = status;
                 const phase = (status.phase || '').trim();
@@ -2257,8 +2260,20 @@ async function waitForPluginStartupComplete(timeoutMs = 180000) {
                 const countMsg = status.total > 0 ? ` (${status.loaded || 0}/${status.total})` : '';
                 setPluginLoadingState(Boolean(status.running), `${msg}${countMsg}`);
                 if (!status.running && (phase === 'complete' || phase === 'error')) return status;
+            } else {
+                failCount++;
+                if (failCount >= MAX_CONSECUTIVE_FAILURES) {
+                    setPluginLoadingState(false);
+                    return last || { running: false, phase: 'error', message: 'Startup status unavailable' };
+                }
             }
-        } catch (e) { /* ignore and retry */ }
+        } catch (e) {
+            failCount++;
+            if (failCount >= MAX_CONSECUTIVE_FAILURES) {
+                setPluginLoadingState(false);
+                return last || { running: false, phase: 'error', message: 'Startup status unavailable' };
+            }
+        }
         await new Promise((r) => setTimeout(r, 800));
     }
     return last || { running: false, phase: 'timeout', message: 'Plugin startup timed out' };

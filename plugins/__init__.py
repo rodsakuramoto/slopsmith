@@ -326,7 +326,7 @@ def _install_requirements(plugin_dir: Path, plugin_id: str):
         return False
 
 
-def load_plugins(app: FastAPI, context: dict, progress_cb=None):
+def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=None):
     """Discover and load all plugins from built-in and user directories.
 
     progress_cb, when provided, receives structured progress events:
@@ -338,6 +338,15 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None):
       "total": <int>,
       "error": "<optional error text>"
     }
+
+    route_setup_fn, when provided, is called instead of directly invoking
+    `routes_module.setup(app, ctx)`.  Callers that load plugins from a
+    background thread can pass a hook that marshals the call back to the
+    main thread (e.g. via loop.call_soon_threadsafe) to keep FastAPI/
+    Starlette router mutation on the event-loop thread.
+
+    Signature: route_setup_fn(fn: Callable[[], None]) -> None
+    where `fn` is a zero-argument callable that performs the setup call.
     """
 
     def _emit_progress(phase: str, message: str, plugin_id: str = "", loaded: int = 0,
@@ -516,7 +525,10 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None):
                 sys.modules[module_name] = routes_module
                 spec.loader.exec_module(routes_module)
                 if hasattr(routes_module, "setup"):
-                    routes_module.setup(app, plugin_context)
+                    if route_setup_fn is not None:
+                        route_setup_fn(lambda: routes_module.setup(app, plugin_context))
+                    else:
+                        routes_module.setup(app, plugin_context)
                     print(f"[Plugin] Loaded routes for '{plugin_id}'")
             except Exception as e:
                 print(f"[Plugin] Failed to load routes for '{plugin_id}': {e}")

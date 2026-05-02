@@ -17,7 +17,7 @@
         if (opts.path) return { path: String(opts.path) };
         if (opts.defaultName) {
             const safe = String(opts.defaultName).replace(/[^a-zA-Z0-9._-]/g, '');
-            return { path: `${DEFAULT_BASE_PATH}${safe}.json` };
+            if (safe) return { path: `${DEFAULT_BASE_PATH}${safe}.json` };
         }
         return { path: `${DEFAULT_BASE_PATH}spinner.json` };
     }
