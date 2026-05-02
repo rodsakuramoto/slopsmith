@@ -1,3 +1,6 @@
+// Demo analytics — real impl set by demo.js; no-op in normal builds
+window.slopsmithDemoTrack = window.slopsmithDemoTrack ?? null;
+
 // ── Screen Navigation ─────────────────────────────────────────────────────
 function showScreen(id) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -2329,7 +2332,7 @@ async function loadPlugins() {
                 item.href = '#';
                 item.className = 'block px-4 py-2 text-sm text-gray-400 hover:text-white hover:bg-dark-700 transition';
                 item.textContent = plugin.nav.label;
-                item.onclick = (e) => { e.preventDefault(); ddMenu.classList.add('hidden'); showScreen(screenId); };
+                item.onclick = (e) => { e.preventDefault(); ddMenu.classList.add('hidden'); showScreen(screenId); window.slopsmithDemoTrack?.('event/plugin-open/' + plugin.id); };
                 ddMenu.appendChild(item);
 
                 // Mobile nav — flat list
@@ -2337,7 +2340,7 @@ async function loadPlugins() {
                 ma.href = '#';
                 ma.className = 'text-gray-400 hover:text-white pl-4 text-sm';
                 ma.textContent = plugin.nav.label;
-                ma.onclick = (e) => { e.preventDefault(); showScreen(screenId); ma.closest('#mobile-menu').classList.add('hidden'); };
+                ma.onclick = (e) => { e.preventDefault(); showScreen(screenId); ma.closest('#mobile-menu').classList.add('hidden'); window.slopsmithDemoTrack?.('event/plugin-open/' + plugin.id); };
                 mobileNavContainer.appendChild(ma);
             }
         }

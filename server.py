@@ -19,11 +19,166 @@ from tunings import tuning_name
 import sloppak as sloppak_mod
 
 import concurrent.futures
+import inspect
+import re
 import sqlite3
 import threading
+import time
+import traceback
+import uuid
+import warnings
 import xml.etree.ElementTree as ET
 
+from fastapi import Request
+
 app = FastAPI(title="Rocksmith Web")
+
+# Plugins that maintain session stores can register a cleanup callback here.
+# The demo-mode janitor calls every registered hook once per hour so stale
+# sessions are swept without the core needing to know plugin internals.
+_DEMO_JANITOR_HOOKS: list = []
+_DEMO_JANITOR_HOOKS_LOCK = threading.Lock()
+_DEMO_JANITOR_STARTED = False
+_DEMO_JANITOR_STOP = threading.Event()
+_DEMO_JANITOR_THREAD: threading.Thread | None = None
+
+
+def register_demo_janitor_hook(fn) -> None:
+    """Register a zero-argument callable to be invoked hourly by the demo
+    janitor.  Plugins call this from their ``setup(app, context)`` when they
+    want to participate in session cleanup under demo mode.
+
+    The callable must accept no required arguments.  Async (coroutine)
+    functions are rejected: the janitor runs in a plain thread and cannot
+    await coroutines.
+    """
+    if not callable(fn):
+        raise TypeError(
+            f"register_demo_janitor_hook expects a callable, got {type(fn).__name__!r}"
+        )
+    # Reject coroutine functions — check both the callable itself and its
+    # __call__ method so objects with an async __call__ (e.g. class instances,
+    # functools.partial wrappers around async functions) are also caught.
+    _call = getattr(fn, "__call__", None)
+    if inspect.iscoroutinefunction(fn) or (
+        _call is not None and inspect.iscoroutinefunction(_call)
+    ):
+        raise TypeError(
+            "register_demo_janitor_hook does not accept async functions; "
+            "the janitor runs in a plain thread and cannot await coroutines"
+        )
+    # Validate that the callable accepts zero required arguments so it won't
+    # crash at sweep time (hourly, far from the registration site).
+    try:
+        sig = inspect.signature(fn)
+    except ValueError:
+        # inspect.signature() raises ValueError for built-in C callables whose
+        # signature cannot be determined.  Accept them as-is; if they fail at
+        # runtime the janitor will catch and log the exception.
+        pass
+    else:
+        required = [
+            p for p in sig.parameters.values()
+            if p.default is inspect.Parameter.empty
+            and p.kind not in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            )
+        ]
+        if required:
+            raise TypeError(
+                f"register_demo_janitor_hook expects a zero-argument callable; "
+                f"{fn!r} has {len(required)} required parameter(s): "
+                + ", ".join(p.name for p in required)
+            )
+    with _DEMO_JANITOR_HOOKS_LOCK:
+        _DEMO_JANITOR_HOOKS.append(fn)
+
+
+def _run_janitor_hook(hook) -> None:
+    """Run a single janitor hook inline, swallowing and logging any exception.
+
+    If the hook returns an awaitable (e.g. a coroutine slipped through the
+    async-function guard), the coroutine is closed immediately to avoid
+    ``RuntimeWarning: coroutine was never awaited`` noise, and a warning is
+    emitted so the plugin author knows to fix their hook.
+    """
+    try:
+        result = hook()
+    except Exception:
+        traceback.print_exc()
+        return
+    if inspect.iscoroutine(result):
+        # A coroutine slipped through the async-function guard (e.g. via a
+        # wrapper/partial).  Close it to suppress "coroutine never awaited",
+        # then warn so the plugin author knows to fix their hook.
+        try:
+            result.close()
+        except Exception:
+            traceback.print_exc()
+        warnings.warn(
+            f"janitor hook {hook!r} returned a coroutine; "
+            "hooks must be plain synchronous callables — "
+            "register_demo_janitor_hook does not accept async functions",
+            RuntimeWarning,
+            stacklevel=1,
+        )
+    elif inspect.isawaitable(result):
+        # Future/Task: no .close() method; just warn and leave it alone.
+        warnings.warn(
+            f"janitor hook {hook!r} returned an awaitable (Future/Task); "
+            "hooks must be plain synchronous callables",
+            RuntimeWarning,
+            stacklevel=1,
+        )
+
+
+_DEMO_BLOCKED: list[tuple[str, re.Pattern]] = [
+    ("POST",   re.compile(r"^/api/settings$")),
+    ("POST",   re.compile(r"^/api/settings/import$")),
+    ("POST",   re.compile(r"^/api/rescan$")),
+    ("POST",   re.compile(r"^/api/rescan/full$")),
+    ("POST",   re.compile(r"^/api/favorites/toggle$")),
+    ("POST",   re.compile(r"^/api/loops$")),
+    ("DELETE", re.compile(r"^/api/loops/[^/]+$")),
+    ("POST",   re.compile(r"^/api/song/.*/meta$")),
+    ("POST",   re.compile(r"^/api/song/.*/art/upload$")),
+    ("GET",    re.compile(r"^/api/plugins/updates$")),
+    ("POST",   re.compile(r"^/api/plugins/[^/]+/update$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/save$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/build$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/upload-art$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/upload-audio$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/youtube-audio$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/import-gp$")),
+    ("POST",   re.compile(r"^/api/plugins/editor/import-midi$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_karaoke/align$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_karaoke/generate-pitch$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_karaoke/save-lyrics$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_sync/align$")),
+    ("POST",   re.compile(r"^/api/plugins/lyrics_sync/save$")),
+    ("POST",   re.compile(r"^/api/plugins/studio/sessions/[^/]+/extract-drums$")),
+]
+
+
+@app.middleware("http")
+async def _demo_mode_guard(request: Request, call_next):
+    if os.environ.get("SLOPSMITH_DEMO_MODE") == "1":
+        path = request.url.path
+        for method, pattern in _DEMO_BLOCKED:
+            if request.method == method and pattern.match(path):
+                return JSONResponse({"error": "demo mode: read-only"}, status_code=403)
+        response = await call_next(request)
+        if request.method == "GET" and path == "/" and "slopsmith_demo_session" not in request.cookies:
+            forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+            is_secure = request.url.scheme == "https" or forwarded_proto.lower() == "https"
+            response.set_cookie(
+                "slopsmith_demo_session", str(uuid.uuid4()),
+                max_age=86400, httponly=True, samesite="lax",
+                secure=is_secure,
+            )
+        return response
+    return await call_next(request)
 
 STATIC_DIR = Path(__file__).parent / "static"
 try:
@@ -809,6 +964,7 @@ async def startup_events():
         "extract_meta": _extract_meta_for_file,
         "meta_db": meta_db,
         "get_sloppak_cache_dir": lambda: SLOPPAK_CACHE_DIR,
+        "register_demo_janitor_hook": register_demo_janitor_hook,
     }
 
     # Load plugins asynchronously so HTTP routes and the desktop window can
@@ -931,8 +1087,47 @@ async def startup_events():
     else:
         threading.Thread(target=_load_plugins_background, daemon=True).start()
 
+    global _DEMO_JANITOR_STARTED, _DEMO_JANITOR_THREAD
+    if os.environ.get("SLOPSMITH_DEMO_MODE") == "1" and not _DEMO_JANITOR_STARTED:
+        _DEMO_JANITOR_STARTED = True
+        _DEMO_JANITOR_STOP.clear()
+        def _janitor():
+            while not _DEMO_JANITOR_STOP.wait(timeout=3600):
+                with _DEMO_JANITOR_HOOKS_LOCK:
+                    hooks = list(_DEMO_JANITOR_HOOKS)
+                for hook in hooks:
+                    _run_janitor_hook(hook)
+        _DEMO_JANITOR_THREAD = threading.Thread(target=_janitor, daemon=True, name="demo-janitor")
+        _DEMO_JANITOR_THREAD.start()
+
     # Start background metadata scan
     startup_scan()
+
+
+@app.on_event("shutdown")
+def shutdown_events():
+    """Stop the demo-mode janitor thread (if running) on server shutdown."""
+    global _DEMO_JANITOR_STARTED, _DEMO_JANITOR_THREAD
+    if _DEMO_JANITOR_STARTED:
+        _DEMO_JANITOR_STOP.set()
+        thread = _DEMO_JANITOR_THREAD
+        if thread is not None:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                import warnings
+                warnings.warn(
+                    "demo-janitor thread did not stop within 5 s; "
+                    "a registered hook may be blocking",
+                    RuntimeWarning,
+                    stacklevel=1,
+                )
+                # Leave _DEMO_JANITOR_STARTED True so a new janitor is not
+                # spawned by a subsequent startup while the old one is alive.
+                return
+            _DEMO_JANITOR_THREAD = None
+        _DEMO_JANITOR_STARTED = False
+        with _DEMO_JANITOR_HOOKS_LOCK:
+            _DEMO_JANITOR_HOOKS.clear()
 
 
 def startup_scan():
@@ -946,7 +1141,6 @@ def startup_scan():
 
 def _periodic_rescan():
     """Check for new files every 5 minutes."""
-    import time
     time.sleep(300)  # Wait 5 minutes after startup
     while True:
         if not _scan_status["running"]:
