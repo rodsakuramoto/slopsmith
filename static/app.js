@@ -2466,12 +2466,14 @@ async function _scheduleStartupRehydration() {
     // LOADED_PLUGINS was populated — re-hydrates plugins + viz picker once done.
     const REHYDRATE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min additional window
     const start = Date.now();
+    console.log('[slopsmith] _scheduleStartupRehydration: started');
     while (Date.now() - start < REHYDRATE_TIMEOUT_MS) {
         await new Promise((r) => setTimeout(r, 5000));
         try {
             const resp = await fetch('/api/startup-status');
             if (!resp.ok) continue;
             const status = await resp.json();
+            console.log('[slopsmith] _scheduleStartupRehydration: poll —', status.phase, 'running:', status.running);
             if (!status.running) {
                 if (status.phase === 'complete') {
                     console.log('[slopsmith] Background startup complete — re-hydrating plugins');
