@@ -452,7 +452,16 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None):
             loaded=idx,
             total=len(plugin_load_specs),
         )
-        _install_requirements(plugin_dir, plugin_id)
+        req_ok = _install_requirements(plugin_dir, plugin_id)
+        if not req_ok:
+            _emit_progress(
+                "plugin-error",
+                f"Failed to install requirements for '{plugin_id}'",
+                plugin_id=plugin_id,
+                loaded=idx,
+                total=len(plugin_load_specs),
+                error="Requirements installation failed; check server logs for details",
+            )
 
         # Add plugin directory to sys.path so the plugin's bare
         # `import sibling` keeps working during the slopsmith#33
