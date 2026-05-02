@@ -2264,20 +2264,20 @@ async function waitForPluginStartupComplete(timeoutMs = 180000) {
                 failCount++;
                 if (failCount >= MAX_CONSECUTIVE_FAILURES) {
                     setPluginLoadingState(false);
-                    return last || { running: false, phase: 'error', message: 'Startup status unavailable' };
+                    return last || { running: false, phase: 'error', message: 'Startup status unavailable', error: null, current_plugin: '', loaded: 0, total: 0 };
                 }
             }
         } catch (e) {
             failCount++;
             if (failCount >= MAX_CONSECUTIVE_FAILURES) {
                 setPluginLoadingState(false);
-                return last || { running: false, phase: 'error', message: 'Startup status unavailable' };
+                return last || { running: false, phase: 'error', message: 'Startup status unavailable', error: null, current_plugin: '', loaded: 0, total: 0 };
             }
         }
         await new Promise((r) => setTimeout(r, 800));
     }
     setPluginLoadingState(false);
-    return { running: false, phase: 'timeout', message: 'Plugin startup timed out' };
+    return { running: false, phase: 'timeout', message: 'Plugin startup timed out', error: null, current_plugin: '', loaded: 0, total: 0 };
 }
 
 async function loadPlugins() {
