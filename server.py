@@ -822,7 +822,7 @@ async def startup_events():
                 message = event.get("message") or "Loading plugins..."
                 phase = event.get("phase") or "plugins-loading"
                 update: dict = dict(
-                    running=phase != "plugins-complete",
+                    running=True,
                     phase=phase,
                     message=message,
                     current_plugin=plugin_id,
@@ -857,7 +857,7 @@ async def startup_events():
                     try:
                         fn()
                         fut.set_result(None)
-                    except BaseException as exc:  # noqa: BLE001
+                    except Exception as exc:
                         fut.set_exception(exc)
 
                 loop.call_soon_threadsafe(_do)
@@ -908,7 +908,13 @@ async def startup_events():
             import traceback
             traceback.print_exc()
 
-    threading.Thread(target=_load_plugins_background, daemon=True).start()
+    if os.environ.get("SLOPSMITH_SYNC_STARTUP"):
+        # Caller requested synchronous startup (e.g. test environment).
+        # Run the loader inline so startup is complete before the server's
+        # startup handler returns — no polling or timing workarounds needed.
+        _load_plugins_background()
+    else:
+        threading.Thread(target=_load_plugins_background, daemon=True).start()
 
     # Start background metadata scan
     startup_scan()

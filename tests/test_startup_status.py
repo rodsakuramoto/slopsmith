@@ -15,14 +15,14 @@ from fastapi.testclient import TestClient
 def client(tmp_path, monkeypatch):
     """TestClient with CONFIG_DIR isolated in a per-test tmp_path.
 
-    Background startup tasks are stubbed to no-ops so the plugin-loader
-    thread finishes near-instantly (load_plugins is a no-op) and then
-    we poll until the thread writes running=False before yielding.  This
-    guarantees no background thread is still calling _set_startup_status
-    when tests write and immediately read the helper / endpoint — making
-    the round-trip and endpoint-reflection tests deterministic.
+    SLOPSMITH_SYNC_STARTUP=1 makes the plugin-loader run synchronously
+    inside startup_events() so startup is complete before TestClient.__enter__
+    returns — no threading races, no polling.  load_plugins is still stubbed
+    to a no-op so the "load" takes microseconds and startup_scan is also
+    suppressed to avoid unrelated background I/O during tests.
     """
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SLOPSMITH_SYNC_STARTUP", "1")
     sys.modules.pop("server", None)
     server = importlib.import_module("server")
     # Stub out the two background callables that call _set_startup_status.
@@ -31,10 +31,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "load_plugins", lambda *a, **kw: None)
     monkeypatch.setattr(server, "startup_scan", lambda: None)
     with TestClient(server.app) as test_client:
-        # Wait for the background startup thread to finish (it will since
-        # load_plugins is a no-op, so this completes in milliseconds).
-        # Without this barrier the thread can race against test assertions that
-        # immediately write then read _startup_status.
+        # With SLOPSMITH_SYNC_STARTUP the loader ran inline during startup, so
+        # the status must already be complete.  Poll briefly as a safety net in
+        # case something unexpected deferred the update.
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             if not server._get_startup_status().get("running", True):
