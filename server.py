@@ -821,16 +821,23 @@ async def startup_events():
                 plugin_id = event.get("plugin_id") or ""
                 message = event.get("message") or "Loading plugins..."
                 phase = event.get("phase") or "plugins-loading"
-                error = event.get("error")
-                _set_startup_status(
+                update: dict = dict(
                     running=phase != "plugins-complete",
                     phase=phase,
                     message=message,
                     current_plugin=plugin_id,
                     loaded=loaded,
                     total=total,
-                    error=error,
                 )
+                # Only forward the error field when the event carries a real
+                # (non-null) error string.  This preserves any previously
+                # reported plugin error across the many subsequent non-error
+                # progress events that follow — without this guard the final
+                # `complete` status would almost always show `error: null`
+                # even when a plugin failed requirements or route setup.
+                if event.get("error") is not None:
+                    update["error"] = event["error"]
+                _set_startup_status(**update)
 
             def _route_setup_on_main(fn):
                 """Schedule plugin route registration on the event-loop thread.

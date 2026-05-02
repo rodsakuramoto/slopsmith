@@ -16,7 +16,7 @@
         if (opts.animationData) return { animationData: opts.animationData };
         if (opts.path) return { path: String(opts.path) };
         if (opts.defaultName) {
-            const safe = String(opts.defaultName).replace(/[^a-zA-Z0-9._-]/g, '');
+            const safe = String(opts.defaultName).replace(/[^a-zA-Z0-9._-]/g, '').replace(/\.json$/i, '');
             if (safe) return { path: `${DEFAULT_BASE_PATH}${safe}.json` };
         }
         return { path: `${DEFAULT_BASE_PATH}spinner.json` };

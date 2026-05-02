@@ -359,14 +359,20 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         if not progress_cb:
             return
         try:
-            progress_cb({
+            event: dict = {
                 "phase": phase,
                 "message": message,
                 "plugin_id": plugin_id,
                 "loaded": loaded,
                 "total": total,
-                "error": error,
-            })
+            }
+            # Omit the error key when there is no error so that downstream
+            # consumers using "status.error = event.error" don't accidentally
+            # clear a previously-reported plugin error on the next non-error
+            # progress event.
+            if error is not None:
+                event["error"] = error
+            progress_cb(event)
         except Exception:
             # Progress reporting must never break plugin startup.
             pass
