@@ -813,6 +813,8 @@ async def startup_events():
 
     # Load plugins asynchronously so HTTP routes and the desktop window can
     # come up immediately while heavy plugin imports/install steps continue.
+    _sync_mode = bool(os.environ.get("SLOPSMITH_SYNC_STARTUP"))
+
     def _load_plugins_background():
         try:
             def _on_progress(event: dict):
@@ -843,14 +845,26 @@ async def startup_events():
                 """Schedule plugin route registration on the event-loop thread.
 
                 FastAPI/Starlette router mutation is not thread-safe, so the
-                actual setup() call is marshalled back onto the event loop via
-                call_soon_threadsafe.  The background thread blocks until the
-                registration completes, raises, or a 60 s timeout elapses.
+                actual setup() call is normally marshalled back onto the event
+                loop via call_soon_threadsafe.  The background thread blocks
+                until the registration completes, raises, or a 60 s timeout
+                elapses.
 
-                On timeout, startup continues normally.  Any exception that
-                eventually arrives (after the timeout) is logged via a
-                done-callback so it is never silently dropped.
+                In synchronous startup mode (_sync_mode=True) this function is
+                called directly from the event-loop thread, so marshalling via
+                call_soon_threadsafe + fut.result() would deadlock (the loop
+                cannot drain the queued callback while it is blocked here).
+                In that case fn() is invoked inline instead.
+
+                On timeout (async mode only), startup continues normally.  Any
+                exception that eventually arrives is logged via a done-callback
+                so it is never silently dropped.
                 """
+                if _sync_mode:
+                    # Already on the event-loop thread — call directly.
+                    fn()
+                    return
+
                 fut: concurrent.futures.Future = concurrent.futures.Future()
 
                 def _do():
@@ -909,7 +923,7 @@ async def startup_events():
             import traceback
             traceback.print_exc()
 
-    if os.environ.get("SLOPSMITH_SYNC_STARTUP"):
+    if _sync_mode:
         # Caller requested synchronous startup (e.g. test environment).
         # Run the loader inline so startup is complete before the server's
         # startup handler returns — no polling or timing workarounds needed.
