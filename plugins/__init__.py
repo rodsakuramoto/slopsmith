@@ -245,8 +245,36 @@ def _install_requirements(plugin_dir: Path, plugin_id: str):
         return False
 
 
-def load_plugins(app: FastAPI, context: dict):
-    """Discover and load all plugins from built-in and user directories."""
+def load_plugins(app: FastAPI, context: dict, progress_cb=None):
+    """Discover and load all plugins from built-in and user directories.
+
+    progress_cb, when provided, receives structured progress events:
+    {
+      "phase": "<phase-id>",
+      "message": "<human text>",
+      "plugin_id": "<id or ''>",
+      "loaded": <int>,
+      "total": <int>,
+      "error": "<optional error text>"
+    }
+    """
+
+    def _emit_progress(phase: str, message: str, plugin_id: str = "", loaded: int = 0,
+                       total: int = 0, error: str | None = None):
+        if not progress_cb:
+            return
+        try:
+            progress_cb({
+                "phase": phase,
+                "message": message,
+                "plugin_id": plugin_id,
+                "loaded": loaded,
+                "total": total,
+                "error": error,
+            })
+        except Exception:
+            # Progress reporting must never break plugin startup.
+            pass
 
     # Collect plugin directories — user plugins first so they override built-in
     plugin_dirs = []
@@ -259,6 +287,7 @@ def load_plugins(app: FastAPI, context: dict):
         plugin_dirs.append(PLUGINS_DIR)
 
     if not plugin_dirs:
+        _emit_progress("plugins-complete", "No plugin directories found", loaded=0, total=0)
         return
 
     # Add persistent pip target to sys.path
@@ -318,8 +347,30 @@ def load_plugins(app: FastAPI, context: dict):
         [(plugin_id, plugin_dir) for plugin_id, plugin_dir, _ in plugin_load_specs]
     )
 
-    for plugin_id, plugin_dir, manifest in plugin_load_specs:
+    _emit_progress(
+        "plugins-discovered",
+        f"Discovered {len(plugin_load_specs)} plugin(s)",
+        loaded=0,
+        total=len(plugin_load_specs),
+    )
+
+    for idx, (plugin_id, plugin_dir, manifest) in enumerate(plugin_load_specs):
+        _emit_progress(
+            "plugin-start",
+            f"Loading plugin '{plugin_id}'",
+            plugin_id=plugin_id,
+            loaded=idx,
+            total=len(plugin_load_specs),
+        )
+
         # Install plugin requirements if present
+        _emit_progress(
+            "plugin-requirements",
+            f"Installing requirements for '{plugin_id}' (if needed)",
+            plugin_id=plugin_id,
+            loaded=idx,
+            total=len(plugin_load_specs),
+        )
         _install_requirements(plugin_dir, plugin_id)
 
         # Add plugin directory to sys.path so the plugin's bare
@@ -352,6 +403,13 @@ def load_plugins(app: FastAPI, context: dict):
         # Load routes using importlib to avoid module name collisions
         routes_file = manifest.get("routes")
         if routes_file:
+            _emit_progress(
+                "plugin-routes",
+                f"Loading routes for '{plugin_id}'",
+                plugin_id=plugin_id,
+                loaded=idx,
+                total=len(plugin_load_specs),
+            )
             try:
                 # Escape `.` in plugin_id the same way load_sibling
                 # does. Without it, a plugin id like
@@ -372,6 +430,14 @@ def load_plugins(app: FastAPI, context: dict):
                     print(f"[Plugin] Loaded routes for '{plugin_id}'")
             except Exception as e:
                 print(f"[Plugin] Failed to load routes for '{plugin_id}': {e}")
+                _emit_progress(
+                    "plugin-error",
+                    f"Failed loading routes for '{plugin_id}'",
+                    plugin_id=plugin_id,
+                    loaded=idx,
+                    total=len(plugin_load_specs),
+                    error=str(e),
+                )
                 import traceback
                 traceback.print_exc()
 
@@ -392,6 +458,20 @@ def load_plugins(app: FastAPI, context: dict):
             "_manifest": manifest,
         })
         print(f"[Plugin] Registered '{plugin_id}' ({manifest.get('name', '')})")
+        _emit_progress(
+            "plugin-registered",
+            f"Registered plugin '{plugin_id}'",
+            plugin_id=plugin_id,
+            loaded=idx + 1,
+            total=len(plugin_load_specs),
+        )
+
+    _emit_progress(
+        "plugins-complete",
+        f"Loaded {len(plugin_load_specs)} plugin(s)",
+        loaded=len(plugin_load_specs),
+        total=len(plugin_load_specs),
+    )
 
 
 def _check_plugin_update(plugin_dir: Path) -> dict | None:

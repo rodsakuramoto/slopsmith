@@ -460,6 +460,31 @@ def _extract_meta_for_file(psarc_path: Path) -> dict:
 _SCAN_STATUS_INIT = {"running": False, "stage": "idle", "total": 0, "done": 0, "current": "", "error": None}
 _scan_status = dict(_SCAN_STATUS_INIT)
 
+_STARTUP_STATUS_INIT = {
+    "running": True,
+    "phase": "booting",
+    "message": "Starting Slopsmith server...",
+    "current_plugin": "",
+    "loaded": 0,
+    "total": 0,
+    "error": None,
+}
+_startup_status = dict(_STARTUP_STATUS_INIT)
+_startup_status_lock = threading.Lock()
+
+
+def _set_startup_status(**updates):
+    global _startup_status
+    with _startup_status_lock:
+        next_status = dict(_startup_status)
+        next_status.update(updates)
+        _startup_status = next_status
+
+
+def _get_startup_status():
+    with _startup_status_lock:
+        return dict(_startup_status)
+
 
 def _background_scan():
     """Scan all PSARCs and cache metadata on startup. Uses thread pool for parallelism."""
@@ -564,14 +589,74 @@ register_plugin_api(app)
 
 @app.on_event("startup")
 def startup_events():
-    # Load plugins in background after server starts
-    load_plugins(app, {
+    _set_startup_status(
+        running=True,
+        phase="starting",
+        message="Core server ready. Starting plugin loader...",
+        error=None,
+    )
+
+    plugin_context = {
         "config_dir": CONFIG_DIR,
         "get_dlc_dir": _get_dlc_dir,
         "extract_meta": _extract_meta_for_file,
         "meta_db": meta_db,
         "get_sloppak_cache_dir": lambda: SLOPPAK_CACHE_DIR,
-    })
+    }
+
+    # Load plugins asynchronously so HTTP routes and the desktop window can
+    # come up immediately while heavy plugin imports/install steps continue.
+    def _load_plugins_background():
+        try:
+            def _on_progress(event: dict):
+                total = int(event.get("total") or 0)
+                loaded = int(event.get("loaded") or 0)
+                plugin_id = event.get("plugin_id") or ""
+                message = event.get("message") or "Loading plugins..."
+                phase = event.get("phase") or "plugins-loading"
+                error = event.get("error")
+                _set_startup_status(
+                    running=phase != "plugins-complete",
+                    phase=phase,
+                    message=message,
+                    current_plugin=plugin_id,
+                    loaded=loaded,
+                    total=total,
+                    error=error,
+                )
+
+            _set_startup_status(
+                running=True,
+                phase="plugins-loading",
+                message="Loading plugins...",
+                current_plugin="",
+                loaded=0,
+                total=0,
+                error=None,
+            )
+            load_plugins(app, plugin_context, progress_cb=_on_progress)
+            status = _get_startup_status()
+            _set_startup_status(
+                running=False,
+                phase="complete",
+                message="Startup complete",
+                current_plugin="",
+                loaded=status.get("loaded", 0),
+                total=max(status.get("total", 0), status.get("loaded", 0)),
+                error=status.get("error"),
+            )
+        except Exception as e:
+            _set_startup_status(
+                running=False,
+                phase="error",
+                message="Plugin startup failed",
+                error=str(e),
+            )
+            import traceback
+            traceback.print_exc()
+
+    threading.Thread(target=_load_plugins_background, daemon=True).start()
+
     # Start background metadata scan
     startup_scan()
 
@@ -613,6 +698,11 @@ def get_version():
 @app.get("/api/scan-status")
 def scan_status():
     return _scan_status
+
+
+@app.get("/api/startup-status")
+def startup_status():
+    return _get_startup_status()
 
 
 @app.post("/api/rescan")
