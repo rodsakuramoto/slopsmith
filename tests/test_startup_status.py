@@ -5,6 +5,7 @@ the async plugin-loading PR (slopsmith#115).
 
 import importlib
 import sys
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,11 +15,12 @@ from fastapi.testclient import TestClient
 def client(tmp_path, monkeypatch):
     """TestClient with CONFIG_DIR isolated in a per-test tmp_path.
 
-    The background plugin-loader and metadata-scan startup tasks are stubbed
-    to no-ops so tests can write and immediately read _startup_status without
-    racing against concurrent worker updates.  The stubs replace only the two
-    callables that would otherwise mutate shared state, leaving TestClient /
-    AnyIO free to create real threads for their own internal use.
+    Background startup tasks are stubbed to no-ops so the plugin-loader
+    thread finishes near-instantly (load_plugins is a no-op) and then
+    we poll until the thread writes running=False before yielding.  This
+    guarantees no background thread is still calling _set_startup_status
+    when tests write and immediately read the helper / endpoint — making
+    the round-trip and endpoint-reflection tests deterministic.
     """
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     sys.modules.pop("server", None)
@@ -29,6 +31,15 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "load_plugins", lambda *a, **kw: None)
     monkeypatch.setattr(server, "startup_scan", lambda: None)
     test_client = TestClient(server.app)
+    # Wait for the background startup thread to finish (it will since
+    # load_plugins is a no-op, so this completes in milliseconds).
+    # Without this barrier the thread can race against test assertions that
+    # immediately write then read _startup_status.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not server._get_startup_status().get("running", True):
+            break
+        time.sleep(0.01)
     try:
         yield test_client, server
     finally:

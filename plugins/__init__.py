@@ -542,7 +542,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 spec.loader.exec_module(routes_module)
                 if hasattr(routes_module, "setup"):
                     if route_setup_fn is not None:
-                        route_setup_fn(lambda: routes_module.setup(app, plugin_context))
+                        # Bind routes_module and plugin_context by value so
+                        # the callable is safe regardless of when/how
+                        # route_setup_fn dispatches it — avoids late-binding
+                        # closure bugs if the caller defers execution.
+                        route_setup_fn(lambda rm=routes_module, ctx=plugin_context: rm.setup(app, ctx))
                     else:
                         routes_module.setup(app, plugin_context)
                     print(f"[Plugin] Loaded routes for '{plugin_id}'")
