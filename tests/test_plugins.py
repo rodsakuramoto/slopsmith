@@ -1255,33 +1255,25 @@ def test_bundled_flag_requires_both_in_tree_directory_and_manifest_field(
 
     # In-tree plugin with "bundled": true AND dir name == id → bundled=True.
     assert by_id["real_core"]["bundled"] is True
-    assert by_id["real_core"]["overrides_bundled"] is False
 
     # In-tree plugin without "bundled" field → bundled=False (user clone in plugins/).
     assert by_id["user_in_tree"]["bundled"] is False
-    assert by_id["user_in_tree"]["overrides_bundled"] is False
 
     # In-tree plugin with "bundled": true but dir name ≠ id → bundled=False.
     # (verbatim copy under a different folder; dir name "other_name" ≠ id "real_core_copy")
     assert by_id["real_core_copy"]["bundled"] is False
-    assert by_id["real_core_copy"]["overrides_bundled"] is False
 
     # Plugin from user dir with "bundled": true → bundled=False (manifest field alone insufficient).
     assert by_id["fake_bundled"]["bundled"] is False
-    assert by_id["fake_bundled"]["overrides_bundled"] is False
 
 
 
-def test_bundled_and_overrides_bundled_returned_by_api(tmp_path, reset_plugin_state):
-    """GET /api/plugins must include ``bundled`` and ``overrides_bundled``
-    boolean fields for each plugin.
+def test_bundled_returned_by_api(tmp_path, reset_plugin_state):
+    """GET /api/plugins must include a ``bundled`` boolean field for each plugin.
 
-    - A plugin loaded from a manifest with ``"bundled": true`` must surface
-      ``bundled: true, overrides_bundled: false``.
-    - A user copy that shadows a bundled plugin must surface
-      ``bundled: false, overrides_bundled: true``.
-    - A plain user plugin with no bundled interaction must surface
-      ``bundled: false, overrides_bundled: false``.
+    - A plugin loaded from a manifest with ``"bundled": true`` (in-tree, dir name
+      matches id) must surface ``bundled: true``.
+    - A plain user plugin must surface ``bundled: false``.
     """
     plugins_mod = reset_plugin_state
 
@@ -1295,23 +1287,6 @@ def test_bundled_and_overrides_bundled_returned_by_api(tmp_path, reset_plugin_st
         "nav": None,
         "type": None,
         "bundled": True,
-        "overrides_bundled": False,
-        "has_screen": False,
-        "has_script": False,
-        "has_settings": False,
-        "has_tour": False,
-        "_dir": plugin_dir,
-        "_manifest": {},
-    })
-
-    # User copy overriding a bundled plugin.
-    plugins_mod.LOADED_PLUGINS.append({
-        "id": "highway_3d",
-        "name": "3D Highway (user)",
-        "nav": None,
-        "type": None,
-        "bundled": False,
-        "overrides_bundled": True,
         "has_screen": False,
         "has_script": False,
         "has_settings": False,
@@ -1327,7 +1302,6 @@ def test_bundled_and_overrides_bundled_returned_by_api(tmp_path, reset_plugin_st
         "nav": None,
         "type": None,
         "bundled": False,
-        "overrides_bundled": False,
         "has_screen": False,
         "has_script": False,
         "has_settings": False,
@@ -1343,13 +1317,10 @@ def test_bundled_and_overrides_bundled_returned_by_api(tmp_path, reset_plugin_st
         ids = {p["id"]: p for p in r.json()}
 
         assert ids["core_viz"]["bundled"] is True
-        assert ids["core_viz"]["overrides_bundled"] is False
-
-        assert ids["highway_3d"]["bundled"] is False
-        assert ids["highway_3d"]["overrides_bundled"] is True
+        assert "overrides_bundled" not in ids["core_viz"]
 
         assert ids["my_plugin"]["bundled"] is False
-        assert ids["my_plugin"]["overrides_bundled"] is False
+        assert "overrides_bundled" not in ids["my_plugin"]
     finally:
         client.close()
 

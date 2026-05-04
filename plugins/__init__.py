@@ -811,7 +811,6 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             # role; plugin is still loaded and scripts run, it just
             # doesn't show up in role-specific UIs. See slopsmith#36.
             "type": manifest.get("type"),
-            "overrides_bundled": bool(manifest.get("__overrides_bundled")),
             # Uses the same _is_bundled() helper as the duplicate-skip path.
             # See the helper's docstring for the three-part check that prevents
             # user-installed plugins (cloned into plugins/ or carrying a forged
@@ -923,12 +922,6 @@ def register_plugin_api(app: FastAPI):
                 # render a "Bundled" badge (lock icon) next to the
                 # plugin name in the settings collapsible.
                 "bundled": p.get("bundled", False),
-                # True when this user-installed copy is shadowing a
-                # bundled copy of the same id. Surfaced via the API so
-                # the plugin-list UI can render an "Overriding bundled
-                # core plugin" badge — visible signal of the active
-                # override matching the warning in the server log.
-                "overrides_bundled": p.get("overrides_bundled", False),
                 "has_screen": p["has_screen"],
                 "has_script": p["has_script"],
                 "has_settings": p["has_settings"],
