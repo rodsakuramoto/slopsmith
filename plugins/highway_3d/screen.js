@@ -158,6 +158,7 @@
 
     const DOTS = [3, 5, 7, 9, 12, 15, 17, 19, 21, 24];
     const DDOTS = new Set([12, 24]);
+    const INLAY_LABEL_FRETS = [3, 5, 7, 9, 12, 15, 17, 19, 22, 24];
 
     const FRET_COOLDOWN = 0.5; // seconds a lane fret stays active after last note
 
@@ -2839,6 +2840,17 @@
                 } else {
                     const d = new T.Mesh(dg, dm); d.position.set(cx, my, 0); fretG.add(d);
                 }
+            }
+
+            // Fret inlay number labels — static sprites at inlay positions
+            for (const f of INLAY_LABEL_FRETS) {
+                const lbl = new T.Sprite(txtMat(f, '#7abfcc', false, 'fretRow'));
+                lbl.material.opacity = 0.55;
+                const scale = 3.8 * _textSizeMul;
+                lbl.scale.set(scale * K, scale * K, 1);
+                lbl.position.set(fretMid(f), my, K);
+                lbl.renderOrder = 100;
+                fretG.add(lbl);
             }
         }
 
