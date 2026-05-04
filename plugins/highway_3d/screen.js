@@ -1413,6 +1413,9 @@
         // place — without this the layer stays at its built-in opacity
         // until the next palette change rebuilds buildBoard().
         let stringLineGlows = [];
+        // Fret inlay number label sprites (one per INLAY_LABEL_FRETS entry).
+        // Retained so update() can rescale them live when _textSizeMul changes.
+        let _inlayLabels = [];
         // Scratch Color used by _applyVibrancy() to avoid allocating a
         // fresh THREE.Color each time the user drags a slider.
         // Allocated lazily once Three.js is loaded inside initScene().
@@ -2842,15 +2845,20 @@
                 }
             }
 
-            // Fret inlay number labels — static sprites at inlay positions
+            // Fret inlay number labels — sprites at inlay positions.
+            // Scale uses (0.5 + textSize) directly — _textSizeMul is stale
+            // here (only refreshed at the top of update()); update() will
+            // keep scaling in sync from the first frame onward via _inlayLabels.
+            _inlayLabels = [];
             for (const f of INLAY_LABEL_FRETS) {
                 const lbl = new T.Sprite(txtMat(f, '#7abfcc', false, 'fretRow'));
                 lbl.material.opacity = 0.55;
-                const scale = 3.8 * _textSizeMul;
+                const scale = 3.8 * (0.5 + textSize);
                 lbl.scale.set(scale * K, scale * K, 1);
                 lbl.position.set(fretMid(f), my, K);
-                lbl.renderOrder = 100;
+                lbl.renderOrder = -1;
                 fretG.add(lbl);
+                _inlayLabels.push(lbl);
             }
         }
 
@@ -2884,6 +2892,13 @@
             // textSize ∈ [0,1]; _textSizeMul ∈ [0.5, 1.5] with 0.5 ↦ 1.0×
             // so default behaviour matches what the renderer did pre-slider.
             _textSizeMul = 0.5 + textSize;
+            // Rescale inlay labels to track the live text-size slider.
+            // buildBoard() sets an initial scale using (0.5 + textSize) but
+            // _textSizeMul is only authoritative from here onward.
+            for (const lbl of _inlayLabels) {
+                const s = 3.8 * _textSizeMul * K;
+                lbl.scale.set(s, s, 1);
+            }
             pNote.reset(); pSus.reset(); pSusOutline.reset(); pTechArrow.reset(); pTapChevron.reset(); pLbl.reset();
             pBeat.reset(); pSec.reset();
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
