@@ -158,7 +158,7 @@
 
     const DOTS = [3, 5, 7, 9, 12, 15, 17, 19, 21, 24];
     const DDOTS = new Set([12, 24]);
-    const INLAY_LABEL_FRETS = [3, 5, 7, 9, 12, 15, 17, 19, 22, 24];
+    const INLAY_LABEL_FRETS = [3, 5, 7, 9, 12, 15, 17, 19, 22, 24]; // 22 not 21: intentional display choice
 
     const FRET_COOLDOWN = 0.5; // seconds a lane fret stays active after last note
 
