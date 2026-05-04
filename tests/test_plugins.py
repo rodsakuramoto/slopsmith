@@ -841,12 +841,11 @@ def test_per_plugin_context_does_not_leak_load_sibling_across_plugins(tmp_path, 
 def test_slopsmith_plugins_dir_takes_precedence_over_bundled(
     tmp_path, reset_plugin_state, monkeypatch, caplog
 ):
-    """SLOPSMITH_PLUGINS_DIR is scanned before the in-tree PLUGINS_DIR, so a
-    user-installed plugin with the same id shadows the bundled copy.
+    """Bundled plugins always win over user-installed copies in SLOPSMITH_PLUGINS_DIR.
 
-    This is the mechanism that keeps existing standalone highway_3d installs
-    working unchanged after the plugin was bundled into core (PR 1 of 4,
-    slopsmith#160). A regression here would silently break their setup.
+    Even though SLOPSMITH_PLUGINS_DIR is scanned first, a user-installed copy
+    with the same id as a bundled plugin is evicted in favour of the bundled
+    version. The loader emits a warning naming the ignored user copy.
     """
     plugins = reset_plugin_state
 
@@ -890,24 +889,25 @@ def test_slopsmith_plugins_dir_takes_precedence_over_bundled(
     finally:
         plugins.PLUGINS_DIR = saved_dir
 
-    # User copy must win — setup() from user_dir ran, not bundled_dir.
-    assert fake_app.state.origin == "user"
+    # Bundled copy must win — setup() from bundled_dir ran, not user_dir.
+    assert fake_app.state.origin == "bundled"
     # Exactly one highway_3d entry registered.
     hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
     assert len(hw3d_entries) == 1
-    # The loader emits the bundled-override warning.
+    # The loader emits a warning about the ignored user copy.
     assert (
-        "Bundled plugin 'highway_3d'" in caplog.text
-        and "overridden by user-installed copy" in caplog.text
+        "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
+        and "ignored" in caplog.text
     )
 
 
-def test_bundled_plugin_overridden_by_user_copy_logs_warning_and_sets_flag(
+def test_bundled_plugin_wins_over_user_copy_and_logs_warning(
     tmp_path, reset_plugin_state, monkeypatch, caplog
 ):
-    """When a user-installed copy shadows a manifest-bundled plugin the loader
-    emits the specific override warning and stamps ``__overrides_bundled`` on the
-    kept (user) copy so the frontend can render the amber badge.
+    """Bundled plugin wins over a user-installed copy with the same id.
+
+    The loader emits a warning naming the ignored user copy. The kept entry
+    is the bundled version (bundled=True, dir matches plugin id).
     """
     plugins = reset_plugin_state
 
@@ -920,8 +920,7 @@ def test_bundled_plugin_overridden_by_user_copy_logs_warning_and_sets_flag(
         json.dumps({"id": "highway_3d", "name": "3D Highway", "bundled": True})
     )
 
-    # User-installed copy with the same id in a differently-named directory
-    # (confirms the override is keyed on manifest id, not directory name).
+    # User-installed copy with the same id in a differently-named directory.
     user_dir = tmp_path / "user"
     user_dir.mkdir()
     user_plugin_dir = user_dir / "3dhighway"  # different directory name
@@ -945,36 +944,26 @@ def test_bundled_plugin_overridden_by_user_copy_logs_warning_and_sets_flag(
     hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
     assert len(hw3d_entries) == 1
 
-    # The kept copy must be the user copy (user dir scanned first).
+    # The kept copy must be the bundled version.
     kept = hw3d_entries[0]
-    assert str(kept["_dir"]) == str(user_plugin_dir)
+    assert str(kept["_dir"]) == str(plugin_dir)
+    assert kept.get("bundled") is True
 
-    # The override flag must be stamped on the kept (user) copy.
-    assert kept.get("overrides_bundled") is True
-
-    # The bundled field must be False for the user copy.
-    assert kept.get("bundled") is False
-
-    # The loader must emit the specific override warning.
+    # The loader must emit the specific warning about the ignored user copy.
     assert (
-        "Bundled plugin 'highway_3d'" in caplog.text
-        and "overridden by user-installed copy" in caplog.text
+        "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
+        and "ignored" in caplog.text
     )
 
 
-def test_bundled_plugin_overridden_by_verbatim_copy_sets_flag(
+def test_bundled_plugin_wins_over_verbatim_user_copy(
     tmp_path, reset_plugin_state, monkeypatch, caplog
 ):
-    """A user who copies the in-tree bundled plugin verbatim (keeping
-    ``"bundled": true`` in their copy) still triggers the override warning
-    and gets ``overrides_bundled=True`` + ``bundled=False`` on the kept entry.
+    """Bundled plugin wins even when the user copy verbatim-copied ``"bundled": true``.
 
-    The user copy lives in ``SLOPSMITH_PLUGINS_DIR`` (not in-tree PLUGINS_DIR),
-    so the three-part ``_is_bundled()`` check — ``(in-tree directory) AND
-    manifest.get("bundled") AND (dir name == plugin id)`` — correctly
-    identifies the in-tree copy as the real bundled plugin and the user copy
-    as the override, even though the user copy also carries the
-    ``"bundled": true`` manifest field.
+    The three-part ``_is_bundled()`` check — in-tree directory, manifest field,
+    AND dir name == plugin id — correctly identifies the in-tree copy as
+    bundled and ignores the user copy regardless of its manifest contents.
     """
     plugins = reset_plugin_state
 
@@ -1011,57 +1000,48 @@ def test_bundled_plugin_overridden_by_verbatim_copy_sets_flag(
     hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
     assert len(hw3d_entries) == 1
 
-    # The kept copy is the user copy (user dir scanned first).
+    # The kept copy must be the real bundled version.
     kept = hw3d_entries[0]
-    assert str(kept["_dir"]) == str(user_plugin_dir)
+    assert str(kept["_dir"]) == str(plugin_dir)
+    assert kept.get("bundled") is True
 
-    # The override flag must be set even though the user copy also has bundled=true.
-    assert kept.get("overrides_bundled") is True
-
-    # bundled must be False — the kept copy is a user override, not a real
-    # in-tree bundled plugin, regardless of what its manifest claims.
-    assert kept.get("bundled") is False
-
-    # The loader emits the specific override warning.
+    # The loader emits the warning about the ignored user copy.
     assert (
-        "Bundled plugin 'highway_3d'" in caplog.text
-        and "overridden by user-installed copy" in caplog.text
+        "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
+        and "ignored" in caplog.text
     )
 
 
-def test_bundled_plugin_overridden_by_copy_in_same_plugins_dir(
+def test_bundled_plugin_wins_over_copy_in_same_plugins_dir(
     tmp_path, reset_plugin_state, caplog
 ):
-    """A user who clones an override directly into ``plugins/`` (the documented
-    third-party install location) still gets the override warning and
-    ``overrides_bundled=True``.
+    """Bundled plugin wins even when a user fork sorts alphabetically first.
 
     Both plugins live under the same PLUGINS_DIR, so override detection cannot
     use the directory parent alone. The three-part ``_is_bundled()`` check —
     ``(in-tree dir) AND manifest.get("bundled") AND (dir name == plugin id)`` —
-    identifies the bundled copy, and the user copy (no ``"bundled"`` field, or
-    a different directory name) as the override.
+    identifies the bundled copy and discards the user fork.
 
     Layout mirroring the canonical example from the PR description:
       plugins/3dhighway/   ← user-installed fork (no "bundled" field)
       plugins/highway_3d/  ← bundled core (has "bundled": true, dir name == id)
 
-    ``3dhighway`` sorts before ``highway_3d`` alphabetically and is kept;
-    ``highway_3d`` is the duplicate that should fire the override warning.
+    ``3dhighway`` sorts before ``highway_3d`` alphabetically and is registered
+    first; when ``highway_3d`` arrives it evicts the user fork and wins.
     """
     plugins = reset_plugin_state
 
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
 
-    # User-installed fork — comes first alphabetically, will be kept.
+    # User-installed fork — comes first alphabetically.
     user_plugin_dir = plugins_dir / "3dhighway"
     user_plugin_dir.mkdir()
     (user_plugin_dir / "plugin.json").write_text(
         json.dumps({"id": "highway_3d", "name": "3D Highway (user fork)"})
     )
 
-    # Bundled core — sorts after "3dhighway", will be the duplicate.
+    # Bundled core — sorts after "3dhighway"; evicts the user fork when encountered.
     bundled_plugin_dir = plugins_dir / "highway_3d"
     bundled_plugin_dir.mkdir()
     (bundled_plugin_dir / "plugin.json").write_text(
@@ -1080,28 +1060,27 @@ def test_bundled_plugin_overridden_by_copy_in_same_plugins_dir(
     hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
     assert len(hw3d_entries) == 1
 
-    # The kept copy must be the user fork (alphabetically first).
+    # The bundled copy must win, regardless of alphabetical order.
     kept = hw3d_entries[0]
-    assert str(kept["_dir"]) == str(user_plugin_dir)
+    assert str(kept["_dir"]) == str(bundled_plugin_dir)
 
-    # Override flag and bundled=False on the kept user copy.
-    assert kept.get("overrides_bundled") is True
-    assert kept.get("bundled") is False
+    # Bundled flag set on the kept copy.
+    assert kept.get("bundled") is True
 
-    # The loader emits the specific override warning.
+    # The loader emits the specific warning about the ignored user copy.
     assert (
-        "Bundled plugin 'highway_3d'" in caplog.text
-        and "overridden by user-installed copy" in caplog.text
+        "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
+        and "ignored" in caplog.text
     )
 
 
-def test_bundled_plugin_overridden_by_copy_in_same_plugins_dir_bundled_sorts_first(
+def test_bundled_plugin_wins_over_copy_in_same_plugins_dir_bundled_sorts_first(
     tmp_path, reset_plugin_state, caplog
 ):
-    """Override detection works even when the bundled directory sorts *before*
-    the user directory (i.e., the bundled copy is encountered first).
+    """Bundled plugin wins when it sorts *before* the user directory.
 
-    The user copy must still win regardless of alphabetical sort order.
+    When the bundled copy is encountered first it is registered; the later
+    user copy is discarded with a warning.
 
     Layout where bundled sorts before user:
       plugins/highway_3d/   ← bundled core (has "bundled": true), sorts first
@@ -1138,39 +1117,36 @@ def test_bundled_plugin_overridden_by_copy_in_same_plugins_dir_bundled_sorts_fir
     hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
     assert len(hw3d_entries) == 1
 
-    # The user copy must win even though the bundled copy sorted first.
+    # The bundled copy must win; user fork is discarded.
     kept = hw3d_entries[0]
-    assert str(kept["_dir"]) == str(user_plugin_dir)
+    assert str(kept["_dir"]) == str(bundled_plugin_dir)
 
-    # Override flag and bundled=False on the kept user copy.
-    assert kept.get("overrides_bundled") is True
-    assert kept.get("bundled") is False
+    # Bundled flag set on the kept copy.
+    assert kept.get("bundled") is True
 
-    # The loader emits the specific override warning.
+    # The loader emits the specific warning about the ignored user copy.
     assert (
-        "Bundled plugin 'highway_3d'" in caplog.text
-        and "overridden by user-installed copy" in caplog.text
+        "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
+        and "ignored" in caplog.text
     )
 
 
-def test_bundled_plugin_overridden_by_verbatim_copy_in_same_plugins_dir(
+def test_bundled_plugin_wins_over_verbatim_copy_in_same_plugins_dir(
     tmp_path, reset_plugin_state, caplog
 ):
-    """A user who copies the bundled plugin *verbatim* (keeping ``"bundled": true``)
-    into ``plugins/`` under a **different directory name** is still correctly
-    identified as a user override, not a second bundled copy.
+    """Bundled plugin wins over a verbatim user copy that carries ``"bundled": true``.
 
     The three-part ``_is_bundled()`` check — in-tree directory, manifest field,
-    AND directory-name-matches-plugin-id — is what distinguishes the real core
-    copy from this verbatim clone.
+    AND directory-name-matches-plugin-id — correctly identifies the real core
+    copy and rejects the verbatim clone (dir name ≠ plugin id).
 
     Layout:
       plugins/highway_3d/   ← bundled core (has "bundled": true, dir name == id)
       plugins/zzz-highway/  ← verbatim user copy (has "bundled": true, dir name ≠ id)
 
     ``highway_3d`` sorts before ``zzz-highway``; the bundled copy is encountered
-    first. When the user copy arrives it matches ``kept_is_bundled`` → the user
-    copy evicts the bundled one and is registered as the active plugin.
+    first. When the user copy arrives it is not truly bundled (dir name mismatch)
+    and is discarded with a warning.
     """
     plugins = reset_plugin_state
 
@@ -1203,18 +1179,17 @@ def test_bundled_plugin_overridden_by_verbatim_copy_in_same_plugins_dir(
     hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
     assert len(hw3d_entries) == 1
 
-    # The user copy (zzz-highway) must win even though it also carries "bundled": true.
+    # The real bundled copy (highway_3d) must win; the verbatim clone is discarded.
     kept = hw3d_entries[0]
-    assert str(kept["_dir"]) == str(user_plugin_dir)
+    assert str(kept["_dir"]) == str(bundled_plugin_dir)
 
-    # override flag set; bundled must be False (dir name "zzz-highway" ≠ "highway_3d").
-    assert kept.get("overrides_bundled") is True
-    assert kept.get("bundled") is False
+    # Bundled flag set on the kept copy.
+    assert kept.get("bundled") is True
 
-    # Override warning must be emitted.
+    # Warning about the ignored user copy must be emitted.
     assert (
-        "Bundled plugin 'highway_3d'" in caplog.text
-        and "overridden by user-installed copy" in caplog.text
+        "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
+        and "ignored" in caplog.text
     )
 
 
