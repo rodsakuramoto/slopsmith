@@ -27,6 +27,10 @@
     <link rel="stylesheet" href="/static/style.css">
     <link rel="stylesheet" href="/static/vendor/shepherd.css">
     <link rel="stylesheet" href="/static/tour-engine.css">
+    <!-- Diagnostics console capture must wrap console.* before any other
+         script logs anything; load it as early as possible. See
+         docs/diagnostics-bundle-spec.md (slopsmith#166). -->
+    <script src="/static/diagnostics.js"></script>
 </head>
 <body class="bg-dark-900 text-gray-200 font-display">
 
@@ -287,6 +291,25 @@
                                 <span id="backup-status" class="text-xs text-gray-500"></span>
                             </div>
                             <p class="text-xs text-gray-600 mt-1">Export bundles server config, browser preferences, and opted-in plugin data into one JSON file. Import overwrites current settings and reloads.</p>
+                        </div>
+                        <!-- ── Diagnostics (slopsmith#166) ────────────────────── -->
+                        <div>
+                            <label class="text-sm font-medium text-gray-400 mb-2 block">Diagnostics</label>
+                            <div class="grid grid-cols-2 gap-2 mb-3 text-xs text-gray-400">
+                                <label class="flex items-center gap-2"><input type="checkbox" id="diag-incl-system" checked class="rounded border-gray-600 bg-dark-700 text-accent"> System info</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" id="diag-incl-hardware" checked class="rounded border-gray-600 bg-dark-700 text-accent"> Hardware (CPU/GPU/RAM)</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" id="diag-incl-logs" checked class="rounded border-gray-600 bg-dark-700 text-accent"> Server logs (last 5 MB)</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" id="diag-incl-console" checked class="rounded border-gray-600 bg-dark-700 text-accent"> Browser console + errors</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" id="diag-incl-plugins" checked class="rounded border-gray-600 bg-dark-700 text-accent"> Plugin diagnostics</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" id="diag-redact" checked class="rounded border-gray-600 bg-dark-700 text-accent"> Redact paths &amp; song names</label>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <button onclick="previewDiagnostics()" id="btn-diag-preview" class="bg-dark-600 hover:bg-dark-500 px-5 py-2.5 rounded-xl text-sm text-gray-300 transition">Preview Bundle</button>
+                                <button onclick="exportDiagnostics()" id="btn-diag-export" class="bg-dark-600 hover:bg-dark-500 px-5 py-2.5 rounded-xl text-sm text-gray-300 transition">Export Diagnostics</button>
+                                <span id="diag-status" class="text-xs text-gray-500"></span>
+                            </div>
+                            <p class="text-xs text-gray-600 mt-1">Bundles server logs, hardware info, plugin inventory, and the browser console transcript into one zip for bug reports. Redaction strips DLC paths, song filenames, and IP addresses by default. Attach to GitHub issues; AI agents can parse the included <code>manifest.json</code>.</p>
+                            <div id="diag-preview" class="hidden mt-3 bg-dark-700 border border-gray-800 rounded-xl p-3 text-xs text-gray-400 max-h-96 overflow-auto"></div>
                         </div>
                         <div id="settings-status" class="text-sm text-gray-500"></div>
                     </div>

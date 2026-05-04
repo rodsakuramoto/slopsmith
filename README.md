@@ -104,6 +104,26 @@ Control log verbosity and format via environment variables:
 | `LOG_FORMAT` | `text` | `text` for coloured console output; `json` for structured output (Loki, ELK, Promtail) |
 | `LOG_FILE` | *(unset)* | If set, also write logs to this path (e.g. `/config/slopsmith.log`) |
 
+### Reporting Bugs / Diagnostics
+
+When you hit a bug, **Settings → Diagnostics → Export Diagnostics** produces a single zip containing everything a maintainer (or AI agent) needs to triage:
+
+- Server logs (tail of `LOG_FILE`)
+- System info (Python, OS, Slopsmith version)
+- Hardware (CPU, RAM, GPU) — works in Docker, Electron (slopsmith-desktop), or bare Python
+- Plugin inventory with git commit SHAs (so we know exactly which build you're on) — including orphaned plugins that failed to load
+- Browser console transcript (all `console.log/info/warn/error/debug` + uncaught errors + promise rejections, last 500 entries)
+- Browser hardware (WebGL renderer, WebGPU adapter)
+- Per-plugin contributed diagnostics (when plugins opt in)
+
+**Privacy:** redaction is on by default. DLC paths, song filenames, IP addresses, and bearer tokens are replaced with stable hashed tokens (`<song:a3f1c2d4>`) before the bundle is created. Click **Preview Bundle** to see exactly what's about to be exported.
+
+Set `LOG_FILE` first if you want server logs included — without it the bundle still ships system + hardware + browser console, but the `logs/` section will be empty.
+
+The bundle layout and per-file schemas are fully documented in [`docs/diagnostics-bundle-spec.md`](docs/diagnostics-bundle-spec.md). Top-level `manifest.json` carries a `schema` field on every JSON data file so AI agents can dispatch by version.
+
+Attach the zip to a GitHub issue or share with whoever's helping you debug.
+
 ### Docker Compose Example
 
 ```yaml

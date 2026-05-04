@@ -45,6 +45,10 @@ Plugins are the primary extension point. Each plugin lives in `plugins/<name>/` 
   "settings": {
     "html": "settings.html",
     "server_files": ["my_plugin.db", "my_plugin_models/"]
+  },
+  "diagnostics": {
+    "server_files": ["my_plugin.diag.json"],
+    "callable": "diagnostics:collect"
   }
 }
 ```
@@ -59,6 +63,17 @@ All fields except `id` and `name` are optional. Plugins can have any combination
 - Files are encoded as `{"encoding": "json", "data": <parsed>}` for `.json` files that parse cleanly (diff-friendly), `{"encoding": "base64", "data": "..."}` otherwise (sqlite, model blobs, IRs).
 - Plugins own their internal data migration. Importing a bundle whose data schema predates your current code restores bytes verbatim — your plugin must cope at next load.
 - Symlinks are skipped on export and never followed on import.
+
+`diagnostics` is the **opt-in** for the troubleshooting bundle (slopsmith#166 — Settings → Export Diagnostics). Two independent fields:
+- `diagnostics.server_files` — same allowlist semantics as `settings.server_files`: relpaths under `context["config_dir"]`, no `..`, no abs paths, no backslashes, no leading dots. Files listed here are copied verbatim into `plugins/<plugin_id>/<relpath>` inside the bundle. Use this for snapshot-style state (small DB excerpts, model lists, last-error files).
+- `diagnostics.callable` — `"<module>:<function>"` (e.g. `"diagnostics:collect"`). Resolved lazily via `load_sibling` when the user clicks Export, then called as `func({"plugin_id": "...", "config_dir": Path(...)})`. Return `dict`/`list` → written to `plugins/<id>/callable.json`; `bytes` → `callable.bin`; `str` → `callable.txt`. Exceptions are caught and appended to the bundle's `manifest.notes` — a buggy plugin never crashes the export.
+
+Plugins that omit the field contribute nothing to the bundle from the backend side. Frontend plugins can independently push state via `window.slopsmith.diagnostics.contribute(plugin_id, payload)` from their `screen.js` before the user hits Export. Bundle layout + per-file schemas: [docs/diagnostics-bundle-spec.md](docs/diagnostics-bundle-spec.md).
+
+Best practices:
+- Embed your own `schema` field (e.g. `"my_plugin.diag.v1"`) in JSON returned by `callable` so future tooling can dispatch by version.
+- Keep payloads small (< 100 KB). Diagnostics are not a backup channel — that's `settings.server_files`.
+- Don't include user secrets, API keys, or session tokens. The bundle is shared with maintainers / posted to GitHub issues.
 
 `type` is an optional role hint (slopsmith#36). Supported values:
 - `"visualization"` — plugin provides a highway renderer. Declaring this makes the plugin eligible for the main-player viz picker AND splitscreen's per-panel picker. Must pair with a `window.slopsmithViz_<id>` factory exporting the setRenderer contract below.
@@ -264,6 +279,20 @@ if __name__ == "__main__":
     import logging
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 ```
+
+### Diagnostics contribution from frontend (slopsmith#166)
+
+Plugins that hold useful debug state in the browser (active model name, last user input, internal counters) can push it into the diagnostics bundle by calling `window.slopsmith.diagnostics.contribute(plugin_id, payload)` at any time. The contribution API is idempotent — repeated calls overwrite the previous value. Whatever was last contributed before the user hits Export Diagnostics is what lands in `plugins/<plugin_id>/client.json`.
+
+```js
+window.slopsmith.diagnostics.contribute('my_plugin', {
+    schema: 'my_plugin.client_diag.v1',
+    active_preset: getActivePreset(),
+    last_error: _lastError,
+});
+```
+
+Loaded from `static/diagnostics.js` ASAP in `<head>` so the console-wrap is in place before any other script runs. Available on the `window.slopsmith.diagnostics` namespace alongside `snapshotConsole()`, `snapshotHardware()`, `snapshotUa()`, `snapshotLocalStorage()`, `snapshotContributions()`. Keep your payload small (< 100 KB) and don't include secrets — bundles are shared with maintainers.
 
 ### General plugin guidelines
 

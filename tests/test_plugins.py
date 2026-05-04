@@ -986,6 +986,65 @@ def test_list_plugins_includes_has_tour(tour_client):
     assert ids["no_tour"]["has_tour"] is False
 
 
+def test_list_plugins_version_field(tmp_path, reset_plugin_state):
+    """GET /api/plugins must include a `version` field for each plugin.
+
+    A plugin that declares ``version`` in its manifest must surface it;
+    a plugin that omits the field must return ``None`` (not raise).
+    """
+    plugins_mod = reset_plugin_state
+
+    versioned_dir = tmp_path / "versioned"
+    versioned_dir.mkdir()
+    (versioned_dir / "plugin.json").write_text(
+        json.dumps({"id": "versioned", "name": "Versioned", "version": "1.2.3"})
+    )
+
+    unversioned_dir = tmp_path / "unversioned"
+    unversioned_dir.mkdir()
+    (unversioned_dir / "plugin.json").write_text(
+        json.dumps({"id": "unversioned", "name": "Unversioned"})
+    )
+
+    plugins_mod.LOADED_PLUGINS.append({
+        "id": "versioned",
+        "name": "Versioned",
+        "nav": None,
+        "type": None,
+        "has_screen": False,
+        "has_script": False,
+        "has_settings": False,
+        "has_tour": False,
+        "_dir": versioned_dir,
+        "_manifest": {"version": "1.2.3"},
+    })
+    plugins_mod.LOADED_PLUGINS.append({
+        "id": "unversioned",
+        "name": "Unversioned",
+        "nav": None,
+        "type": None,
+        "has_screen": False,
+        "has_script": False,
+        "has_settings": False,
+        "has_tour": False,
+        "_dir": unversioned_dir,
+        "_manifest": {},
+    })
+
+    client = _make_api_client(plugins_mod)
+    try:
+        r = client.get("/api/plugins")
+        assert r.status_code == 200
+        plugins_list = r.json()
+        ids = {p["id"]: p for p in plugins_list}
+        assert "version" in ids["versioned"], "version key must be present"
+        assert ids["versioned"]["version"] == "1.2.3"
+        assert "version" in ids["unversioned"], "version key must be present even when absent from manifest"
+        assert ids["unversioned"]["version"] is None
+    finally:
+        client.close()
+
+
 def test_tour_json_serves_file(tour_client):
     """GET /api/plugins/{id}/tour.json returns file content as JSON for a plugin with a tour."""
     client, _ = tour_client

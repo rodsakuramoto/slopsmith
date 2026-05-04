@@ -323,6 +323,110 @@ def _normalize_export_paths(settings_field, plugin_id: str) -> list[str]:
     return cleaned
 
 
+def _normalize_diagnostics_paths(diagnostics_field, plugin_id: str) -> list[str]:
+    """Validate and normalize a plugin's `diagnostics.server_files`
+    manifest list. Mirrors `_normalize_export_paths` semantics — the
+    diagnostics export reads files using the same allowlist rules so
+    every entry that passes here is safe for the bundle assembler to
+    open without re-validating. Returns `[]` when the manifest doesn't
+    declare any diagnostic files.
+    """
+    if not isinstance(diagnostics_field, dict):
+        return []
+    raw = diagnostics_field.get("server_files")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        log.warning(
+            "Plugin %r: diagnostics.server_files must be a list, got %s; ignoring",
+            plugin_id, type(raw).__name__,
+        )
+        return []
+    cleaned: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry:
+            log.warning(
+                "Plugin %r: dropping non-string / empty diagnostics.server_files entry %r",
+                plugin_id, entry,
+            )
+            continue
+        if entry != entry.strip():
+            log.warning(
+                "Plugin %r: dropping diagnostics.server_files entry with leading/trailing whitespace %r",
+                plugin_id, entry,
+            )
+            continue
+        if "\\" in entry:
+            log.warning(
+                "Plugin %r: diagnostics.server_files entry must use POSIX separators, dropping %r",
+                plugin_id, entry,
+            )
+            continue
+        is_dir = entry.endswith("/")
+        body = entry.rstrip("/")
+        if not body:
+            log.warning("Plugin %r: dropping empty diagnostics.server_files entry", plugin_id)
+            continue
+        parts = body.split("/")
+        if (
+            body.startswith("/")
+            or (len(body) >= 2 and body[1] == ":")
+            or any(part in ("", ".", "..") for part in parts)
+            or parts[0].startswith(".")
+        ):
+            log.warning(
+                "Plugin %r: dropping unsafe diagnostics.server_files entry %r "
+                "(absolute / traversal / dotfile / empty segment)",
+                plugin_id, entry,
+            )
+            continue
+        cleaned.append(body + ("/" if is_dir else ""))
+    return cleaned
+
+
+def _parse_diagnostics_callable(diagnostics_field, plugin_id: str) -> str | None:
+    """Validate `diagnostics.callable` shape (`"<module>:<function>"`)
+    and return the literal spec string. Resolution happens lazily when
+    the export endpoint actually needs the callable, so a missing
+    sibling at load time doesn't fail plugin registration.
+    """
+    if not isinstance(diagnostics_field, dict):
+        return None
+    spec = diagnostics_field.get("callable")
+    if spec is None:
+        return None
+    if not isinstance(spec, str) or ":" not in spec:
+        log.warning(
+            "Plugin %r: diagnostics.callable must be a string of the form "
+            "'<module>:<function>', got %r; ignoring",
+            plugin_id, spec,
+        )
+        return None
+    module_name, _, fn_name = spec.partition(":")
+    if not module_name or not fn_name:
+        log.warning(
+            "Plugin %r: diagnostics.callable %r is missing module or function name; ignoring",
+            plugin_id, spec,
+        )
+        return None
+    # Validate module_name matches load_sibling() constraints: bare name,
+    # no dots, no slashes, no .py suffix.  A malformed spec would only
+    # surface as an error at export time; reject it here consistently.
+    if (
+        "/" in module_name
+        or "\\" in module_name
+        or "." in module_name
+        or module_name.endswith(".py")
+    ):
+        log.warning(
+            "Plugin %r: diagnostics.callable module %r must be a bare "
+            "module name (no dots, slashes, or .py suffix); ignoring",
+            plugin_id, module_name,
+        )
+        return None
+    return spec
+
+
 def _install_requirements(plugin_dir: Path, plugin_id: str):
     """Install plugin requirements.txt to a persistent location."""
     req_file = plugin_dir / "requirements.txt"
@@ -633,6 +737,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             # plugins that don't declare `settings.server_files`. See
             # slopsmith#113.
             "_export_paths": _normalize_export_paths(manifest.get("settings"), plugin_id),
+            # Diagnostics opt-in (slopsmith#166): same allowlist semantics
+            # as `_export_paths` but for the troubleshooting bundle.
+            "_diagnostics_paths": _normalize_diagnostics_paths(manifest.get("diagnostics"), plugin_id),
+            "_diagnostics_callable_spec": _parse_diagnostics_callable(manifest.get("diagnostics"), plugin_id),
+            "_load_sibling": plugin_context["load_sibling"],
             "_dir": plugin_dir,
             "_manifest": manifest,
         })
@@ -706,6 +815,11 @@ def register_plugin_api(app: FastAPI):
             {
                 "id": p["id"],
                 "name": p["name"],
+                # Surface the manifest's `version` field (free-form
+                # semver string) so diagnostics bundles + the future
+                # plugin marketplace can identify exactly which build
+                # is loaded. None when the plugin omits the field.
+                "version": (p.get("_manifest") or {}).get("version"),
                 "nav": p["nav"],
                 # type is None for plugins without the manifest hint —
                 # frontend filters like "give me all type=visualization"
