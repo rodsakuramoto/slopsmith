@@ -6,6 +6,7 @@ the async plugin-loading PR (slopsmith#115).
 import importlib
 import json
 import sys
+import threading
 import time
 import asyncio
 
@@ -47,7 +48,7 @@ _FAKE_PLUGIN_ERROR_EVENTS = [
 
 
 @pytest.fixture()
-def client(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch, isolate_logging):
     """TestClient with CONFIG_DIR isolated in a per-test tmp_path.
 
     SLOPSMITH_SYNC_STARTUP=1 makes the plugin-loader run synchronously
@@ -587,3 +588,373 @@ def test_startup_status_endpoint_background_thread_failure(tmp_path, monkeypatch
         if conn is not None:
             conn.close()
 
+
+# ── /api/startup-status/stream SSE endpoint ──────────────────────────────────
+
+def _drain_sse(response) -> list[dict]:
+    """Read all SSE data events from a streaming response and return decoded dicts.
+
+    Keepalive events (``{"type": "keepalive"}``) are filtered out so callers
+    can assert on the actual status events without accounting for timing-driven
+    keepalive frames that may or may not appear during a test run.
+    """
+    events = []
+    for raw in response.iter_lines():
+        line = raw.decode() if isinstance(raw, bytes) else raw
+        line = line.strip()
+        if line.startswith("data:"):
+            try:
+                obj = json.loads(line[5:].strip())
+                if obj.get("type") != "keepalive":
+                    events.append(obj)
+            except json.JSONDecodeError:
+                pass
+    return events
+
+
+def test_sse_stream_returns_200(client):
+    tc, server = client
+    server._set_startup_status(running=False, phase="complete", message="done",
+                               current_plugin="", loaded=1, total=1, error=None)
+    with tc.stream("GET", "/api/startup-status/stream") as r:
+        assert r.status_code == 200
+        assert "text/event-stream" in r.headers.get("content-type", "")
+        assert r.headers.get("x-accel-buffering", "").lower() == "no"
+        _drain_sse(r)
+
+
+def test_sse_stream_delivers_initial_snapshot(client):
+    """Connecting to the stream receives the current status as the first event."""
+    tc, server = client
+    server._set_startup_status(running=False, phase="complete", message="all done",
+                               current_plugin="", loaded=5, total=5, error=None)
+    with tc.stream("GET", "/api/startup-status/stream") as r:
+        events = _drain_sse(r)
+    assert events, "expected at least one SSE event"
+    first = events[0]
+    assert first["phase"] == "complete"
+    assert first["running"] is False
+    assert first["loaded"] == 5
+
+
+def test_sse_stream_closes_after_terminal_event(client):
+    """Stream ends on its own when the status is already not-running."""
+    tc, server = client
+    server._set_startup_status(running=False, phase="complete", message="done",
+                               current_plugin="", loaded=2, total=2, error=None)
+    with tc.stream("GET", "/api/startup-status/stream") as r:
+        events = _drain_sse(r)
+    # The last event must be terminal (running=False).
+    assert events
+    assert events[-1]["running"] is False
+
+
+def test_sse_stream_subscriber_cleaned_up_after_stream(client):
+    """Subscriber queue is removed from _startup_sse_subscribers when the stream ends."""
+    tc, server = client
+    server._set_startup_status(running=False, phase="complete", message="done",
+                               current_plugin="", loaded=3, total=3, error=None)
+    before = len(server._startup_sse_subscribers)
+    with tc.stream("GET", "/api/startup-status/stream") as r:
+        _drain_sse(r)
+    after = len(server._startup_sse_subscribers)
+    assert after == before
+
+
+def test_sse_stream_delivers_pushed_event(client):
+    """Events pushed via _set_startup_status after the connection opens are fan-out delivered."""
+    tc, server = client
+    server._set_startup_status(running=True, phase="plugins-loading", message="loading",
+                               current_plugin="", loaded=1, total=3, error=None)
+
+    # Background thread waits until the subscriber queue appears AND has consumed
+    # the initial snapshot (queue empty), then pushes the terminal update.  The
+    # queue-empty check avoids a race where put_nowait coalesces the terminal
+    # onto the still-unread initial snapshot, making len(events) >= 2 flaky.
+    thread_exc: list[BaseException] = []
+
+    def _push_terminal():
+        try:
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                with server._startup_sse_lock:
+                    qs = list(server._startup_sse_subscribers)
+                if qs:
+                    break
+                time.sleep(0.01)
+            assert server._startup_sse_subscribers, "Subscriber never appeared within deadline"
+            while time.monotonic() < deadline:
+                with server._startup_sse_lock:
+                    qs = list(server._startup_sse_subscribers)
+                if all(q.qsize() == 0 for q in qs):
+                    break
+                time.sleep(0.01)
+            server._set_startup_status(running=False, phase="complete", message="done",
+                                       current_plugin="", loaded=3, total=3, error=None)
+        except BaseException as exc:
+            thread_exc.append(exc)
+            raise
+
+    t = threading.Thread(target=_push_terminal, daemon=True)
+    t.start()
+
+    with tc.stream("GET", "/api/startup-status/stream") as r:
+        events = _drain_sse(r)
+
+    t.join(timeout=5.0)
+    assert not thread_exc, str(thread_exc[0])
+    assert not t.is_alive(), "pusher thread did not finish in time"
+    # Must have at least 2 events: initial snapshot (running=True) + pushed terminal (running=False)
+    assert len(events) >= 2
+    assert events[-1]["running"] is False
+    assert events[-1]["phase"] == "complete"
+
+
+def test_sse_stream_subscriber_cleaned_up_mid_startup(client):
+    """Subscriber is removed when the stream terminates while startup was still running.
+
+    With httpx's in-process ASGI transport, closing the stream context before the
+    generator finishes causes httpx to drain all remaining bytes — which never ends
+    for a live SSE generator.  Instead, this test pushes a terminal event from a
+    background thread (simulating server-side completion or a client disconnect where
+    the generator notices via the 2 s poll) and verifies that the `finally` block in
+    `_gen()` removes the subscriber.
+    """
+    tc, server = client
+    server._set_startup_status(running=True, phase="plugins-loading", message="loading",
+                               current_plugin="", loaded=1, total=3, error=None)
+
+    before = len(server._startup_sse_subscribers)
+    thread_exc: list[BaseException] = []
+
+    def _push_terminal():
+        try:
+            # Wait until the new subscriber appears.  Assert so the test fails
+            # loudly if it never does (instead of silently pushing to an already-
+            # terminal snapshot and passing without exercising the cleanup path).
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if len(server._startup_sse_subscribers) > before:
+                    break
+                time.sleep(0.01)
+            assert len(server._startup_sse_subscribers) > before, (
+                "Subscriber never appeared within deadline"
+            )
+            # Wait for the initial snapshot to be consumed before pushing the
+            # terminal so that the two events don't coalesce in the maxsize=1 queue.
+            while time.monotonic() < deadline:
+                with server._startup_sse_lock:
+                    qs = list(server._startup_sse_subscribers)
+                if all(q.qsize() == 0 for q in qs):
+                    break
+                time.sleep(0.01)
+            server._set_startup_status(running=False, phase="complete", message="done",
+                                       current_plugin="", loaded=3, total=3, error=None)
+        except BaseException as exc:
+            thread_exc.append(exc)
+            raise
+
+    t = threading.Thread(target=_push_terminal, daemon=True)
+    t.start()
+
+    with tc.stream("GET", "/api/startup-status/stream") as r:
+        _drain_sse(r)  # blocks until the generator sends running=False and closes
+
+    t.join(timeout=5.0)
+    assert not thread_exc, str(thread_exc[0])
+    assert not t.is_alive(), "pusher thread did not finish in time"
+    assert len(server._startup_sse_subscribers) == before
+
+
+@pytest.mark.anyio
+async def test_sse_disconnect_detected_between_rapid_messages(client):
+    """is_disconnected() is checked after each message, not only on the 2 s idle timeout.
+
+    Starlette's TestClient only delivers http.disconnect AFTER the full response body
+    has been consumed, so this test bypasses TestClient and drives the route handler
+    directly.  A Request subclass that overrides is_disconnected() to return True
+    immediately lets us verify that the post-yield check causes the generator to exit
+    after delivering the initial snapshot (< 500 ms), rather than waiting for the
+    full 2 s idle timeout that the old timeout-only code path would require.
+    """
+    from starlette.requests import Request as StarletteRequest
+
+    _, server_mod = client
+    server_mod._set_startup_status(running=True, phase="plugins-loading", message="loading",
+                                   current_plugin="", loaded=1, total=10, error=None)
+
+    class _AlwaysDisconnectedRequest(StarletteRequest):
+        """Starlette Request whose is_disconnected() immediately returns True."""
+        async def is_disconnected(self) -> bool:
+            return True
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "method": "GET",
+        "path": "/api/startup-status/stream",
+        "raw_path": b"/api/startup-status/stream",
+        "query_string": b"",
+        "headers": [],
+        "http_version": "1.1",
+        "scheme": "http",
+    }
+
+    async def _noop_receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = _AlwaysDisconnectedRequest(scope=scope, receive=_noop_receive)
+
+    before = len(server_mod._startup_sse_subscribers)
+
+    start = time.monotonic()
+    response = await server_mod.startup_status_stream(request)
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+    elapsed = time.monotonic() - start
+
+    # Subscriber cleanup must have happened via the finally block.
+    assert len(server_mod._startup_sse_subscribers) == before
+
+    # With the post-yield is_disconnected() check the generator exits right after
+    # the initial snapshot.  Without it the generator blocks on queue.get() for
+    # the full _SSE_POLL_INTERVAL (2 s) before noticing the disconnect.
+    # 0.5 s is well above the < 1 ms expected path; leaves plenty of headroom
+    # for slow CI while still catching the 2 s regression.
+    _MAX_DISCONNECT_LATENCY_S = 0.5
+    assert elapsed < _MAX_DISCONNECT_LATENCY_S, (
+        f"Generator took {elapsed:.2f}s; post-message is_disconnected() check may be missing"
+    )
+
+
+def test_sse_stream_fan_out_to_multiple_consumers(client):
+    """A single _set_startup_status push is fan-out delivered to ALL concurrent subscribers.
+
+    Two threads each open an independent SSE stream while startup is running.  A third
+    thread waits until both subscribers are registered, then pushes a terminal event via
+    the real _notify_startup_sse / call_soon_threadsafe path.  Both consumers must
+    receive the terminal event.  A bug that used a single shared queue (instead of
+    per-subscriber queues) or that didn't iterate all subscribers would fail this test.
+    """
+    tc, server = client
+    server._set_startup_status(running=True, phase="plugins-loading", message="loading",
+                               current_plugin="", loaded=1, total=3, error=None)
+
+    before = len(server._startup_sse_subscribers)
+    events_a: list = []
+    events_b: list = []
+
+    def _run_consumer(events_list):
+        with tc.stream("GET", "/api/startup-status/stream") as r:
+            events_list.extend(_drain_sse(r))
+
+    both_registered = threading.Event()
+
+    def _push_terminal():
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if len(server._startup_sse_subscribers) >= before + 2:
+                both_registered.set()
+                break
+            time.sleep(0.01)
+        # Wait for both queues to drain (initial snapshots consumed) before
+        # pushing so the terminal isn't coalesced onto an unread snapshot.
+        while time.monotonic() < deadline:
+            with server._startup_sse_lock:
+                qs = list(server._startup_sse_subscribers)
+            if all(q.qsize() == 0 for q in qs):
+                break
+            time.sleep(0.01)
+        server._set_startup_status(running=False, phase="complete", message="done",
+                                   current_plugin="", loaded=3, total=3, error=None)
+
+    ta = threading.Thread(target=_run_consumer, args=(events_a,), daemon=True)
+    tb = threading.Thread(target=_run_consumer, args=(events_b,), daemon=True)
+    tp = threading.Thread(target=_push_terminal, daemon=True)
+    ta.start(); tb.start(); tp.start()
+    ta.join(timeout=10.0); tb.join(timeout=10.0); tp.join(timeout=5.0)
+
+    assert both_registered.is_set(), "Both subscribers not registered within deadline"
+    assert not ta.is_alive(), "consumer A did not finish in time"
+    assert not tb.is_alive(), "consumer B did not finish in time"
+    assert events_a, "consumer A received no events"
+    assert events_b, "consumer B received no events"
+    assert events_a[-1]["running"] is False, "consumer A did not receive the terminal event"
+    assert events_b[-1]["running"] is False, "consumer B did not receive the terminal event"
+
+
+@pytest.mark.anyio
+async def test_sse_stream_emits_keepalive(client, monkeypatch):
+    """data: {"type":"keepalive"} event is emitted when the queue has been idle for _SSE_KA_INTERVAL.
+
+    _SSE_POLL_INTERVAL and _SSE_KA_INTERVAL are patched to sub-second values so the
+    test runs fast.  The generator is driven directly (bypassing TestClient) so that
+    the asyncio Queue lives on the test event loop, enabling direct put_nowait() for
+    clean termination once the keepalive is observed.
+
+    Keepalives are sent as real data events (not SSE comment frames) so that
+    EventSource.onmessage can see them and re-arm the client's liveness deadline.
+    """
+    import asyncio
+    from starlette.requests import Request as StarletteRequest
+
+    _, server_mod = client
+    # Guard: if either constant is renamed the setattr silently becomes a no-op.
+    assert hasattr(server_mod, "_SSE_POLL_INTERVAL"), "_SSE_POLL_INTERVAL missing from server"
+    assert hasattr(server_mod, "_SSE_KA_INTERVAL"), "_SSE_KA_INTERVAL missing from server"
+    monkeypatch.setattr(server_mod, "_SSE_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(server_mod, "_SSE_KA_INTERVAL", 0.1)
+
+    server_mod._set_startup_status(running=True, phase="plugins-loading", message="loading",
+                                   current_plugin="", loaded=1, total=10, error=None)
+
+    async def _noop_receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "method": "GET",
+        "path": "/api/startup-status/stream",
+        "raw_path": b"/api/startup-status/stream",
+        "query_string": b"",
+        "headers": [],
+        "http_version": "1.1",
+        "scheme": "http",
+    }
+    request = StarletteRequest(scope=scope, receive=_noop_receive)
+
+    before = set(server_mod._startup_sse_subscribers)
+    response = await server_mod.startup_status_stream(request)
+    with server_mod._startup_sse_lock:
+        new_queues = server_mod._startup_sse_subscribers - before
+    assert len(new_queues) == 1, "expected exactly one new subscriber queue"
+    our_queue = next(iter(new_queues))
+
+    keepalive_seen = asyncio.Event()
+
+    async def _collect():
+        async for chunk in response.body_iterator:
+            if isinstance(chunk, bytes):
+                chunk = chunk.decode()
+            # Keepalives are data events: data: {"type":"keepalive"}
+            for line in chunk.splitlines():
+                line = line.strip()
+                if line.startswith("data:"):
+                    try:
+                        obj = json.loads(line[5:].strip())
+                        if obj.get("type") == "keepalive":
+                            keepalive_seen.set()
+                    except json.JSONDecodeError:
+                        pass
+
+    async def _push_terminal_after_keepalive():
+        await keepalive_seen.wait()
+        our_queue.put_nowait({
+            "running": False, "phase": "complete", "message": "done",
+            "current_plugin": "", "loaded": 10, "total": 10, "error": None,
+        })
+
+    await asyncio.gather(_collect(), _push_terminal_after_keepalive())
+    assert keepalive_seen.is_set(), "No keepalive data event was emitted"

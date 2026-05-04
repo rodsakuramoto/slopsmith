@@ -3571,7 +3571,57 @@ function setPluginLoadingState(loading, message) {
     mobileNavContainer.innerHTML = '<span class="text-xs text-gray-600 uppercase tracking-wider">Plugins</span>';
 }
 
-async function waitForPluginStartupComplete(timeoutMs = 180000) {
+function _makeTimeoutStatus() {
+    return { running: false, phase: 'timeout', message: 'Plugin startup timed out', error: null, current_plugin: '', loaded: 0, total: 0 };
+}
+
+async function _waitViaSSE(timeoutMs) {
+    if (typeof EventSource === 'undefined') return null;
+    // Must exceed the server's _SSE_KA_INTERVAL (15 s) — keepalives are data
+    // events so onmessage re-arms this timer.  A gap > MSG_DEADLINE_MS means
+    // the proxy is buffering or dropping; fall back to polling.  Update this
+    // if _SSE_KA_INTERVAL in server.py changes.
+    const MSG_DEADLINE_MS = 20000;
+    return new Promise((resolve) => {
+        let resolved = false;
+        let msgDeadlineTimer = null;
+        const armDeadline = () => {
+            clearTimeout(msgDeadlineTimer);
+            msgDeadlineTimer = setTimeout(() => done(null), MSG_DEADLINE_MS);
+        };
+        const done = (result) => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            clearTimeout(msgDeadlineTimer);
+            es.close();
+            resolve(result);
+        };
+        const timer = setTimeout(() => {
+            done(_makeTimeoutStatus());
+        }, timeoutMs);
+        armDeadline(); // deadline for the first message
+        const es = new EventSource('/api/startup-status/stream');
+        // Startup is a one-shot connection; treat any error (including transient
+        // reconnects that EventSource would normally retry) as a signal to fall
+        // back to polling rather than waiting for the browser to retry.
+        es.onerror = () => done(null);
+        es.onmessage = (event) => {
+            armDeadline(); // re-arm on every message — server sends data-level keepalives
+            let status;
+            try { status = JSON.parse(event.data); } catch { return; }
+            if (!status || status.type === 'keepalive') return; // keepalive — deadline re-armed, nothing else to do
+            if (!status.phase) return;
+            const phase = (status.phase || '').trim();
+            const msg = (status.message || '').trim() || 'Loading plugins...';
+            const countMsg = status.total > 0 ? ` (${status.loaded || 0}/${status.total})` : '';
+            setPluginLoadingState(Boolean(status.running), `${msg}${countMsg}`);
+            if (!status.running && (phase === 'complete' || phase === 'error')) done(status);
+        };
+    });
+}
+
+async function _waitViaPolling(timeoutMs) {
     const start = Date.now();
     let last = null;
     let failCount = 0;
@@ -3605,7 +3655,18 @@ async function waitForPluginStartupComplete(timeoutMs = 180000) {
         await new Promise((r) => setTimeout(r, 800));
     }
     setPluginLoadingState(false);
-    return { running: false, phase: 'timeout', message: 'Plugin startup timed out', error: null, current_plugin: '', loaded: 0, total: 0 };
+    return _makeTimeoutStatus();
+}
+
+async function waitForPluginStartupComplete(timeoutMs = 180000) {
+    const start = Date.now();
+    const sseResult = await _waitViaSSE(timeoutMs);
+    if (sseResult !== null) return sseResult;
+    const remaining = Math.max(0, timeoutMs - (Date.now() - start));
+    if (remaining <= 0) {
+        return _makeTimeoutStatus();
+    }
+    return _waitViaPolling(remaining);
 }
 
 let _loadPluginsInFlight = false;

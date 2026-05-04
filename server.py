@@ -16,7 +16,7 @@ log = logging.getLogger("slopsmith.server")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from psarc import unpack_psarc, read_psarc_entries
 from song import load_song, phrase_to_wire, arrangement_string_count
@@ -852,6 +852,15 @@ _STARTUP_STATUS_INIT = {
 _startup_status = dict(_STARTUP_STATUS_INIT)
 _startup_status_lock = threading.Lock()
 
+_startup_sse_subscribers: set[asyncio.Queue] = set()
+# threading.Lock (not asyncio.Lock) — also acquired from background threads
+# in _notify_startup_sse; held only for set mutations (microseconds).
+_startup_sse_lock = threading.Lock()
+_event_loop: asyncio.AbstractEventLoop | None = None
+
+_SSE_POLL_INTERVAL = 2.0    # seconds: idle wait between disconnect checks
+_SSE_KA_INTERVAL = 15.0     # seconds: interval between SSE keepalive data events
+
 
 def _set_startup_status(**updates):
     global _startup_status
@@ -859,6 +868,40 @@ def _set_startup_status(**updates):
         next_status = dict(_startup_status)
         next_status.update(updates)
         _startup_status = next_status
+        snapshot = dict(next_status)
+    _notify_startup_sse(snapshot)
+
+
+def _put_latest(q: asyncio.Queue, snapshot: dict) -> None:
+    """Coalescing put: drain any stale snapshot then put the newest one.
+
+    Because the queue is bounded to maxsize=1 and this function runs on the
+    event loop, consecutive rapid updates replace the queued snapshot with
+    the latest state rather than growing an unbounded backlog.
+    """
+    while not q.empty():
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+    try:
+        q.put_nowait(snapshot)
+    except asyncio.QueueFull:
+        pass  # shouldn't happen after draining, but be defensive
+
+
+def _notify_startup_sse(snapshot: dict) -> None:
+    loop = _event_loop
+    if loop is None or loop.is_closed():
+        return
+    with _startup_sse_lock:
+        for q in _startup_sse_subscribers:
+            try:
+                loop.call_soon_threadsafe(_put_latest, q, snapshot)
+            except RuntimeError:
+                # Loop is closing (shutdown race); all remaining subscribers are
+                # on the same loop and equally unreachable — break is correct.
+                break
 
 
 def _get_startup_status():
@@ -980,6 +1023,8 @@ async def startup_events():
     configure_logging()
 
     loop = asyncio.get_running_loop()
+    global _event_loop
+    _event_loop = loop
 
     _set_startup_status(
         running=True,
@@ -1136,7 +1181,8 @@ async def startup_events():
 @app.on_event("shutdown")
 def shutdown_events():
     """Stop the demo-mode janitor thread (if running) on server shutdown."""
-    global _DEMO_JANITOR_STARTED, _DEMO_JANITOR_THREAD
+    global _DEMO_JANITOR_STARTED, _DEMO_JANITOR_THREAD, _event_loop
+    _event_loop = None  # prevent stale loop reference after shutdown
     if _DEMO_JANITOR_STARTED:
         _DEMO_JANITOR_STOP.set()
         thread = _DEMO_JANITOR_THREAD
@@ -1200,6 +1246,52 @@ def scan_status():
 @app.get("/api/startup-status")
 def startup_status():
     return _get_startup_status()
+
+
+@app.get("/api/startup-status/stream")
+async def startup_status_stream(request: Request):
+    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+    # Register before putting the initial snapshot.  asyncio cooperative
+    # scheduling guarantees _put_latest cannot run between add() and the
+    # put() below: put() on an empty maxsize-1 queue never yields (CPython
+    # fast path), so no event-loop iteration fires in between.  Registering
+    # first ensures a terminal status fired just after connect is never missed.
+    with _startup_sse_lock:
+        _startup_sse_subscribers.add(queue)
+    await queue.put(_get_startup_status())
+
+    async def _gen():
+        since_ka = 0.0
+        try:
+            while True:
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=_SSE_POLL_INTERVAL)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break
+                    since_ka += _SSE_POLL_INTERVAL
+                    if since_ka >= _SSE_KA_INTERVAL:
+                        yield 'data: {"type":"keepalive"}\n\n'
+                        since_ka = 0.0
+                    continue
+                yield f"data: {json.dumps(data)}\n\n"
+                if not data.get("running", True):
+                    break
+                since_ka = 0.0  # reset keepalive timer — a real event just went out
+                # Check after each delivered message so that rapid-fire updates
+                # don't prevent disconnect detection (the timeout path above only
+                # fires when the queue is idle for the full _SSE_POLL_INTERVAL).
+                if await request.is_disconnected():
+                    break
+        finally:
+            with _startup_sse_lock:
+                _startup_sse_subscribers.discard(queue)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/rescan")
