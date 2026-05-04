@@ -324,10 +324,11 @@ function createHighway() {
                 drawFretNumbers(W, H);
 
                 // Plugin draw hooks (same coordinate system as the highway).
-                // Hooks are a 2D-only contract — the default renderer owns
-                // their invocation. Custom renderers on non-2D contexts
-                // (e.g. WebGL) don't call them; the factory doesn't
-                // invoke hooks on their behalf.
+                // The default 2D renderer iterates the list directly here;
+                // custom renderers (e.g. the bundled 3D Highway) invoke
+                // `api.fireDrawHooks(ctx, W, H)` against their own overlay
+                // 2D context after rendering. Either path receives the
+                // same `(ctx, W, H)` callback signature.
                 for (const hook of _drawHooks) {
                     try { hook(ctx, W, H); } catch (e) { /* ignore */ }
                 }
