@@ -1105,6 +1105,14 @@ async def startup_events():
                 if "error" in event:
                     err_val = event["error"]
                     if err_val is not None:
+                        # Pop then re-insert so the key moves to the end of
+                        # insertion order even when this plugin already has an
+                        # entry.  A plugin can emit more than one error during a
+                        # single load (requirements + routes), and dict.update()
+                        # on an existing key does NOT move it to the end, so
+                        # remaining[-1] could return a stale earlier message
+                        # after another plugin clears its own error.
+                        _active_errors.pop(plugin_id, None)
                         _active_errors[plugin_id] = err_val
                         update["error"] = err_val
                     else:

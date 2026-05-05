@@ -1017,10 +1017,18 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         # fail with an import error even when those packages can be installed.
         # Mirror the main load-loop contract: _install_requirements returning
         # False is *non-fatal* (read-only filesystem, optional dep, etc.) —
-        # the main loop emits a plugin-error and continues loading. Treating
-        # it as fatal here would break the fallback for those same tolerated
-        # cases and leave the bundled-failure error unresolved.
-        _install_requirements(ev_dir, evicted_id)
+        # we emit a plugin-error and continue loading, exactly as the main
+        # loop does. Treating it as fatal here would break the fallback for
+        # those same tolerated cases and leave the bundled-failure error
+        # unresolved.
+        ev_req_ok = _install_requirements(ev_dir, evicted_id)
+        if not ev_req_ok:
+            _emit_progress(
+                "plugin-error",
+                f"Failed to install requirements for fallback copy of '{evicted_id}'",
+                plugin_id=evicted_id,
+                error="Requirements installation failed for fallback copy; check server logs",
+            )
         # Purge any sibling modules the failed bundled copy may have loaded.
         # They are cached under the same namespace as what the fallback would use.
         # The parent package is `plugin_{safe_id}`, sibling modules are
@@ -1082,6 +1090,20 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 log.exception(
                     "Fallback user-installed copy of %r also failed to load routes; "
                     "plugin unavailable (not registered).", evicted_id,
+                )
+                # Emit a plugin-error so startup-status reflects the
+                # fallback's failure as the root cause, not the earlier
+                # bundled-copy error. Without this the status stays on the
+                # stale bundled error even though that's no longer the
+                # active failure.
+                _emit_progress(
+                    "plugin-error",
+                    f"Fallback copy of plugin '{evicted_id}' also failed to load routes",
+                    plugin_id=evicted_id,
+                    error=(
+                        f"Both bundled and user-installed copies of '{evicted_id}' "
+                        "failed to load routes; plugin unavailable — check server logs"
+                    ),
                 )
                 # Warn on partial registration in the fallback path too.
                 _fallback_routes_after = len(getattr(app, "routes", []))

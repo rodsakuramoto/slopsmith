@@ -490,6 +490,55 @@ def test_startup_status_two_plugin_errors_one_clears_other_remains(
     )
 
 
+def test_startup_status_latest_error_wins_when_same_plugin_emits_multiple(
+    monkeypatch, startup_harness
+):
+    """When the same plugin emits multiple error events (e.g. requirements
+    failure then routes failure), restoring after another plugin clears must
+    surface the *latest* error from the first plugin, not the first one.
+
+    The dict.update()-in-place approach fails here because assigning a key
+    that already exists does NOT move it to the end of insertion order.
+    The fix (pop + re-insert) guarantees remaining[-1] is always the most
+    recently emitted unresolved failure.
+    (Thread 3, review-4228077246)
+    """
+    server, phases = startup_harness
+
+    _EVENTS = [
+        # plugin_a emits two successive errors.
+        {"phase": "plugin-error", "message": "req failure",
+         "plugin_id": "plugin_a", "loaded": 0, "total": 2,
+         "error": "plugin_a requirements failure"},
+        {"phase": "plugin-error", "message": "routes failure",
+         "plugin_id": "plugin_a", "loaded": 0, "total": 2,
+         "error": "plugin_a routes failure"},
+        # plugin_b fails, then recovers — clears only its own error.
+        {"phase": "plugin-error", "message": "Failed for plugin_b",
+         "plugin_id": "plugin_b", "loaded": 1, "total": 2,
+         "error": "plugin_b route failure"},
+        {"phase": "plugin-registered", "message": "Registered fallback of plugin_b",
+         "plugin_id": "plugin_b", "loaded": 2, "total": 2, "error": None},
+        {"phase": "plugins-complete", "message": "Loaded 1 plugin(s)",
+         "plugin_id": "", "loaded": 1, "total": 2},
+    ]
+
+    def fake_load_plugins(_app, _context, progress_cb=None, route_setup_fn=None):
+        if progress_cb:
+            for event in _EVENTS:
+                progress_cb(event)
+
+    monkeypatch.setattr(server, "load_plugins", fake_load_plugins)
+    asyncio.run(server.startup_events())
+    final = server._get_startup_status()
+
+    # After plugin_b clears its own error, plugin_a's *latest* error (routes
+    # failure) should be surfaced — not the earlier requirements failure.
+    assert final["error"] == "plugin_a routes failure", (
+        f"Expected latest plugin_a error after plugin_b recovery, got {final['error']!r}"
+    )
+
+
 def test_startup_status_e2e_real_plugin_loader(tmp_path, monkeypatch, isolate_logging):
     """Integration: run startup_events() with the REAL load_plugins against a
     minimal test plugin, using the production background-thread code path.

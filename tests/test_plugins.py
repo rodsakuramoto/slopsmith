@@ -1896,6 +1896,11 @@ def test_fallback_proceeds_when_install_requirements_returns_false(
     which skipped the user copy entirely, leaving the bundled-failure error in
     startup-status even when the user copy could have run without those deps.
     (Thread 1, review-4227643820)
+
+    A plugin-error must also be emitted when requirements fail, mirroring the
+    main loop — without it the later clear_error=True makes startup look healthy
+    even though the running plugin may be missing dependencies.
+    (Thread 2, review-4228077246)
     """
     plugins = reset_plugin_state
 
@@ -1928,10 +1933,11 @@ def test_fallback_proceeds_when_install_requirements_returns_false(
 
     fake_app = type("FakeApp", (), {})()
     fake_app.state = type("State", (), {})()
+    events: list = []
     saved_dir = plugins.PLUGINS_DIR
     plugins.PLUGINS_DIR = bundled_dir
     try:
-        plugins.load_plugins(fake_app, {})
+        plugins.load_plugins(fake_app, {}, progress_cb=events.append)
     finally:
         plugins.PLUGINS_DIR = saved_dir
 
@@ -1942,6 +1948,89 @@ def test_fallback_proceeds_when_install_requirements_returns_false(
     entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
     assert entries, "highway_3d must be registered as a fallback"
     assert entries[0].get("fallback") is True
+
+    # A plugin-error must have been emitted for the fallback requirements failure.
+    req_errors = [
+        e for e in events
+        if e.get("phase") == "plugin-error"
+        and e.get("plugin_id") == "highway_3d"
+        and e.get("error")
+    ]
+    assert req_errors, (
+        "Expected at least one plugin-error event for highway_3d fallback requirements failure; "
+        f"events were: {events}"
+    )
+
+
+
+def test_fallback_routes_failure_emits_plugin_error(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """When the fallback user-copy's routes also fail, a plugin-error event
+    must be emitted so startup-status reflects the fallback's failure as the
+    root cause.
+
+    Without this, startup-status is left pointing at the earlier bundled-copy
+    error even though that is no longer the active failure, making it harder
+    for operators to identify the correct root cause.
+    (Thread 1, review-4228077246)
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    (bundled_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('bundled broken')\n"
+    )
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    (user_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('fallback also broken')\n"
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    fake_app = type("FakeApp", (), {})()
+    events: list = []
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {}, progress_cb=events.append)
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    # The plugin must NOT be registered.
+    entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
+    assert not entries, "highway_3d must not be registered when both copies fail"
+
+    # A plugin-error event must have been emitted for the fallback failure.
+    fallback_errors = [
+        e for e in events
+        if e.get("phase") == "plugin-error"
+        and e.get("plugin_id") == "highway_3d"
+        and e.get("error")
+    ]
+    assert fallback_errors, (
+        "Expected at least one plugin-error event when fallback routes also fail; "
+        f"events were: {events}"
+    )
+    # The error message must mention 'Both' or 'fallback' to distinguish it
+    # from the original bundled-failure error.
+    assert any(
+        "fallback" in e["error"].lower() or "both" in e["error"].lower()
+        for e in fallback_errors
+    ), f"plugin-error text should reference the fallback failure; got: {[e['error'] for e in fallback_errors]}"
 
 
 def test_normal_plugins_do_not_have_fallback_field_set(
