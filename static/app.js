@@ -4036,34 +4036,7 @@ async function loadPlugins() {
                     newScript.textContent = oldScript.textContent;
                     oldScript.parentNode.replaceChild(newScript, oldScript);
                 });
-                // Bundled-plugin notice — injected after settings HTML so
-                // it isn't wiped by innerHTML. Bundled plugins always win
-                // over any user-installed copy with the same id; if your
-                // modifications to this plugin are not taking effect, check
-                // the server startup log for a warning naming the ignored copy.
-                if (plugin.bundled) {
-                    const notice = document.createElement('div');
-                    notice.className = 'flex items-start gap-2 rounded p-3 text-xs bg-purple-500/10 border border-purple-400/30 text-purple-300 mt-4';
-                    notice.setAttribute('role', 'note');
-                    const noticeSvgNS = 'http://www.w3.org/2000/svg';
-                    const noticeSvg = document.createElementNS(noticeSvgNS, 'svg');
-                    noticeSvg.setAttribute('class', 'w-4 h-4 shrink-0 mt-0.5');
-                    noticeSvg.setAttribute('fill', 'none');
-                    noticeSvg.setAttribute('stroke', 'currentColor');
-                    noticeSvg.setAttribute('viewBox', '0 0 24 24');
-                    noticeSvg.setAttribute('aria-hidden', 'true');
-                    const noticePath = document.createElementNS(noticeSvgNS, 'path');
-                    noticePath.setAttribute('stroke-linecap', 'round');
-                    noticePath.setAttribute('stroke-linejoin', 'round');
-                    noticePath.setAttribute('stroke-width', '2');
-                    noticePath.setAttribute('d', 'M12 11c1.657 0 3-1.343 3-3V6a3 3 0 10-6 0v2c0 1.657 1.343 3 3 3zM6 11h12a2 2 0 012 2v6a2 2 0 01-2 2H6a2 2 0 01-2-2v-6a2 2 0 012-2z');
-                    noticeSvg.appendChild(noticePath);
-                    const noticeText = document.createElement('span');
-                    noticeText.textContent = 'This plugin is bundled with Slopsmith. Any user-installed copy with the same plugin ID is automatically overridden by this bundled version. Check the server startup log if your modifications are not taking effect.';
-                    notice.appendChild(noticeSvg);
-                    notice.appendChild(noticeText);
-                    body.appendChild(notice);
-                }
+
             }
 
             // Load plugin JS

@@ -673,7 +673,7 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                     )
                     continue
                 else:
-                    log.warning("Skipping duplicate plugin %r from %s", plugin_id, plugins_base_dir)
+                    log.warning("Skipping duplicate plugin %r at %s", plugin_id, plugin_dir)
                     continue
             loaded_ids.add(plugin_id)
             plugin_load_specs.append((plugin_id, plugin_dir, manifest))

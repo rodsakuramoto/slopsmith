@@ -1199,6 +1199,83 @@ def test_bundled_plugin_wins_over_verbatim_copy_in_same_plugins_dir(
     )
 
 
+def test_bundled_wins_with_multiple_stale_copies(
+    tmp_path, reset_plugin_state, monkeypatch, caplog
+):
+    """Bundled plugin wins when multiple stale copies exist simultaneously.
+
+    Exercises the exact #181 layout: the user has both an external
+    ``SLOPSMITH_PLUGINS_DIR/highway_3d`` copy AND a stale in-tree clone at
+    ``plugins/3dhighway``, alongside the real bundled ``plugins/highway_3d``.
+
+    Scan order:
+    1. SLOPSMITH_PLUGINS_DIR scanned first → user_dir/highway_3d registered.
+    2. PLUGINS_DIR scanned next (sorted):
+       - ``3dhighway`` sorts before ``highway_3d`` → duplicate, neither is bundled
+         → discarded with a warning naming the specific plugin_dir.
+       - ``highway_3d`` → bundled; evicts the SLOPSMITH_PLUGINS_DIR copy; wins.
+
+    Both stale paths must be named in warning log messages.
+    """
+    plugins = reset_plugin_state
+
+    # Simulate the in-tree (bundled) plugins directory.
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+
+    # Stale in-tree clone (different dir name; not bundled because dir ≠ id).
+    stale_intree_dir = plugins_dir / "3dhighway"
+    stale_intree_dir.mkdir()
+    (stale_intree_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (stale clone)"})
+    )
+
+    # Real bundled copy.
+    bundled_plugin_dir = plugins_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "bundled": True})
+    )
+
+    # Simulate a user-installed plugins directory (SLOPSMITH_PLUGINS_DIR).
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)"})
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    fake_app = type("FakeApp", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = plugins_dir
+    try:
+        with capture_logger(caplog, "slopsmith.plugins"):
+            plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    # Exactly one entry registered.
+    hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
+    assert len(hw3d_entries) == 1
+
+    # The bundled copy must win.
+    kept = hw3d_entries[0]
+    assert str(kept["_dir"]) == str(bundled_plugin_dir)
+    assert kept.get("bundled") is True
+
+    # The stale in-tree clone path must be named in the log.
+    assert str(stale_intree_dir) in caplog.text
+    # The user-installed copy path must be named in the log (bundled-wins warning).
+    assert (
+        "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
+        and "ignored" in caplog.text
+        and str(user_plugin_dir) in caplog.text
+    )
+
+
 def test_bundled_flag_requires_both_in_tree_directory_and_manifest_field(
     tmp_path, reset_plugin_state, monkeypatch
 ):
