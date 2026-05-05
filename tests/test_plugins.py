@@ -838,7 +838,7 @@ def test_per_plugin_context_does_not_leak_load_sibling_across_plugins(tmp_path, 
 
 # ── SLOPSMITH_PLUGINS_DIR precedence over bundled in-tree plugins ────────────
 
-def test_slopsmith_plugins_dir_takes_precedence_over_bundled(
+def test_bundled_plugin_always_wins_over_slopsmith_plugins_dir_copy(
     tmp_path, reset_plugin_state, monkeypatch, caplog
 ):
     """Bundled plugins always win over user-installed copies in SLOPSMITH_PLUGINS_DIR.

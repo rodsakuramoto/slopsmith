@@ -158,7 +158,6 @@
 
     const DOTS = [3, 5, 7, 9, 12, 15, 17, 19, 21, 24];
     const DDOTS = new Set([12, 24]);
-    const INLAY_LABEL_FRETS = [3, 5, 7, 9, 12, 15, 17, 19, 21, 24]; // matches DOTS so labels sit over their physical inlay spheres
 
     const FRET_COOLDOWN = 0.5; // seconds a lane fret stays active after last note
 
@@ -1413,7 +1412,7 @@
         // place — without this the layer stays at its built-in opacity
         // until the next palette change rebuilds buildBoard().
         let stringLineGlows = [];
-        // Fret inlay number label sprites (one per INLAY_LABEL_FRETS entry).
+        // Fret inlay number label sprites (one per DOTS entry).
         // Retained so update() can rescale them live when _textSizeMul changes.
         let _inlayLabels = [];
         // Cloned SpriteMaterials for the inlay labels — disposed on rebuild and
@@ -2860,7 +2859,7 @@
             for (const m of _inlayMats) m.dispose();
             _inlayMats = [];
             _inlayLabels = [];
-            for (const f of INLAY_LABEL_FRETS) {
+            for (const f of DOTS) {
                 const mat = txtMat(f, '#7abfcc', false, 'fretRow').clone();
                 mat.depthWrite = false;
                 mat.opacity = 0.55;
