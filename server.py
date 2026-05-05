@@ -1075,13 +1075,16 @@ async def startup_events():
                     loaded=loaded,
                     total=total,
                 )
-                # Only forward the error field when the event carries a real
-                # (non-null) error string.  This preserves any previously
-                # reported plugin error across the many subsequent non-error
-                # progress events that follow — without this guard the final
-                # `complete` status would almost always show `error: null`
-                # even when a plugin failed requirements or route setup.
-                if event.get("error") is not None:
+                # Forward the error field only when the event explicitly
+                # carries it.  Two cases:
+                # - Non-null string: set/update the displayed error.
+                # - Explicit null (clear_error=True in _emit_progress):
+                #   clear a previously-reported error when, e.g., a bundled
+                #   failure is resolved by a successful user-copy fallback.
+                # Events that omit the key entirely leave the status unchanged,
+                # preserving any earlier plugin error across the many
+                # non-error progress events that follow normal setup steps.
+                if "error" in event:
                     update["error"] = event["error"]
                 _set_startup_status(**update)
 

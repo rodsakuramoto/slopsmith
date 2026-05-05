@@ -509,7 +509,8 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
     """
 
     def _emit_progress(phase: str, message: str, plugin_id: str = "", loaded: int = 0,
-                       total: int = 0, error: str | None = None):
+                       total: int = 0, error: str | None = None,
+                       clear_error: bool = False):
         if not progress_cb:
             return
         try:
@@ -520,12 +521,19 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 "loaded": loaded,
                 "total": total,
             }
-            # Omit the error key when there is no error so that downstream
-            # consumers using "status.error = event.error" don't accidentally
-            # clear a previously-reported plugin error on the next non-error
-            # progress event.
+            # Include the error key only when meaningful:
+            # - A non-null error string sets/updates the error field.
+            # - clear_error=True sends an explicit null to clear a
+            #   previously-reported error (e.g. bundled failure cleared
+            #   by a successful user-copy fallback). Downstream handlers
+            #   must check `"error" in event`, not `event.get("error") is
+            #   not None`, to receive the clear signal.
+            # - No error kwarg → key is omitted; downstream preserves
+            #   any previously-reported error across non-error events.
             if error is not None:
                 event["error"] = error
+            elif clear_error:
+                event["error"] = None
             progress_cb(event)
         except Exception:
             # Progress reporting must never break plugin startup.
@@ -777,6 +785,10 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 loaded=idx,
                 total=len(plugin_load_specs),
             )
+            # Capture the current route count so we can detect whether
+            # setup() registered any handlers before raising. FastAPI has
+            # no route-removal API, so partial registration is permanent.
+            _routes_before = len(getattr(app, "routes", []))
             try:
                 # Escape `.` in plugin_id the same way load_sibling
                 # does. Without it, a plugin id like
@@ -807,6 +819,17 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             except Exception as e:
                 log.exception("Failed to load routes for plugin %r", plugin_id)
                 _route_failed_ids.add(plugin_id)
+                # Detect partial route registration: if setup() mounted any
+                # handlers before raising, those routes stay permanently (no
+                # FastAPI deregistration API). Warn loudly so maintainers can
+                # identify conflicting endpoints in the server log.
+                _routes_after = len(getattr(app, "routes", []))
+                if _routes_after > _routes_before:
+                    log.warning(
+                        "Plugin %r registered %d route(s) before its setup() raised; "
+                        "these handlers cannot be removed and may conflict with any fallback.",
+                        plugin_id, _routes_after - _routes_before,
+                    )
                 _emit_progress(
                     "plugin-error",
                     f"Failed loading routes for '{plugin_id}'",
@@ -864,12 +887,20 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
     # the server remains functional. A bad bundled release should never
     # leave the plugin completely broken when a working user copy exists.
     #
-    # NOTE: Routes that the broken bundled setup() may have partially
-    # registered before raising cannot be un-registered (FastAPI has no
-    # route-removal API). In practice setup() usually fails before
-    # registering any handlers (import error, missing config), so partial
-    # registration is rare. This is an accepted limitation; the primary
-    # mitigation is thorough testing of bundled releases.
+    # NOTE on partial-registration: if the bundled setup() managed to register
+    # some FastAPI routes before raising, those handlers stay permanently (no
+    # route-removal API). The partial-registration warning above names the
+    # count; the fallback copy's routes then mount alongside them, so duplicate
+    # or conflicting endpoints are possible. This is an accepted limitation;
+    # the primary mitigation is thorough testing of bundled releases.
+    #
+    # NOTE on timeout race: in async mode the bundled setup() runs on the
+    # event-loop thread via route_setup_fn. If it times out (>60 s), the
+    # load_plugins() thread raises TimeoutError and proceeds to activate the
+    # fallback, but the original setup() may still be running concurrently
+    # and can register additional routes after the fallback is already active.
+    # This race is also accepted as a very-unlikely edge case; prefer async-
+    # safe and idempotent setup() implementations in bundled plugins.
     for evicted_id, evicted_spec in _pending_evictions.items():
         if evicted_id not in _route_failed_ids:
             continue
@@ -896,6 +927,23 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         # for it. A user copy that depends on extra packages would otherwise
         # fail with an import error even when those packages can be installed.
         _install_requirements(ev_dir, evicted_id)
+        # Purge any sibling modules the failed bundled copy may have loaded.
+        # They are cached under the same namespace as what the fallback would use.
+        # The parent package is `plugin_{safe_id}`, sibling modules are
+        # `plugin_{safe_id}.{name}` (from load_sibling), and the routes module is
+        # `plugin_{safe_id}_routes` (note the underscore). Clearing all three
+        # patterns ensures the fallback gets a clean slate and doesn't accidentally
+        # resolve bundled helper code that is still cached in sys.modules.
+        _safe_eid = _safe_plugin_id_for_module_name(evicted_id)
+        _parent_pkg = f"plugin_{_safe_eid}"
+        _stale_sibling_keys = [
+            k for k in list(sys.modules)
+            if k == _parent_pkg
+            or k.startswith(f"{_parent_pkg}.")
+            or k.startswith(f"{_parent_pkg}_")
+        ]
+        for _k in _stale_sibling_keys:
+            del sys.modules[_k]
         # Re-load the fallback's routes using the same module-name slot so
         # it naturally replaces the previously-failed bundled module.
         ev_routes_file = ev_manifest.get("routes")
@@ -941,6 +989,20 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 "_manifest": ev_manifest,
             })
             log.info("Registered fallback user copy of plugin %r (%s)", evicted_id, ev_manifest.get("name", ""))
+            # Emit a compensating progress event to clear the bundled-failure
+            # error from startup-status. Without this, the final
+            # `plugins-complete` status would still carry the error text from
+            # the bundled failure even though the plugin is now active via the
+            # fallback copy. Uses clear_error=True so the server handler
+            # replaces the stale error with null rather than ignoring it.
+            _emit_progress(
+                "plugin-registered",
+                f"Registered fallback copy of plugin '{evicted_id}'",
+                plugin_id=evicted_id,
+                loaded=len(_loaded_batch),
+                total=len(plugin_load_specs),
+                clear_error=True,
+            )
 
     # Publish all plugins atomically so concurrent readers never observe
     # a partially-populated list during the loading window.  We clear
@@ -953,8 +1015,8 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
 
     _emit_progress(
         "plugins-complete",
-        f"Loaded {len(plugin_load_specs)} plugin(s)",
-        loaded=len(plugin_load_specs),
+        f"Loaded {len(_loaded_batch)} plugin(s)",
+        loaded=len(_loaded_batch),
         total=len(plugin_load_specs),
     )
 

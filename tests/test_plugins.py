@@ -1449,6 +1449,215 @@ def test_plugin_absent_when_both_routes_fail(
     assert "also failed to load routes" in caplog.text
 
 
+def test_partial_route_registration_warning(
+    tmp_path, reset_plugin_state, monkeypatch, caplog
+):
+    """When bundled setup() registers routes before raising, a specific
+    warning should name the count so maintainers can identify the partial
+    registration in the server log (Thread 1, review-4226318201).
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    # Routes that register one endpoint before raising.
+    (bundled_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n"
+        "    app.routes.append('stub')\n"
+        "    raise RuntimeError('partial fail')\n"
+    )
+
+    fake_app = type("FakeApp", (), {"routes": []})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        with capture_logger(caplog, "slopsmith.plugins", level=logging.WARNING):
+            plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    assert "registered 1 route" in caplog.text
+    assert "cannot be removed" in caplog.text
+
+
+def test_sibling_module_cache_purged_before_fallback(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """Sibling modules from the failed bundled copy are purged from sys.modules
+    before the fallback copy's routes are loaded, so the fallback gets a clean
+    slate and doesn't accidentally resolve to bundled helper code
+    (Thread 2, review-4226318201).
+    """
+    import sys
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    # Bundled helper reports 'bundled'; bundled routes load it via load_sibling
+    # then fail — this caches the bundled helper in sys.modules.
+    (bundled_plugin_dir / "helper.py").write_text("ORIGIN = 'bundled'\n")
+    (bundled_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n"
+        "    ctx['load_sibling']('helper')  # caches bundled helper\n"
+        "    raise RuntimeError('bundled broken')\n"
+    )
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    # User copy has its own helper with a different ORIGIN; routes use load_sibling.
+    (user_plugin_dir / "helper.py").write_text("ORIGIN = 'user'\n")
+    (user_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n"
+        "    helper = ctx['load_sibling']('helper')\n"
+        "    app.state.helper_origin = helper.ORIGIN\n"
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    fake_app = type("FakeApp", (), {})()
+    fake_app.state = type("State", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    # The fallback routes ran and resolved the user copy's helper, not bundled's.
+    hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
+    assert len(hw3d_entries) == 1
+    assert getattr(fake_app.state, "helper_origin", None) == "user"
+
+
+def test_fallback_success_clears_error_in_progress_events(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """When fallback succeeds, the progress event should carry explicit
+    error=None (clear_error=True) so downstream startup-status handlers can
+    clear the bundled-failure error text (Thread 3, review-4226318201).
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    (bundled_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('bundled broken')\n"
+    )
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    (user_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    pass\n"
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    events = []
+    fake_app = type("FakeApp", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {}, progress_cb=events.append)
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    # After fallback success, a "plugin-registered" event with explicit
+    # "error": None should clear the bundled-failure error in the handler.
+    registered_clear_events = [
+        e for e in events
+        if e.get("phase") == "plugin-registered"
+        and e.get("plugin_id") == "highway_3d"
+        and "error" in e
+        and e["error"] is None
+    ]
+    assert registered_clear_events, (
+        "Expected a plugin-registered event with explicit error=None after fallback success"
+    )
+
+
+def test_plugins_complete_loaded_count_when_both_routes_fail(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """When both bundled and fallback routes fail, plugins-complete must
+    report loaded = actual registered count, not len(plugin_load_specs)
+    (Thread 4, review-4226318201).
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    # One healthy plugin + one that will fail completely.
+    healthy_plugin_dir = bundled_dir / "healthy"
+    healthy_plugin_dir.mkdir()
+    (healthy_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "healthy", "name": "Healthy Plugin", "bundled": True})
+    )
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    (bundled_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('bundled broken')\n"
+    )
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    (user_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('user also broken')\n"
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    events = []
+    fake_app = type("FakeApp", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {}, progress_cb=events.append)
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    complete = next(e for e in events if e["phase"] == "plugins-complete")
+    # "healthy" loaded OK, "highway_3d" failed completely → actual loaded == 1
+    assert complete["loaded"] == 1, (
+        f"plugins-complete loaded should be 1 (only healthy), got {complete['loaded']}"
+    )
+    # total still reflects how many specs were discovered
+    assert complete["total"] == 2
+
+
+
 def test_bundled_flag_requires_both_in_tree_directory_and_manifest_field(
     tmp_path, reset_plugin_state, monkeypatch
 ):
