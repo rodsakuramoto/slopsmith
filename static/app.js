@@ -3962,7 +3962,12 @@ async function loadPlugins() {
                 const summary = document.createElement('summary');
                 // .plugin-settings-summary class hides the browser's native
                 // disclosure triangle (see style.css) so only our chevron shows.
-                summary.className = 'plugin-settings-summary cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-300 hover:bg-dark-700/70 transition flex items-center justify-between';
+                // flex-col allows the fallback explanation note to appear below
+                // the name/badges row when plugin.fallback is set.
+                summary.className = 'plugin-settings-summary cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-300 hover:bg-dark-700/70 transition flex flex-col';
+                // Inner row: plugin name/badges (left) + chevron (right).
+                const headerRow = document.createElement('span');
+                headerRow.className = 'flex items-center justify-between';
                 const labelWrap = document.createElement('span');
                 labelWrap.className = 'flex items-center gap-2';
                 const labelSpan = document.createElement('span');
@@ -3997,24 +4002,14 @@ async function loadPlugins() {
                     const fbBadge = document.createElement('span');
                     fbBadge.className = 'inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-yellow-400/40 bg-yellow-500/10 text-yellow-300';
                     fbBadge.setAttribute('aria-hidden', 'true');
-                    fbBadge.innerHTML = `
-                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-                        </svg>
-                        Fallback
-                    `;
+                    fbBadge.innerHTML = '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg> Fallback';
                     labelWrap.appendChild(fbBadge);
-                    // Visible explanation below the badge — accessible to all
-                    // users including those on touch devices or using keyboards
-                    // (browser tooltips are hover-only, so title/aria-label alone
-                    // is not sufficient).
-                    const fbNote = document.createElement('p');
-                    fbNote.className = 'text-xs text-yellow-300/80 mt-0.5';
-                    fbNote.textContent = 'The bundled version failed to start. This user-installed copy is serving as a fallback. Check the server startup log for details.';
-                    labelWrap.appendChild(fbNote);
                 }
-                summary.appendChild(labelWrap);
+                // Assemble inner header row: [name/badges (left)] [chevron (right)].
+                // Both are placed in headerRow so the fallback note (if any)
+                // can sit below the entire row as a second flex-col child of
+                // summary, rather than being squeezed inline beside the chevron.
+                headerRow.appendChild(labelWrap);
                 // Chevron icon — built via setAttributeNS so the SVG sits in
                 // the SVG namespace and renders correctly. Plugin label is
                 // appended as text above so manifest values can't inject HTML.
@@ -4024,13 +4019,25 @@ async function loadPlugins() {
                 svg.setAttribute('fill', 'none');
                 svg.setAttribute('stroke', 'currentColor');
                 svg.setAttribute('viewBox', '0 0 24 24');
-                const path = document.createElementNS(svgNS, 'path');
-                path.setAttribute('stroke-linecap', 'round');
-                path.setAttribute('stroke-linejoin', 'round');
-                path.setAttribute('stroke-width', '2');
-                path.setAttribute('d', 'M19 9l-7 7-7-7');
-                svg.appendChild(path);
-                summary.appendChild(svg);
+                const svgPath = document.createElementNS(svgNS, 'path');
+                svgPath.setAttribute('stroke-linecap', 'round');
+                svgPath.setAttribute('stroke-linejoin', 'round');
+                svgPath.setAttribute('stroke-width', '2');
+                svgPath.setAttribute('d', 'M19 9l-7 7-7-7');
+                svg.appendChild(svgPath);
+                headerRow.appendChild(svg);
+                summary.appendChild(headerRow);
+                // Fallback explanation note: a visible <p> below the header row,
+                // accessible to touch/keyboard users (browser tooltip via title/
+                // aria-label alone is hover-only and insufficient). Appended to
+                // summary (not labelWrap) so it renders as the second child in
+                // summary's flex-col layout, appearing below the name+badges row.
+                if (plugin.fallback) {
+                    const fbNote = document.createElement('p');
+                    fbNote.className = 'text-xs text-yellow-300/80 mt-1';
+                    fbNote.textContent = 'The bundled version failed to start. This user-installed copy is serving as a fallback. Check the server startup log for details.';
+                    summary.appendChild(fbNote);
+                }
                 details.appendChild(summary);
 
                 const body = document.createElement('div');

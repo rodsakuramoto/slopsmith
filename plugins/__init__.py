@@ -869,8 +869,15 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 if plugin_id in _pending_evictions:
                     _plugin_dir_prefix = str(plugin_dir) + os.sep
                     _stale = set()
-                    for _k in set(sys.modules) - _sysmod_before_routes:
-                        _mod = sys.modules.get(_k)
+                    # Scan ALL cached modules (not only those newly added since
+                    # the snapshot) for any whose __file__ lives inside this
+                    # plugin's directory.  A previous load_plugins() call (test
+                    # reload, dev restart) may have left same-named helpers from
+                    # the bundled copy in sys.modules before this run's
+                    # snapshot was taken; diffing against the snapshot alone
+                    # would miss those and let the fallback copy resolve the
+                    # old bundled code on repeated loads.
+                    for _k, _mod in list(sys.modules.items()):
                         _mf = getattr(_mod, "__file__", None)
                         if _mf and str(_mf).startswith(_plugin_dir_prefix):
                             _stale.add(_k)
@@ -982,10 +989,17 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             len(_loaded_batch),
         )
         _loaded_batch[:] = [e for e in _loaded_batch if e["id"] != evicted_id]
-        # Ensure the fallback directory is on sys.path.
+        # Ensure the fallback directory is at the FRONT of sys.path so
+        # its modules take priority over any bundled copy still present.
+        # Simply inserting when absent is not enough: on repeated
+        # load_plugins() calls (tests, dev reloads) the user-copy dir may
+        # already be in sys.path but behind the bundled dir from an earlier
+        # run, letting bare imports in the fallback still resolve bundled
+        # files. Always remove-then-reinsert to guarantee front-of-path.
         ev_dir_str = str(ev_dir)
-        if ev_dir_str not in sys.path:
-            sys.path.insert(0, ev_dir_str)
+        if ev_dir_str in sys.path:
+            sys.path.remove(ev_dir_str)
+        sys.path.insert(0, ev_dir_str)
         ev_context = dict(context)
         ev_context["load_sibling"] = (
             lambda name, _pid=evicted_id, _pdir=ev_dir:

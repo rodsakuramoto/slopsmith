@@ -1158,6 +1158,17 @@ async def startup_events():
                             fut.set_result(None)
                         return
                     _started.set()
+                    # Double-check cancellation: if the timeout fired in the
+                    # window between the first check and _started.set(), the
+                    # timeout handler may have seen _started as not-yet-set
+                    # and allowed a fallback to proceed. Re-checking here
+                    # prevents fn() from racing with that fallback.
+                    # The timeout handler will see _started.is_set() == True
+                    # and log mid-flight=True, but since fn() won't run, the
+                    # fallback is in fact safe — the conservative warning is
+                    # acceptable and avoids the actual race.
+                    if _cancelled.is_set():
+                        return
                     try:
                         fn()
                         fut.set_result(None)
