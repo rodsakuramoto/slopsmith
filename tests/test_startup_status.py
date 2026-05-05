@@ -340,6 +340,73 @@ def test_startup_status_plugin_error_event_preserved_in_complete(monkeypatch, st
     assert endpoint_data["error"] == _FAKE_PLUGIN_ERROR_TEXT
 
 
+def test_startup_status_plugin_error_cleared_by_explicit_null_progress(monkeypatch, startup_harness):
+    """When a plugin-registered event carries explicit error=None after a
+    preceding plugin-error event, the stale error must be cleared from
+    startup-status. This exercises the ``'error' in event`` path in _on_progress
+    which was added to support the bundled-plugin fallback (Thread 4,
+    review-4226783807).
+
+    A regression that checks ``event.get("error") is not None`` instead of
+    ``"error" in event`` would leave the stale bundled-failure error in the
+    status even though the user-copy fallback succeeded.
+    """
+    server, phases = startup_harness
+
+    # Simulate the exact sequence load_plugins emits during a successful
+    # bundled-failure fallback: plugin-error (bundled broken) followed by
+    # plugin-registered with explicit error=None (fallback OK, clear error).
+    _FAKE_FALLBACK_RECOVERY_EVENTS = [
+        {"phase": "plugins-discovered", "message": "Discovered 1 plugin(s)",
+         "plugin_id": "", "loaded": 0, "total": 1},
+        {"phase": "plugin-start", "message": "Loading plugin 'myplug'",
+         "plugin_id": "myplug", "loaded": 0, "total": 1},
+        {"phase": "plugin-requirements", "message": "Installing requirements for 'myplug' (if needed)",
+         "plugin_id": "myplug", "loaded": 0, "total": 1},
+        {"phase": "plugin-error", "message": "Failed loading routes for 'myplug'",
+         "plugin_id": "myplug", "loaded": 0, "total": 1, "error": "bundled routes broken"},
+        # Fallback success: event explicitly carries error=None to clear the stale error.
+        {"phase": "plugin-registered", "message": "Registered fallback copy of plugin 'myplug'",
+         "plugin_id": "myplug", "loaded": 1, "total": 1, "error": None},
+        {"phase": "plugins-complete", "message": "Loaded 1 plugin(s)",
+         "plugin_id": "", "loaded": 1, "total": 1},
+    ]
+
+    def fake_load_plugins(_app, _context, progress_cb=None, route_setup_fn=None):
+        if progress_cb:
+            for event in _FAKE_FALLBACK_RECOVERY_EVENTS:
+                progress_cb(event)
+
+    monkeypatch.setattr(server, "load_plugins", fake_load_plugins)
+    asyncio.run(server.startup_events())
+    final = server._get_startup_status()
+
+    # The plugin-error event sets error; the plugin-registered with error=None
+    # must clear it. If _on_progress only forwards non-null errors, this fails.
+    assert final["error"] is None, (
+        f"Expected error to be cleared by explicit error=None event, got {final['error']!r}"
+    )
+    assert final["phase"] == "complete"
+    assert final["running"] is False
+
+    # Verify via the HTTP endpoint too — a disconnect between the endpoint
+    # handler and _get_startup_status would silently pass the assertion above.
+    async def _fetch_endpoint_data():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=server.app), base_url="http://test"
+        ) as ac:
+            r = await ac.get("/api/startup-status")
+            return r.json()
+
+    endpoint_data = asyncio.run(_fetch_endpoint_data())
+    assert endpoint_data["phase"] == "complete"
+    assert endpoint_data["running"] is False
+    assert endpoint_data["error"] is None, (
+        f"HTTP endpoint should also show cleared error, got {endpoint_data['error']!r}"
+    )
+
+
+
 def test_startup_status_e2e_real_plugin_loader(tmp_path, monkeypatch, isolate_logging):
     """Integration: run startup_events() with the REAL load_plugins against a
     minimal test plugin, using the production background-thread code path.

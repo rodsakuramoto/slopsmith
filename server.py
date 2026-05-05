@@ -1113,8 +1113,20 @@ async def startup_events():
                     return
 
                 fut: concurrent.futures.Future = concurrent.futures.Future()
+                # Cancellation flag: set on timeout so the still-queued
+                # _do() callback skips fn() rather than racing with any
+                # fallback copy that load_plugins() activates after the
+                # TimeoutError. If _do() has already started executing,
+                # this won't interrupt it mid-setup (inherent limitation).
+                _cancelled = threading.Event()
 
                 def _do():
+                    if _cancelled.is_set():
+                        # Timeout already fired; skip to prevent a race
+                        # with the user-copy fallback that may have loaded.
+                        if not fut.done():
+                            fut.set_result(None)
+                        return
                     try:
                         fn()
                         fut.set_result(None)
@@ -1127,6 +1139,9 @@ async def startup_events():
                 except concurrent.futures.TimeoutError:
                     _pid = getattr(fn, "_plugin_id", "unknown")
                     log.warning("route registration for %r timed out after 60 s", _pid)
+                    # Prevent the still-queued _do() from executing if it
+                    # hasn't started yet — avoids races with any fallback.
+                    _cancelled.set()
 
                     def _log_deferred(f: concurrent.futures.Future):
                         try:

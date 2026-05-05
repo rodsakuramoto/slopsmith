@@ -570,6 +570,13 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
     # a fallback: if the bundled copy later fails to load its routes, the
     # user copy is restored so the server remains functional.
     _pending_evictions: dict[str, tuple] = {}
+    # Maps plugin_id → set of sys.modules keys that were NEW during the
+    # failed bundled route load. Bundled routes may import helpers under
+    # bare names (e.g. `import helper`); these survive the namespaced
+    # _parent_pkg cleanup and would resolve to bundled code if the fallback
+    # plugin also uses bare imports. Purging them gives the fallback a
+    # clean import slate (Thread 1, review-4226783807).
+    _pending_eviction_stale_modules: dict[str, set] = {}
 
     def _is_bundled(pdir: Path, mf: dict) -> bool:
         """Return True iff pdir is the real in-tree bundled core plugin.
@@ -789,6 +796,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             # setup() registered any handlers before raising. FastAPI has
             # no route-removal API, so partial registration is permanent.
             _routes_before = len(getattr(app, "routes", []))
+            # Snapshot sys.modules to track bare-import modules the plugin
+            # adds during its route load. Stored on failure so the fallback
+            # block can purge them and get a clean import slate (Thread 1,
+            # review-4226783807).
+            _sysmod_before_routes = set(sys.modules)
             try:
                 # Escape `.` in plugin_id the same way load_sibling
                 # does. Without it, a plugin id like
@@ -829,6 +841,13 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                         "Plugin %r registered %d route(s) before its setup() raised; "
                         "these handlers cannot be removed and may conflict with any fallback.",
                         plugin_id, _routes_after - _routes_before,
+                    )
+                # Record bare-import modules added during the failed load so
+                # the fallback block can purge them (Thread 1, review-4226783807).
+                # Only store when a fallback user copy is available; no-op otherwise.
+                if plugin_id in _pending_evictions:
+                    _pending_eviction_stale_modules[plugin_id] = (
+                        set(sys.modules) - _sysmod_before_routes
                     )
                 _emit_progress(
                     "plugin-error",
@@ -944,11 +963,21 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         ]
         for _k in _stale_sibling_keys:
             del sys.modules[_k]
+        # Also purge bare-import modules the failed bundled copy may have added
+        # to sys.modules. These are NOT covered by the namespaced purge above;
+        # a bundled plugin that does `import helper` (bare import via sys.path)
+        # would otherwise leave a stale `helper` module in sys.modules that
+        # the fallback copy could accidentally resolve instead of its own file.
+        for _k in _pending_eviction_stale_modules.get(evicted_id, set()):
+            sys.modules.pop(_k, None)
         # Re-load the fallback's routes using the same module-name slot so
         # it naturally replaces the previously-failed bundled module.
         ev_routes_file = ev_manifest.get("routes")
         fallback_routes_ok = True
         if ev_routes_file:
+            # Capture route count before fallback setup() to detect partial
+            # registration — same permanent-mount limitation as the main loop.
+            _fallback_routes_before = len(getattr(app, "routes", []))
             try:
                 ev_module_name = f"plugin_{_safe_plugin_id_for_module_name(evicted_id)}_routes"
                 ev_spec = importlib.util.spec_from_file_location(
@@ -969,6 +998,14 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                     "Fallback user-installed copy of %r also failed to load routes; "
                     "plugin unavailable (not registered).", evicted_id,
                 )
+                # Warn on partial registration in the fallback path too.
+                _fallback_routes_after = len(getattr(app, "routes", []))
+                if _fallback_routes_after > _fallback_routes_before:
+                    log.warning(
+                        "Fallback copy of %r registered %d route(s) before its setup() raised; "
+                        "these handlers cannot be removed.",
+                        evicted_id, _fallback_routes_after - _fallback_routes_before,
+                    )
                 fallback_routes_ok = False
         if fallback_routes_ok:
             _loaded_batch.append({
