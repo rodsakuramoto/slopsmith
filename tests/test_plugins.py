@@ -1832,6 +1832,65 @@ def test_fallback_entry_has_fallback_true_field(
     )
 
 
+def test_fallback_proceeds_when_install_requirements_returns_false(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """_install_requirements returning False in the fallback path must be
+    non-fatal — the fallback must still load routes, matching the main loop
+    behaviour which only emits a plugin-error but does not abort.
+
+    Previously the fallback block did ``if not _install_requirements(...): continue``
+    which skipped the user copy entirely, leaving the bundled-failure error in
+    startup-status even when the user copy could have run without those deps.
+    (Thread 1, review-4227643820)
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    (bundled_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('bundled broken')\n"
+    )
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    (user_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    app.state.fallback_ran = True\n"
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+    # Simulate _install_requirements failing (read-only filesystem, optional
+    # dep, etc.) — same scenario the main loop tolerates.
+    monkeypatch.setattr(plugins, "_install_requirements", lambda *a, **kw: False)
+
+    fake_app = type("FakeApp", (), {})()
+    fake_app.state = type("State", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    # Despite requirements failure the fallback routes.setup() must have run.
+    assert getattr(fake_app.state, "fallback_ran", False) is True, (
+        "Fallback routes.setup() must run even when _install_requirements returns False"
+    )
+    entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
+    assert entries, "highway_3d must be registered as a fallback"
+    assert entries[0].get("fallback") is True
+
+
 def test_normal_plugins_do_not_have_fallback_field_set(
     tmp_path, reset_plugin_state, monkeypatch
 ):

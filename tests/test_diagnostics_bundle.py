@@ -571,6 +571,62 @@ def test_system_plugins_evicted_stale_copy_appears_in_orphans(tmp_path):
     assert "highway_3d" in loaded_ids
 
 
+def test_system_plugins_orphan_path_redacted_when_redactor_provided(tmp_path):
+    """Orphan `path` must pass through the redactor when one is provided.
+
+    The full resolved path of an evicted copy (e.g.
+    ``/home/user/.config/slopsmith/plugins/highway_3d``) contains the user's
+    home directory.  Without redaction that leaks in a supposedly-sanitised
+    bundle.  When a Redactor is passed to _system_plugins, home-dir prefixes
+    in `path` must be replaced with the ``<HOME>`` placeholder.
+    """
+    from diagnostics_redact import Redactor
+
+    home = tmp_path / "home" / "user"
+    home.mkdir(parents=True)
+    plugins_dir = home / "plugins"
+    plugins_dir.mkdir()
+
+    stale_dir = plugins_dir / "highway_3d"
+    stale_dir.mkdir()
+    (stale_dir / "plugin.json").write_text('{"id":"highway_3d","name":"3D Highway (user)"}')
+
+    # Simulate that the canonical copy was loaded from somewhere else.
+    other_dir = tmp_path / "bundled" / "highway_3d"
+    other_dir.mkdir(parents=True)
+    loaded_plugins = [{"id": "highway_3d", "name": "3D Highway", "_dir": other_dir, "_manifest": {}}]
+
+    redactor = Redactor(home_dir=home)
+    result = db._system_plugins(loaded_plugins, plugins_root=plugins_dir, redactor=redactor)
+
+    evicted = [o for o in result["orphans"] if o["id"] == "highway_3d"]
+    assert len(evicted) == 1
+    path_val = evicted[0]["path"]
+    # The raw home-dir path must not appear.
+    assert str(home) not in path_val
+    # The placeholder must be present.
+    assert "<HOME>" in path_val
+
+
+def test_system_plugins_orphan_path_not_redacted_when_no_redactor(tmp_path):
+    """Without a redactor the `path` field is the raw resolved path (no change)."""
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    stale_dir = plugins_dir / "old_plugin"
+    stale_dir.mkdir()
+    (stale_dir / "plugin.json").write_text('{"id":"my_plugin","name":"My Plugin"}')
+
+    loaded_plugins = [{"id": "my_plugin", "name": "My Plugin",
+                       "_dir": tmp_path / "canonical", "_manifest": {}}]
+
+    result = db._system_plugins(loaded_plugins, plugins_root=plugins_dir)
+
+    evicted = [o for o in result["orphans"] if o["id"] == "my_plugin"]
+    assert len(evicted) == 1
+    # Raw path — no <HOME> or <CONFIG_DIR> replacement.
+    assert str(stale_dir.resolve()) == evicted[0]["path"]
+
+
 def test_git_remote_token_stripped():
     """Embedded credentials in git remote URLs must be stripped from system/plugins.json."""
     # Simulate a plugin with a git remote that embeds a token.

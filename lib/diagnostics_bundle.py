@@ -386,7 +386,7 @@ def _sanitize_remote_url(url: str) -> str:
     return sanitized
 
 
-def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path] | None" = None) -> dict:
+def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path] | None" = None, redactor=None) -> dict:
     """Build `system.plugins.v1`. Captures every loaded plugin with
     git/manifest info, AND every directory under each plugins root that
     contains a `plugin.json` so orphan / failed-to-load plugins still
@@ -490,7 +490,12 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
                     # (e.g. both are named "highway_3d"), `dir` alone is
                     # ambiguous.  `path` lets maintainers identify which root
                     # the evicted copy came from without inspecting server logs.
-                    "path": str(child_key),
+                    # When redaction is active, the path passes through the
+                    # text redactor so home-dir / config-dir prefixes are
+                    # replaced with their placeholder tokens — preventing
+                    # filesystem paths and usernames from leaking in a
+                    # supposedly redacted bundle.
+                    "path": redactor.redact_text(str(child_key)) if redactor is not None else str(child_key),
                 }
                 # Flag directories that share an id with a loaded plugin
                 # (bundled-wins evicted them) vs. true orphans (failed to load).
@@ -1000,7 +1005,7 @@ def _assemble_files_and_notes(
         files["system/version.json"] = ver_payload
         env_payload = _safe_json_dumps(_system_env(redactor=redactor)).encode("utf-8")
         files["system/env.json"] = env_payload
-        plugins_data = _system_plugins(loaded_plugins, plugins_root=plugins_root)
+        plugins_data = _system_plugins(loaded_plugins, plugins_root=plugins_root, redactor=redactor)
         files["system/plugins.json"] = _safe_json_dumps(plugins_data).encode("utf-8")
         # Plugin loading is async and takes a few seconds on cold
         # boot. If the bundle was captured during that window, every

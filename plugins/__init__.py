@@ -1010,13 +1010,12 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         # the main load loop ran, so _install_requirements was never called
         # for it. A user copy that depends on extra packages would otherwise
         # fail with an import error even when those packages can be installed.
-        if not _install_requirements(ev_dir, evicted_id):
-            log.warning(
-                "Fallback user-installed copy of %r: requirements installation "
-                "failed; plugin unavailable (not registered). The original "
-                "bundled-failure error remains in startup-status.", evicted_id,
-            )
-            continue
+        # Mirror the main load-loop contract: _install_requirements returning
+        # False is *non-fatal* (read-only filesystem, optional dep, etc.) —
+        # the main loop emits a plugin-error and continues loading. Treating
+        # it as fatal here would break the fallback for those same tolerated
+        # cases and leave the bundled-failure error unresolved.
+        _install_requirements(ev_dir, evicted_id)
         # Purge any sibling modules the failed bundled copy may have loaded.
         # They are cached under the same namespace as what the fallback would use.
         # The parent package is `plugin_{safe_id}`, sibling modules are
