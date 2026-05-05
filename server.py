@@ -1061,13 +1061,20 @@ async def startup_events():
 
     def _load_plugins_background():
         try:
-            # Track which plugin last set a non-null error so that a
-            # `clear_error=True` event from a fallback recovery only clears
-            # the error it actually caused.  If a *different* plugin reported
-            # an error later in startup and the current error source doesn't
-            # match the plugin that is now recovering, we leave the error
-            # field untouched — the other plugin's failure must not be hidden.
-            _last_error = {"plugin_id": ""}  # mutable box for closure
+            # Track all active plugin errors so that a `clear_error=True`
+            # event from a fallback recovery correctly restores any *other*
+            # plugin's still-unresolved failure rather than wiping the error
+            # field entirely.
+            #
+            # Using a single "last error" pointer was insufficient: if plugin A
+            # fails, then plugin B fails and later recovers, the recovery would
+            # overwrite the pointer with B's id — and then B's `error=None`
+            # clears the status to null even though A is still broken.
+            #
+            # With a dict (keyed by plugin_id, insertion-ordered) we can
+            # remove B's entry on recovery and restore the most recent remaining
+            # failure from A, giving an accurate picture of startup health.
+            _active_errors: dict[str, str] = {}  # plugin_id -> error text
 
             def _on_progress(event: dict):
                 total = int(event.get("total") or 0)
@@ -1085,26 +1092,28 @@ async def startup_events():
                 )
                 # Forward the error field only when the event explicitly
                 # carries it.  Two cases:
-                # - Non-null string: set/update the displayed error.
+                # - Non-null string: record this plugin's failure and display it.
                 # - Explicit null (clear_error=True in _emit_progress):
-                #   clear a previously-reported error when, e.g., a bundled
-                #   failure is resolved by a successful user-copy fallback.
-                #   Only applied when the plugin clearing it matches the one
-                #   that last set it — prevents a fallback recovery from
-                #   accidentally hiding an unrelated plugin failure that was
-                #   reported later in startup.
+                #   remove this plugin's failure entry, then restore the most
+                #   recently recorded still-active failure (if any) so
+                #   unresolved failures from other plugins remain visible.
+                #   An unscoped clear (no plugin_id) removes the unscoped
+                #   sentinel and applies the same restore logic.
                 # Events that omit the key entirely leave the status unchanged,
                 # preserving any earlier plugin error across the many
                 # non-error progress events that follow normal setup steps.
                 if "error" in event:
                     err_val = event["error"]
                     if err_val is not None:
-                        _last_error["plugin_id"] = plugin_id
+                        _active_errors[plugin_id] = err_val
                         update["error"] = err_val
-                    elif not plugin_id or plugin_id == _last_error["plugin_id"]:
-                        # clear_error for the same plugin (or unscoped) — apply.
-                        update["error"] = None
-                    # else: clear from a different plugin — leave status alone.
+                    else:
+                        # Clear this plugin's error entry (fallback recovery or
+                        # unscoped clear), then surface the most recently added
+                        # remaining failure, or None if all have been resolved.
+                        _active_errors.pop(plugin_id, None)
+                        remaining = list(_active_errors.values())
+                        update["error"] = remaining[-1] if remaining else None
                 _set_startup_status(**update)
 
             def _route_setup_on_main(fn):
@@ -1132,43 +1141,37 @@ async def startup_events():
                     return
 
                 fut: concurrent.futures.Future = concurrent.futures.Future()
-                # Cancellation flag: set on timeout so the still-queued
-                # _do() callback skips fn() rather than racing with any
-                # fallback copy that load_plugins() activates after the
-                # TimeoutError. If _do() has already started executing when
-                # this flag is set, the check is a no-op — Python threads
-                # cannot be interrupted mid-execution without cooperative
-                # checks at every call site, so partial route registration
-                # inside an already-running fn() remains an accepted edge case.
+                # _state_lock makes the "check _cancelled + set _started"
+                # transition in _do() atomic with the "read _started + set
+                # _cancelled" transition in the timeout handler.  Without this
+                # lock the two threads can interleave:
+                #
+                #   Thread A (_do):   passes check-1, yields to event loop
+                #   Thread B (timeout): reads _started=False → _mid_flight=False
+                #   Thread A (_do):   sets _started, passes check-2 → calls fn()
+                #   Thread B (timeout): sets _cancelled (too late)
+                #   Result: fn() runs AND fallback loads — concurrent mutation.
+                #
+                # With the lock, either _do() commits to running fn() before
+                # the timeout can set _cancelled (in which case _mid_flight=True
+                # and the fallback is skipped), or the timeout wins (sets
+                # _cancelled=True and reads _started=False → _mid_flight=False,
+                # then _do() sees _cancelled inside the lock and bails out).
+                _state_lock = threading.Lock()
                 _cancelled = threading.Event()
-                # Tracks whether _do() has passed the cancellation guard and
-                # started calling fn(). Used on timeout to decide whether a
-                # fallback is safe: if _started is not set, _cancelled will
-                # prevent fn() from running (safe to fallback); if _started
-                # is set, fn() is mid-flight and activating a fallback would
-                # race with it (fallback skipped — caller checks
-                # `e.setup_mid_flight` on the re-raised TimeoutError).
                 _started = threading.Event()
 
                 def _do():
-                    if _cancelled.is_set():
-                        # Timeout already fired; skip to prevent a race
-                        # with the user-copy fallback that may have loaded.
-                        if not fut.done():
-                            fut.set_result(None)
-                        return
-                    _started.set()
-                    # Double-check cancellation: if the timeout fired in the
-                    # window between the first check and _started.set(), the
-                    # timeout handler may have seen _started as not-yet-set
-                    # and allowed a fallback to proceed. Re-checking here
-                    # prevents fn() from racing with that fallback.
-                    # The timeout handler will see _started.is_set() == True
-                    # and log mid-flight=True, but since fn() won't run, the
-                    # fallback is in fact safe — the conservative warning is
-                    # acceptable and avoids the actual race.
-                    if _cancelled.is_set():
-                        return
+                    with _state_lock:
+                        if _cancelled.is_set():
+                            # Timeout already fired before we started; bail
+                            # to prevent a race with any fallback that may
+                            # have been activated by load_plugins().
+                            if not fut.done():
+                                fut.set_result(None)
+                            return
+                        _started.set()
+                    # Past the lock — committed to running fn().
                     try:
                         fn()
                         fut.set_result(None)
@@ -1180,7 +1183,12 @@ async def startup_events():
                     fut.result(timeout=60)
                 except concurrent.futures.TimeoutError as _te:
                     _pid = getattr(fn, "_plugin_id", "unknown")
-                    _mid_flight = _started.is_set()
+                    # Read _started and set _cancelled atomically so _do()
+                    # can't slip through the lock and start fn() between the
+                    # two operations.
+                    with _state_lock:
+                        _mid_flight = _started.is_set()
+                        _cancelled.set()
                     if _mid_flight:
                         log.warning(
                             "route registration for %r timed out after 60 s and "
@@ -1204,7 +1212,7 @@ async def startup_events():
                         )
                     # Prevent the still-queued _do() from executing if it
                     # hasn't started yet — avoids races with any fallback.
-                    _cancelled.set()
+                    # Note: _cancelled was already set inside _state_lock above.
 
                     def _log_deferred(f: concurrent.futures.Future):
                         try:

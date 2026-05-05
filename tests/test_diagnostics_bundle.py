@@ -563,6 +563,9 @@ def test_system_plugins_evicted_stale_copy_appears_in_orphans(tmp_path):
     assert len(evicted) == 1
     assert evicted[0]["dir"] == "3dhighway"
     assert evicted[0].get("evicted") is True
+    # The `path` field must contain the full resolved path so maintainers can
+    # tell which root the evicted copy came from even when dir names match.
+    assert evicted[0].get("path") == str(stale_dir.resolve())
     # The canonical loaded copy must NOT appear in orphans.
     loaded_ids = {p["id"] for p in result["plugins"]}
     assert "highway_3d" in loaded_ids

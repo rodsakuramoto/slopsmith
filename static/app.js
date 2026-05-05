@@ -4033,8 +4033,8 @@ async function loadPlugins() {
                 // summary (not labelWrap) so it renders as the second child in
                 // summary's flex-col layout, appearing below the name+badges row.
                 if (plugin.fallback) {
-                    const fbNote = document.createElement('p');
-                    fbNote.className = 'text-xs text-yellow-300/80 mt-1';
+                    const fbNote = document.createElement('span');
+                    fbNote.className = 'block text-xs text-yellow-300/80 mt-1';
                     fbNote.textContent = 'The bundled version failed to start. This user-installed copy is serving as a fallback. Check the server startup log for details.';
                     summary.appendChild(fbNote);
                 }

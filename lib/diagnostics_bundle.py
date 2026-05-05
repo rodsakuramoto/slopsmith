@@ -485,6 +485,12 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
                     "type": manifest.get("type"),
                     "loaded": False,
                     "dir": child.name,
+                    # Full resolved path for disambiguation: when the bundled
+                    # and user-installed copies share the same directory name
+                    # (e.g. both are named "highway_3d"), `dir` alone is
+                    # ambiguous.  `path` lets maintainers identify which root
+                    # the evicted copy came from without inspecting server logs.
+                    "path": str(child_key),
                 }
                 # Flag directories that share an id with a loaded plugin
                 # (bundled-wins evicted them) vs. true orphans (failed to load).
