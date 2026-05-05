@@ -1067,7 +1067,7 @@ async def startup_events():
             # an error later in startup and the current error source doesn't
             # match the plugin that is now recovering, we leave the error
             # field untouched — the other plugin's failure must not be hidden.
-            _last_error_plugin_id: list = [""]  # mutable box for closure
+            _last_error = {"plugin_id": ""}  # mutable box for closure
 
             def _on_progress(event: dict):
                 total = int(event.get("total") or 0)
@@ -1099,9 +1099,9 @@ async def startup_events():
                 if "error" in event:
                     err_val = event["error"]
                     if err_val is not None:
-                        _last_error_plugin_id[0] = plugin_id
+                        _last_error["plugin_id"] = plugin_id
                         update["error"] = err_val
-                    elif not plugin_id or plugin_id == _last_error_plugin_id[0]:
+                    elif not plugin_id or plugin_id == _last_error["plugin_id"]:
                         # clear_error for the same plugin (or unscoped) — apply.
                         update["error"] = None
                     # else: clear from a different plugin — leave status alone.

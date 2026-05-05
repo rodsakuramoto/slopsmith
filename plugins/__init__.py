@@ -957,12 +957,10 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         _parent_pkg = f"plugin_{_safe_eid}"
         # The routes module is registered under exactly `{_parent_pkg}_routes`
         # (underscore, not dot — it is NOT a sub-package of _parent_pkg).
-        # Using startswith(f"{_parent_pkg}_") would also purge route/sibling
-        # modules for other plugins whose ids share the same prefix — e.g.,
-        # "plugin_a_routes" would be deleted when evicting plugin "a" because
-        # "plugin_a_routes".startswith("plugin_a_") is True, which would also
-        # incorrectly match "plugin_a_5f_b_routes" (routes for plugin "a_b").
-        # Match the routes entry exactly instead.
+        # Using startswith(f"{_parent_pkg}_") would incorrectly match
+        # "plugin_a_5f_b_routes" (routes for plugin "a_b") when evicting
+        # plugin "a", because "plugin_a_5f_b_routes".startswith("plugin_a_")
+        # is True. Match the routes entry exactly instead.
         _stale_sibling_keys = [
             k for k in list(sys.modules)
             if k == _parent_pkg

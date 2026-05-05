@@ -3994,7 +3994,7 @@ async function loadPlugins() {
                 // copy.  Warn users so they know the bundled build is broken and
                 // can check the server startup log for the root cause.
                 if (plugin.fallback) {
-                    const fallbackDesc = 'The bundled copy of this plugin failed to start. This is a fallback from your user-installed copy. Check the server startup log for details.';
+                    const fallbackDesc = 'This user-installed copy is serving as a fallback because the bundled version failed to start. Check the server startup log for details.';
                     const fbBadge = document.createElement('span');
                     fbBadge.className = 'inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-yellow-400/40 bg-yellow-500/10 text-yellow-300';
                     fbBadge.title = fallbackDesc;
