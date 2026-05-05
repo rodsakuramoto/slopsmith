@@ -919,7 +919,7 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             except Exception:
                 log.exception(
                     "Fallback user-installed copy of %r also failed to load routes; "
-                    "plugin will not be registered.", evicted_id,
+                    "plugin unavailable (not registered).", evicted_id,
                 )
                 fallback_routes_ok = False
         if fallback_routes_ok:

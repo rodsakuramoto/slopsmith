@@ -1395,7 +1395,7 @@ def test_fallback_when_bundled_sorts_first_and_routes_fail(
     assert str(user_plugin_dir) in caplog.text
 
 
-def test_both_bundled_and_fallback_routes_fail_plugin_absent(
+def test_plugin_absent_when_both_routes_fail(
     tmp_path, reset_plugin_state, monkeypatch, caplog
 ):
     """When both bundled routes AND fallback routes fail, plugin is absent from LOADED_PLUGINS.
