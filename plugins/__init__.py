@@ -668,12 +668,22 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                         "using bundled version at %s.",
                         plugin_id, kept[1] if kept else "(unknown)", plugin_dir,
                     )
-                    plugin_load_specs[:] = [
-                        s for s in plugin_load_specs if s[0] != plugin_id
-                    ]
-                    loaded_ids.discard(plugin_id)
-                    loaded_specs_by_id.pop(plugin_id, None)
-                    # No `continue` — fall through to register the bundled copy.
+                    # Replace the user copy's slot in-place so the bundled
+                    # copy inherits the same discovery position.  Removing and
+                    # re-appending would shift the bundled entry to the end of
+                    # plugin_load_specs, changing /api/plugins order and the
+                    # frontend playSong wrapper chain.
+                    _user_slot = next(
+                        (i for i, s in enumerate(plugin_load_specs) if s[0] == plugin_id),
+                        None,
+                    )
+                    _bundled_spec = (plugin_id, plugin_dir, manifest)
+                    if _user_slot is not None:
+                        plugin_load_specs[_user_slot] = _bundled_spec
+                    else:
+                        plugin_load_specs.append(_bundled_spec)
+                    loaded_specs_by_id[plugin_id] = _bundled_spec
+                    continue  # loaded_ids already contains plugin_id
                 elif this_is_bundled and kept_is_bundled:
                     # Two bundled plugins share an id — shouldn't happen in a
                     # well-maintained tree, but emit a clear warning so it
@@ -802,11 +812,6 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             # setup() registered any handlers before raising. FastAPI has
             # no route-removal API, so partial registration is permanent.
             _routes_before = len(getattr(app, "routes", []))
-            # Snapshot sys.modules to track bare-import modules the plugin
-            # adds during its route load. Stored on failure so the fallback
-            # block can purge them and get a clean import slate (Thread 1,
-            # review-4226783807).
-            _sysmod_before_routes = set(sys.modules)
             try:
                 # Escape `.` in plugin_id the same way load_sibling
                 # does. Without it, a plugin id like
@@ -1049,7 +1054,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         # Re-load the fallback's routes using the same module-name slot so
         # it naturally replaces the previously-failed bundled module.
         ev_routes_file = ev_manifest.get("routes")
-        fallback_routes_ok = True
+        # If the user copy has no routes file it cannot restore the bundled
+        # plugin's backend endpoints (the route failure is the very reason we
+        # are in this fallback path). Treat that as a failed recovery so the
+        # bundled-failure error is NOT cleared from startup-status.
+        fallback_routes_ok = bool(ev_routes_file)
         if ev_routes_file:
             # Capture route count before fallback setup() to detect partial
             # registration — same permanent-mount limitation as the main loop.

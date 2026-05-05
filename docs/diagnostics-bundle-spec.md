@@ -179,7 +179,8 @@ entry explaining why.
       "name": "Broken Plugin",
       "version": "0.1.0",
       "loaded": false,
-      "dir": "broken"
+      "dir": "broken",
+      "path": "/home/user/.config/slopsmith/plugins/broken"
     }
   ]
 }
@@ -198,6 +199,13 @@ NOT in `LOADED_PLUGINS`. Two sub-cases:
   bundled plugin directories whose routes failed and whose server fell back
   to a user copy (the bundled dir then has a different path from the loaded
   entry). Check the server startup log for the specific failure reason.
+
+`dir` is the bare directory name. `path` is the full resolved absolute path
+to the orphan directory — the key disambiguator when the bundled copy and a
+user-installed copy share the same directory name (e.g. both `highway_3d`).
+In a redacted bundle `path` has home-dir and config-dir prefixes replaced
+with placeholder tokens (e.g. `<HOME>/...`, `<CONFIG_DIR>/...`) so
+filesystem paths and usernames do not leak.
 
 ### `logs.server.v1` — `logs/server.log.meta.json`
 

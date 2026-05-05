@@ -1661,16 +1661,21 @@ def test_plugins_complete_loaded_count_when_both_routes_fail(
 def test_fallback_preserves_plugin_order(
     tmp_path, reset_plugin_state, monkeypatch
 ):
-    """When a fallback user copy replaces a broken bundled plugin, it must be
-    inserted at the bundled plugin's original position in LOADED_PLUGINS —
-    not appended at the end — so that /api/plugins order and the frontend
-    playSong wrapper chain are unchanged (Thread 3, review-4227201020).
+    """When a bundled copy evicts a user-installed copy and then fails to load
+    its routes, the fallback (user copy) must occupy the SAME slot the user
+    copy had at discovery time — not the position the bundled copy would have
+    been appended at (Thread 1, review-4227852922; Thread 3, review-4227201020).
 
     Layout:
-      bundled: alpha (healthy), highway_3d (broken), omega (healthy)
-      user dir: highway_3d (working fallback)
+      user dir: highway_3d (working fallback, has routes)
+      bundled:  alpha (healthy), highway_3d (broken routes), omega (healthy)
 
-    Expected order after fallback: [alpha, highway_3d (fallback), omega]
+    Scan order: user dir first, then bundled.  user/highway_3d lands at slot 0.
+    When bundled/highway_3d is scanned it replaces the user copy IN-PLACE at
+    slot 0 (review-4227852922 fix).  After route failure the fallback is
+    inserted back at slot 0.
+
+    Expected order after fallback: [highway_3d (fallback), alpha, omega]
     """
     plugins = reset_plugin_state
 
@@ -1692,6 +1697,56 @@ def test_fallback_preserves_plugin_order(
     user_dir.mkdir()
     user_hw = user_dir / "highway_3d"
     user_hw.mkdir()
+    # User copy must have a routes file; without one fallback_routes_ok is
+    # False and the entry is never added to LOADED_PLUGINS (review-4227852922).
+    (user_hw / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    (user_hw / "routes.py").write_text("def setup(app, ctx): pass\n")
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    fake_app = type("FakeApp", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    ids = [p["id"] for p in plugins.LOADED_PLUGINS]
+    assert ids == ["highway_3d", "alpha", "omega"], (
+        f"Fallback entry must occupy the user copy's original discovery slot, got order: {ids}"
+    )
+    # The entry at position 0 (user copy's original slot) is the fallback.
+    assert plugins.LOADED_PLUGINS[0].get("fallback") is True
+
+
+def test_fallback_not_registered_when_user_copy_has_no_routes(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """If the evicted user copy has no routes entry it cannot restore the
+    bundled plugin's backend endpoints.  The fallback must be treated as
+    unsuccessful (fallback_routes_ok=False) so the plugin is absent from
+    LOADED_PLUGINS and the bundled-failure error stays in startup-status.
+    (Thread 2, review-4227852922)
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bd = bundled_dir / "highway_3d"
+    bd.mkdir()
+    (bd / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    (bd / "routes.py").write_text("def setup(app, ctx):\n    raise RuntimeError('broken')\n")
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_hw = user_dir / "highway_3d"
+    user_hw.mkdir()
+    # No routes in user copy — cannot restore bundled endpoints.
     (user_hw / "plugin.json").write_text(
         json.dumps({"id": "highway_3d", "name": "3D Highway (user)"})
     )
@@ -1707,11 +1762,9 @@ def test_fallback_preserves_plugin_order(
         plugins.PLUGINS_DIR = saved_dir
 
     ids = [p["id"] for p in plugins.LOADED_PLUGINS]
-    assert ids == ["alpha", "highway_3d", "omega"], (
-        f"Fallback entry must occupy the bundled plugin's original position, got order: {ids}"
+    assert "highway_3d" not in ids, (
+        "Plugin with no-routes user copy must NOT appear in LOADED_PLUGINS"
     )
-    # The entry at position 1 is the fallback copy.
-    assert plugins.LOADED_PLUGINS[1].get("fallback") is True
 
 
 def test_fallback_skipped_when_setup_was_mid_flight_on_timeout(
