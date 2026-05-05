@@ -1962,7 +1962,6 @@ def test_fallback_proceeds_when_install_requirements_returns_false(
     )
 
 
-
 def test_fallback_routes_failure_emits_plugin_error(
     tmp_path, reset_plugin_state, monkeypatch
 ):
