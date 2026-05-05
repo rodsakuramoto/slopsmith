@@ -1116,8 +1116,11 @@ async def startup_events():
                 # Cancellation flag: set on timeout so the still-queued
                 # _do() callback skips fn() rather than racing with any
                 # fallback copy that load_plugins() activates after the
-                # TimeoutError. If _do() has already started executing,
-                # this won't interrupt it mid-setup (inherent limitation).
+                # TimeoutError. If _do() has already started executing when
+                # this flag is set, the check is a no-op — Python threads
+                # cannot be interrupted mid-execution without cooperative
+                # checks at every call site, so partial route registration
+                # inside an already-running fn() remains an accepted edge case.
                 _cancelled = threading.Event()
 
                 def _do():

@@ -340,7 +340,7 @@ def test_startup_status_plugin_error_event_preserved_in_complete(monkeypatch, st
     assert endpoint_data["error"] == _FAKE_PLUGIN_ERROR_TEXT
 
 
-def test_startup_status_plugin_error_cleared_by_explicit_null_progress(monkeypatch, startup_harness):
+def test_startup_status_plugin_error_cleared_by_explicit_none_progress(monkeypatch, startup_harness):
     """When a plugin-registered event carries explicit error=None after a
     preceding plugin-error event, the stale error must be cleared from
     startup-status. This exercises the ``'error' in event`` path in _on_progress
@@ -364,7 +364,7 @@ def test_startup_status_plugin_error_cleared_by_explicit_null_progress(monkeypat
         {"phase": "plugin-requirements", "message": "Installing requirements for 'myplug' (if needed)",
          "plugin_id": "myplug", "loaded": 0, "total": 1},
         {"phase": "plugin-error", "message": "Failed loading routes for 'myplug'",
-         "plugin_id": "myplug", "loaded": 0, "total": 1, "error": "bundled routes broken"},
+         "plugin_id": "myplug", "loaded": 0, "total": 1, "error": "Failed to load bundled plugin routes"},
         # Fallback success: event explicitly carries error=None to clear the stale error.
         {"phase": "plugin-registered", "message": "Registered fallback copy of plugin 'myplug'",
          "plugin_id": "myplug", "loaded": 1, "total": 1, "error": None},
