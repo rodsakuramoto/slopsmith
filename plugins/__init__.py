@@ -1027,6 +1027,8 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 "plugin-error",
                 f"Failed to install requirements for fallback copy of '{evicted_id}'",
                 plugin_id=evicted_id,
+                loaded=len(_loaded_batch),
+                total=len(plugin_load_specs),
                 error="Requirements installation failed for fallback copy; check server logs",
             )
         # Purge any sibling modules the failed bundled copy may have loaded.
@@ -1100,6 +1102,8 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                     "plugin-error",
                     f"Fallback copy of plugin '{evicted_id}' also failed to load routes",
                     plugin_id=evicted_id,
+                    loaded=len(_loaded_batch),
+                    total=len(plugin_load_specs),
                     error=(
                         f"Both bundled and user-installed copies of '{evicted_id}' "
                         "failed to load routes; plugin unavailable — check server logs"
@@ -1144,13 +1148,16 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             # the bundled failure even though the plugin is now active via the
             # fallback copy. Uses clear_error=True so the server handler
             # replaces the stale error with null rather than ignoring it.
+            # Only send clear_error when req install also succeeded; if req
+            # failed we emitted a plugin-error above and must not clear it —
+            # the fallback copy is active but degraded (missing dependencies).
             _emit_progress(
                 "plugin-registered",
                 f"Registered fallback copy of plugin '{evicted_id}'",
                 plugin_id=evicted_id,
                 loaded=len(_loaded_batch),
                 total=len(plugin_load_specs),
-                clear_error=True,
+                clear_error=ev_req_ok,
             )
 
     # Publish all plugins atomically so concurrent readers never observe

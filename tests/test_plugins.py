@@ -1961,6 +1961,31 @@ def test_fallback_proceeds_when_install_requirements_returns_false(
         f"events were: {events}"
     )
 
+    # The req-failure event must include loaded/total so startup-status
+    # progress counters are not zeroed out.
+    # (Thread 2, review-4228421486)
+    for e in req_errors:
+        assert "loaded" in e and "total" in e, (
+            f"plugin-error event for req failure must include loaded/total; got: {e}"
+        )
+
+    # After successful route registration the plugin-registered event must
+    # NOT carry error=None when req install failed; that would wipe the req
+    # error from startup-status, making startup look clean despite degraded
+    # dependencies. (Thread 1, review-4228421486)
+    registered_clear_events = [
+        e for e in events
+        if e.get("phase") == "plugin-registered"
+        and e.get("plugin_id") == "highway_3d"
+        and "error" in e
+        and e["error"] is None
+    ]
+    assert not registered_clear_events, (
+        "plugin-registered must NOT carry error=None when req install failed "
+        "(that would silently wipe the req-failure error from startup-status); "
+        f"events were: {events}"
+    )
+
 
 def test_fallback_routes_failure_emits_plugin_error(
     tmp_path, reset_plugin_state, monkeypatch
@@ -2030,6 +2055,14 @@ def test_fallback_routes_failure_emits_plugin_error(
         "fallback" in e["error"].lower() or "both" in e["error"].lower()
         for e in fallback_errors
     ), f"plugin-error text should reference the fallback failure; got: {[e['error'] for e in fallback_errors]}"
+
+    # The fallback route-error event must include loaded/total so the
+    # startup-status progress counters are not zeroed mid-run.
+    # (Thread 3, review-4228421486)
+    for e in fallback_errors:
+        assert "loaded" in e and "total" in e, (
+            f"plugin-error event for fallback route failure must include loaded/total; got: {e}"
+        )
 
 
 def test_normal_plugins_do_not_have_fallback_field_set(

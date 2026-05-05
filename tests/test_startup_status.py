@@ -539,7 +539,52 @@ def test_startup_status_latest_error_wins_when_same_plugin_emits_multiple(
     )
 
 
-def test_startup_status_e2e_real_plugin_loader(tmp_path, monkeypatch, isolate_logging):
+def test_startup_status_fallback_req_error_not_cleared_by_route_success(
+    monkeypatch, startup_harness
+):
+    """When a fallback copy's requirements installation fails (non-fatal) but its
+    routes succeed, the plugin-registered event must NOT carry error=None — that
+    would wipe the req-failure from _active_errors and make startup look clean
+    even though the active fallback copy has missing dependencies.
+    (Thread 1, review-4228421486)
+    """
+    server, phases = startup_harness
+
+    _EVENTS = [
+        # Bundled plugin fails its routes.
+        {"phase": "plugin-error", "message": "Bundled routes failed",
+         "plugin_id": "highway_3d", "loaded": 0, "total": 1,
+         "error": "bundled routes failure"},
+        # Fallback req install also fails (non-fatal).
+        {"phase": "plugin-error", "message": "Fallback req failed",
+         "plugin_id": "highway_3d", "loaded": 0, "total": 1,
+         "error": "fallback req failure"},
+        # Fallback routes succeed — plugin-registered WITHOUT clear_error
+        # because req failed.  event must NOT carry "error" key.
+        {"phase": "plugin-registered", "message": "Registered fallback",
+         "plugin_id": "highway_3d", "loaded": 1, "total": 1},
+        {"phase": "plugins-complete", "message": "Loaded 1 plugin(s)",
+         "plugin_id": "", "loaded": 1, "total": 1},
+    ]
+
+    def fake_load_plugins(_app, _context, progress_cb=None, route_setup_fn=None):
+        if progress_cb:
+            for event in _EVENTS:
+                progress_cb(event)
+
+    monkeypatch.setattr(server, "load_plugins", fake_load_plugins)
+    asyncio.run(server.startup_events())
+    final = server._get_startup_status()
+
+    # Startup must still report the req-failure error — the fallback succeeded
+    # in loading routes but its dependencies are degraded.
+    assert final["error"] == "fallback req failure", (
+        f"Expected req-failure error to persist after fallback route success, "
+        f"got {final['error']!r}"
+    )
+
+
+
     """Integration: run startup_events() with the REAL load_plugins against a
     minimal test plugin, using the production background-thread code path.
 
