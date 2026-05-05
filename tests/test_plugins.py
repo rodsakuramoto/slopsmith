@@ -836,7 +836,7 @@ def test_per_plugin_context_does_not_leak_load_sibling_across_plugins(tmp_path, 
     assert fake_app.state.zzz_origin == "zzz"
 
 
-# ── SLOPSMITH_PLUGINS_DIR precedence over bundled in-tree plugins ────────────
+# ── Bundled plugins always win over user-installed copies ────────────────────
 
 def test_bundled_plugin_always_wins_over_slopsmith_plugins_dir_copy(
     tmp_path, reset_plugin_state, monkeypatch, caplog
@@ -1274,6 +1274,63 @@ def test_bundled_wins_with_multiple_stale_copies(
         and "ignored" in caplog.text
         and str(user_plugin_dir) in caplog.text
     )
+
+
+def test_fallback_to_user_copy_when_bundled_routes_fail(
+    tmp_path, reset_plugin_state, monkeypatch, caplog
+):
+    """If a bundled plugin's routes.setup() raises, the loader falls back to
+    the previously-evicted user-installed copy so the server keeps working.
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    # Bundled copy whose routes.setup() will raise.
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    (bundled_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('bundled broken')\n"
+    )
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    (user_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    app.state.origin = 'user_fallback'\n"
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    fake_app = type("FakeApp", (), {})()
+    fake_app.state = type("State", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        with capture_logger(caplog, "slopsmith.plugins", level=logging.WARNING):
+            plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    # The fallback user copy should be registered.
+    hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
+    assert len(hw3d_entries) == 1
+    assert hw3d_entries[0].get("bundled") is False
+    assert str(hw3d_entries[0]["_dir"]) == str(user_plugin_dir)
+
+    # The fallback's routes.setup() should have run.
+    assert getattr(fake_app.state, "origin", None) == "user_fallback"
+
+    # The fallback warning must be logged.
+    assert "falling back to user-installed copy" in caplog.text
+    assert str(user_plugin_dir) in caplog.text
 
 
 def test_bundled_flag_requires_both_in_tree_directory_and_manifest_field(

@@ -529,6 +529,45 @@ def test_system_plugins_multi_root_scans_all(tmp_path):
     assert "pluginB" in orphan_ids
 
 
+def test_system_plugins_evicted_stale_copy_appears_in_orphans(tmp_path):
+    """A stale/evicted copy (same plugin id, different directory) appears
+    in the orphans list with ``evicted: True`` so it's visible in diagnostics.
+
+    Previously, _system_plugins silently skipped any directory whose manifest
+    id matched a loaded plugin, which meant evicted stale copies were invisible
+    in exported bundles.
+    """
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+
+    # Stale in-tree clone: same manifest id, different directory name.
+    stale_dir = plugins_dir / "3dhighway"
+    stale_dir.mkdir()
+    (stale_dir / "plugin.json").write_text('{"id":"highway_3d","name":"3D Highway (stale)"}')
+
+    # The real bundled copy is loaded from a different dir.
+    bundled_dir = plugins_dir / "highway_3d"
+    bundled_dir.mkdir()
+
+    loaded_plugins = [{
+        "id": "highway_3d",
+        "name": "3D Highway",
+        "_dir": bundled_dir,
+        "_manifest": {},
+    }]
+
+    result = db._system_plugins(loaded_plugins, plugins_root=plugins_dir)
+
+    # The stale clone must appear as an orphan with evicted=True.
+    evicted = [o for o in result["orphans"] if o["id"] == "highway_3d"]
+    assert len(evicted) == 1
+    assert evicted[0]["dir"] == "3dhighway"
+    assert evicted[0].get("evicted") is True
+    # The canonical loaded copy must NOT appear in orphans.
+    loaded_ids = {p["id"] for p in result["plugins"]}
+    assert "highway_3d" in loaded_ids
+
+
 def test_git_remote_token_stripped():
     """Embedded credentials in git remote URLs must be stripped from system/plugins.json."""
     # Simulate a plugin with a git remote that embeds a token.

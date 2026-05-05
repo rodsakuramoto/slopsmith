@@ -395,8 +395,15 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
     *plugins_root* accepts a single Path, a list of Paths (to cover both
     the built-in ``plugins/`` directory and ``SLOPSMITH_PLUGINS_DIR``), or
     None to skip orphan detection entirely.
+
+    Stale/evicted copies — directories with the same plugin id as a loaded
+    plugin but a different on-disk path — are included in ``orphans`` with
+    ``"evicted": True`` so support staff can see them in the bundle.
     """
     loaded_ids: set[str] = set()
+    # Map plugin_id → resolved directory path for the loaded copy,
+    # used below to distinguish the canonical dir from stale clones.
+    loaded_dir_by_id: dict[str, "Path"] = {}
     plugins_out: list[dict] = []
     for p in loaded_plugins:
         manifest = p.get("_manifest") or {}
@@ -423,6 +430,8 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
         plugins_out.append(entry)
         if entry["id"]:
             loaded_ids.add(entry["id"])
+            if isinstance(plugin_dir, Path):
+                loaded_dir_by_id[entry["id"]] = plugin_dir.resolve()
 
     # Walk plugin root directories to catch orphans (manifest exists but
     # plugin failed to load — common when requirements.txt installs
@@ -452,7 +461,13 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
                     manifest = {}
                 pid = manifest.get("id") or child.name
                 if pid in loaded_ids:
-                    continue
+                    # Skip only if this IS the loaded plugin's directory.
+                    # A different directory with the same id is a stale/evicted
+                    # copy — still report it so the diagnostics bundle surfaces it.
+                    loaded_dir = loaded_dir_by_id.get(pid)
+                    if loaded_dir is not None and loaded_dir == child_key:
+                        continue
+                    # Falls through to report as an evicted orphan.
                 orphan = {
                     "id": pid,
                     "name": manifest.get("name", pid),
@@ -461,6 +476,10 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
                     "loaded": False,
                     "dir": child.name,
                 }
+                # Flag directories that share an id with a loaded plugin
+                # (bundled-wins evicted them) vs. true orphans (failed to load).
+                if pid in loaded_ids:
+                    orphan["evicted"] = True
                 git = _git_info(child)
                 if git is not None:
                     orphan["git"] = git

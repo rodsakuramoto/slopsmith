@@ -557,6 +557,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
     # instead of a generic "skipping duplicate" line. Mirrors loaded_ids
     # in lifetime; both are local to this discovery pass.
     loaded_specs_by_id: dict[str, tuple] = {}
+    # Maps plugin_id → evicted user spec (plugin_id, plugin_dir, manifest).
+    # Populated when a bundled plugin evicts a user-installed copy. Used as
+    # a fallback: if the bundled copy later fails to load its routes, the
+    # user copy is restored so the server remains functional.
+    _pending_evictions: dict[str, tuple] = {}
 
     def _is_bundled(pdir: Path, mf: dict) -> bool:
         """Return True iff pdir is the real in-tree bundled core plugin.
@@ -621,15 +626,10 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 # for empty strings).
                 continue
             if plugin_id in loaded_ids:
-                # Quiet shadowing: when a user-installed copy beats a
-                # bundled copy (or vice versa), the duplicate-skip is
-                # the override path users explicitly want — phrase the
-                # log so it's obvious which copy is active and why,
-                # rather than the generic "Skipping duplicate".
-                # `loaded_specs_by_id` records the kept copy; this
-                # branch is the discarded one. Slopsmith#160 uses this
-                # for the plugin-list UI marker that shows a banner
-                # when a bundled plugin has been overridden.
+                # Duplicate id — pick a winner. Bundled plugins always win.
+                # `loaded_specs_by_id` records the already-seen copy; this
+                # is the new candidate. Use specific log messages so it's
+                # obvious which copy wins and why.
                 kept = loaded_specs_by_id.get(plugin_id)
                 # Bundled-ness requires ALL THREE: the in-tree PLUGINS_DIR
                 # location, the manifest's ``"bundled": true`` flag, AND
@@ -643,6 +643,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                     # or cloned directly into plugins/). Bundled always wins —
                     # evict the user copy and fall through to register the
                     # bundled version instead.
+                    #
+                    # Store the evicted spec as a potential fallback: if the
+                    # bundled copy later fails to load its routes, the server
+                    # restores this user copy so it keeps working.
+                    _pending_evictions[plugin_id] = kept
                     log.warning(
                         "User-installed copy of bundled plugin %r at %s ignored; "
                         "using bundled version at %s.",
@@ -696,6 +701,9 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
     # plugins are loaded, so concurrent readers never see a partially
     # populated LOADED_PLUGINS.
     _loaded_batch: list = []
+    # Track plugin_ids whose routes.setup() raised an exception, so we
+    # can fall back to evicted user copies for those plugin_ids below.
+    _route_failed_ids: set[str] = set()
 
     for idx, (plugin_id, plugin_dir, manifest) in enumerate(plugin_load_specs):
         _emit_progress(
@@ -792,6 +800,7 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                     log.info("Loaded routes for plugin %r", plugin_id)
             except Exception as e:
                 log.exception("Failed to load routes for plugin %r", plugin_id)
+                _route_failed_ids.add(plugin_id)
                 _emit_progress(
                     "plugin-error",
                     f"Failed loading routes for '{plugin_id}'",
@@ -843,6 +852,74 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             loaded=idx + 1,
             total=len(plugin_load_specs),
         )
+
+    # If any bundled plugin failed to load its routes AND it evicted a
+    # user-installed copy during discovery, fall back to that user copy so
+    # the server remains functional. A bad bundled release should never
+    # leave the plugin completely broken when a working user copy exists.
+    for evicted_id, evicted_spec in _pending_evictions.items():
+        if evicted_id not in _route_failed_ids:
+            continue
+        _ev_id, ev_dir, ev_manifest = evicted_spec
+        log.warning(
+            "Bundled plugin %r failed to load routes; "
+            "falling back to user-installed copy at %s.",
+            evicted_id, ev_dir,
+        )
+        # Remove the broken bundled entry from the batch.
+        _loaded_batch[:] = [e for e in _loaded_batch if e["id"] != evicted_id]
+        # Ensure the fallback directory is on sys.path.
+        ev_dir_str = str(ev_dir)
+        if ev_dir_str not in sys.path:
+            sys.path.insert(0, ev_dir_str)
+        ev_context = dict(context)
+        ev_context["load_sibling"] = (
+            lambda name, _pid=evicted_id, _pdir=ev_dir:
+                _load_plugin_sibling(_pid, _pdir, name)
+        )
+        ev_context["log"] = logging.getLogger(f"slopsmith.plugin.{evicted_id}")
+        # Re-load the fallback's routes using the same module-name slot so
+        # it naturally replaces the previously-failed bundled module.
+        ev_routes_file = ev_manifest.get("routes")
+        if ev_routes_file:
+            try:
+                ev_module_name = f"plugin_{_safe_plugin_id_for_module_name(evicted_id)}_routes"
+                ev_spec = importlib.util.spec_from_file_location(
+                    ev_module_name, str(ev_dir / ev_routes_file))
+                ev_routes_module = importlib.util.module_from_spec(ev_spec)
+                sys.modules[ev_module_name] = ev_routes_module
+                ev_spec.loader.exec_module(ev_routes_module)
+                if hasattr(ev_routes_module, "setup"):
+                    if route_setup_fn is not None:
+                        _fn = lambda rm=ev_routes_module, ctx=ev_context: rm.setup(app, ctx)
+                        _fn._plugin_id = evicted_id
+                        route_setup_fn(_fn)
+                    else:
+                        ev_routes_module.setup(app, ev_context)
+                log.info("Loaded routes for fallback copy of plugin %r", evicted_id)
+            except Exception:
+                log.exception(
+                    "Fallback user-installed copy of %r also failed to load routes; "
+                    "plugin unavailable.", evicted_id,
+                )
+        _loaded_batch.append({
+            "id": evicted_id,
+            "name": ev_manifest.get("name", evicted_id),
+            "nav": ev_manifest.get("nav"),
+            "type": ev_manifest.get("type"),
+            "bundled": False,  # user copy, not bundled
+            "has_screen": bool(ev_manifest.get("screen")),
+            "has_script": bool(ev_manifest.get("script")),
+            "has_settings": bool(ev_manifest.get("settings")),
+            "has_tour": _is_valid_tour_manifest(ev_manifest.get("tour")),
+            "_export_paths": _normalize_export_paths(ev_manifest.get("settings"), evicted_id),
+            "_diagnostics_paths": _normalize_diagnostics_paths(ev_manifest.get("diagnostics"), evicted_id),
+            "_diagnostics_callable_spec": _parse_diagnostics_callable(ev_manifest.get("diagnostics"), evicted_id),
+            "_load_sibling": ev_context["load_sibling"],
+            "_dir": ev_dir,
+            "_manifest": ev_manifest,
+        })
+        log.info("Registered fallback user copy of plugin %r (%s)", evicted_id, ev_manifest.get("name", ""))
 
     # Publish all plugins atomically so concurrent readers never observe
     # a partially-populated list during the loading window.  We clear
