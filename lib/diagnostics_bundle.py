@@ -403,7 +403,7 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
     loaded_ids: set[str] = set()
     # Map plugin_id → resolved directory path for the loaded copy,
     # used below to distinguish the canonical dir from stale clones.
-    loaded_dir_by_id: dict[str, "Path"] = {}
+    loaded_dir_by_id: dict[str, Path] = {}
     plugins_out: list[dict] = []
     for p in loaded_plugins:
         manifest = p.get("_manifest") or {}

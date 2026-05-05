@@ -891,7 +891,7 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 ev_spec.loader.exec_module(ev_routes_module)
                 if hasattr(ev_routes_module, "setup"):
                     if route_setup_fn is not None:
-                        _fn = lambda rm=ev_routes_module, ctx=ev_context: rm.setup(app, ctx)
+                        _fn = lambda rm=ev_routes_module, ctx=ev_context, a=app: rm.setup(a, ctx)
                         _fn._plugin_id = evicted_id
                         route_setup_fn(_fn)
                     else:
