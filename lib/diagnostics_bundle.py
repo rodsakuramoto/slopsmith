@@ -396,9 +396,19 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
     the built-in ``plugins/`` directory and ``SLOPSMITH_PLUGINS_DIR``), or
     None to skip orphan detection entirely.
 
-    Stale/evicted copies — directories with the same plugin id as a loaded
-    plugin but a different on-disk path — are included in ``orphans`` with
-    ``"evicted": True`` so support staff can see them in the bundle.
+    Plugin directories not in ``LOADED_PLUGINS`` appear in ``orphans``.
+    Two sub-cases are distinguished:
+
+    * **Stale/evicted copies**: same plugin id as a loaded plugin but a
+      different on-disk path (e.g. an old user clone of a bundled plugin).
+      These receive ``"evicted": True``. This also covers bundled plugin
+      directories whose routes failed and whose server fell back to a
+      user copy — the bundled dir is then the non-loaded directory and
+      appears here too. Check the server startup log for the specific
+      failure reason in that case.
+    * **Failed-to-load orphans**: directories whose plugin id is not in
+      ``LOADED_PLUGINS`` at all (requirements install failure, manifest
+      error, etc.). These appear without ``"evicted"`` set.
     """
     loaded_ids: set[str] = set()
     # Map plugin_id → resolved directory path for the loaded copy,

@@ -671,6 +671,12 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 elif kept_is_bundled:
                     # A non-bundled (user) copy encountered after an already-kept
                     # bundled copy. Bundled always wins — discard the user copy.
+                    # Store as a potential fallback: if the bundled copy later
+                    # fails to load its routes, the server restores this user copy
+                    # so it keeps working. Only the first user copy encountered is
+                    # kept as the fallback (subsequent duplicates are dropped).
+                    if plugin_id not in _pending_evictions:
+                        _pending_evictions[plugin_id] = (plugin_id, plugin_dir, manifest)
                     log.warning(
                         "User-installed copy of bundled plugin %r at %s ignored; "
                         "using bundled version at %s.",
@@ -857,6 +863,13 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
     # user-installed copy during discovery, fall back to that user copy so
     # the server remains functional. A bad bundled release should never
     # leave the plugin completely broken when a working user copy exists.
+    #
+    # NOTE: Routes that the broken bundled setup() may have partially
+    # registered before raising cannot be un-registered (FastAPI has no
+    # route-removal API). In practice setup() usually fails before
+    # registering any handlers (import error, missing config), so partial
+    # registration is rare. This is an accepted limitation; the primary
+    # mitigation is thorough testing of bundled releases.
     for evicted_id, evicted_spec in _pending_evictions.items():
         if evicted_id not in _route_failed_ids:
             continue
@@ -878,9 +891,15 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 _load_plugin_sibling(_pid, _pdir, name)
         )
         ev_context["log"] = logging.getLogger(f"slopsmith.plugin.{evicted_id}")
+        # Install the fallback copy's requirements. It was evicted before
+        # the main load loop ran, so _install_requirements was never called
+        # for it. A user copy that depends on extra packages would otherwise
+        # fail with an import error even when those packages can be installed.
+        _install_requirements(ev_dir, evicted_id)
         # Re-load the fallback's routes using the same module-name slot so
         # it naturally replaces the previously-failed bundled module.
         ev_routes_file = ev_manifest.get("routes")
+        fallback_routes_ok = True
         if ev_routes_file:
             try:
                 ev_module_name = f"plugin_{_safe_plugin_id_for_module_name(evicted_id)}_routes"
@@ -900,26 +919,28 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             except Exception:
                 log.exception(
                     "Fallback user-installed copy of %r also failed to load routes; "
-                    "plugin unavailable.", evicted_id,
+                    "plugin will not be registered.", evicted_id,
                 )
-        _loaded_batch.append({
-            "id": evicted_id,
-            "name": ev_manifest.get("name", evicted_id),
-            "nav": ev_manifest.get("nav"),
-            "type": ev_manifest.get("type"),
-            "bundled": False,  # user copy, not bundled
-            "has_screen": bool(ev_manifest.get("screen")),
-            "has_script": bool(ev_manifest.get("script")),
-            "has_settings": bool(ev_manifest.get("settings")),
-            "has_tour": _is_valid_tour_manifest(ev_manifest.get("tour")),
-            "_export_paths": _normalize_export_paths(ev_manifest.get("settings"), evicted_id),
-            "_diagnostics_paths": _normalize_diagnostics_paths(ev_manifest.get("diagnostics"), evicted_id),
-            "_diagnostics_callable_spec": _parse_diagnostics_callable(ev_manifest.get("diagnostics"), evicted_id),
-            "_load_sibling": ev_context["load_sibling"],
-            "_dir": ev_dir,
-            "_manifest": ev_manifest,
-        })
-        log.info("Registered fallback user copy of plugin %r (%s)", evicted_id, ev_manifest.get("name", ""))
+                fallback_routes_ok = False
+        if fallback_routes_ok:
+            _loaded_batch.append({
+                "id": evicted_id,
+                "name": ev_manifest.get("name", evicted_id),
+                "nav": ev_manifest.get("nav"),
+                "type": ev_manifest.get("type"),
+                "bundled": False,  # user copy, not bundled
+                "has_screen": bool(ev_manifest.get("screen")),
+                "has_script": bool(ev_manifest.get("script")),
+                "has_settings": bool(ev_manifest.get("settings")),
+                "has_tour": _is_valid_tour_manifest(ev_manifest.get("tour")),
+                "_export_paths": _normalize_export_paths(ev_manifest.get("settings"), evicted_id),
+                "_diagnostics_paths": _normalize_diagnostics_paths(ev_manifest.get("diagnostics"), evicted_id),
+                "_diagnostics_callable_spec": _parse_diagnostics_callable(ev_manifest.get("diagnostics"), evicted_id),
+                "_load_sibling": ev_context["load_sibling"],
+                "_dir": ev_dir,
+                "_manifest": ev_manifest,
+            })
+            log.info("Registered fallback user copy of plugin %r (%s)", evicted_id, ev_manifest.get("name", ""))
 
     # Publish all plugins atomically so concurrent readers never observe
     # a partially-populated list during the loading window.  We clear
