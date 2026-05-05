@@ -955,11 +955,19 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         # resolve bundled helper code that is still cached in sys.modules.
         _safe_eid = _safe_plugin_id_for_module_name(evicted_id)
         _parent_pkg = f"plugin_{_safe_eid}"
+        # The routes module is registered under exactly `{_parent_pkg}_routes`
+        # (underscore, not dot — it is NOT a sub-package of _parent_pkg).
+        # Using startswith(f"{_parent_pkg}_") would also purge route/sibling
+        # modules for other plugins whose ids share the same prefix — e.g.,
+        # "plugin_a_routes" would be deleted when evicting plugin "a" because
+        # "plugin_a_routes".startswith("plugin_a_") is True, which would also
+        # incorrectly match "plugin_a_5f_b_routes" (routes for plugin "a_b").
+        # Match the routes entry exactly instead.
         _stale_sibling_keys = [
             k for k in list(sys.modules)
             if k == _parent_pkg
             or k.startswith(f"{_parent_pkg}.")
-            or k.startswith(f"{_parent_pkg}_")
+            or k == f"{_parent_pkg}_routes"
         ]
         for _k in _stale_sibling_keys:
             del sys.modules[_k]
@@ -1014,6 +1022,11 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 "nav": ev_manifest.get("nav"),
                 "type": ev_manifest.get("type"),
                 "bundled": False,  # user copy, not bundled
+                # Marks this entry as an emergency user-copy fallback: the
+                # bundled routes failed, so the evicted user-installed copy
+                # was loaded instead.  Surfaced in /api/plugins and the
+                # settings UI so users know the bundled build is broken.
+                "fallback": True,
                 "has_screen": bool(ev_manifest.get("screen")),
                 "has_script": bool(ev_manifest.get("script")),
                 "has_settings": bool(ev_manifest.get("settings")),
@@ -1119,6 +1132,12 @@ def register_plugin_api(app: FastAPI):
                 # render a "Bundled" badge (lock icon) next to the
                 # plugin name in the settings collapsible.
                 "bundled": p.get("bundled", False),
+                # `fallback` is True only for user-installed copies that
+                # are active because the bundled plugin's routes failed.
+                # Surfaced in /api/plugins so the settings UI can show
+                # a warning badge, letting users know the bundled build
+                # is broken and they are running an older user copy.
+                "fallback": p.get("fallback", False),
                 "has_screen": p["has_screen"],
                 "has_script": p["has_script"],
                 "has_settings": p["has_settings"],

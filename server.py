@@ -1061,6 +1061,14 @@ async def startup_events():
 
     def _load_plugins_background():
         try:
+            # Track which plugin last set a non-null error so that a
+            # `clear_error=True` event from a fallback recovery only clears
+            # the error it actually caused.  If a *different* plugin reported
+            # an error later in startup and the current error source doesn't
+            # match the plugin that is now recovering, we leave the error
+            # field untouched — the other plugin's failure must not be hidden.
+            _last_error_plugin_id: list = [""]  # mutable box for closure
+
             def _on_progress(event: dict):
                 total = int(event.get("total") or 0)
                 loaded = int(event.get("loaded") or 0)
@@ -1081,11 +1089,22 @@ async def startup_events():
                 # - Explicit null (clear_error=True in _emit_progress):
                 #   clear a previously-reported error when, e.g., a bundled
                 #   failure is resolved by a successful user-copy fallback.
+                #   Only applied when the plugin clearing it matches the one
+                #   that last set it — prevents a fallback recovery from
+                #   accidentally hiding an unrelated plugin failure that was
+                #   reported later in startup.
                 # Events that omit the key entirely leave the status unchanged,
                 # preserving any earlier plugin error across the many
                 # non-error progress events that follow normal setup steps.
                 if "error" in event:
-                    update["error"] = event["error"]
+                    err_val = event["error"]
+                    if err_val is not None:
+                        _last_error_plugin_id[0] = plugin_id
+                        update["error"] = err_val
+                    elif not plugin_id or plugin_id == _last_error_plugin_id[0]:
+                        # clear_error for the same plugin (or unscoped) — apply.
+                        update["error"] = None
+                    # else: clear from a different plugin — leave status alone.
                 _set_startup_status(**update)
 
             def _route_setup_on_main(fn):
@@ -1141,7 +1160,14 @@ async def startup_events():
                     fut.result(timeout=60)
                 except concurrent.futures.TimeoutError:
                     _pid = getattr(fn, "_plugin_id", "unknown")
-                    log.warning("route registration for %r timed out after 60 s", _pid)
+                    log.warning(
+                        "route registration for %r timed out after 60 s; "
+                        "if setup() was already executing (mid-flight), any routes "
+                        "it registered before the timeout cannot be removed and may "
+                        "conflict with the user-copy fallback — this is an accepted "
+                        "edge case (Python threads cannot be interrupted mid-execution).",
+                        _pid,
+                    )
                     # Prevent the still-queued _do() from executing if it
                     # hasn't started yet — avoids races with any fallback.
                     _cancelled.set()

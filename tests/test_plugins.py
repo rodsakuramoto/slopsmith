@@ -1657,6 +1657,166 @@ def test_plugins_complete_loaded_count_when_both_routes_fail(
     assert complete["total"] == 2
 
 
+def test_fallback_entry_has_fallback_true_field(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """When a user-copy fallback is activated because bundled routes fail,
+    the registered LOADED_PLUGINS entry must include ``"fallback": True``.
+    The /api/plugins endpoint exposes this field so the settings UI can
+    show a warning badge (Thread 4, review-4226937699).
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    (bundled_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('bundled broken')\n"
+    )
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    (user_plugin_dir / "routes.py").write_text("def setup(app, ctx):\n    pass\n")
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    fake_app = type("FakeApp", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.get("fallback") is True, (
+        "Fallback user copy entry must have fallback=True, got "
+        f"{entry.get('fallback')!r}"
+    )
+    assert entry.get("bundled") is False, (
+        "Fallback user copy must not be marked bundled"
+    )
+
+
+def test_normal_plugins_do_not_have_fallback_field_set(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """Normal (non-fallback) plugins — both bundled and user-installed —
+    must not have ``fallback: True`` set.  Only emergency user-copy
+    fallbacks that replaced a broken bundled plugin carry the flag.
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bundled_plugin_dir = bundled_dir / "my_plugin"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "my_plugin", "name": "My Plugin", "bundled": True})
+    )
+
+    fake_app = type("FakeApp", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "my_plugin"]
+    assert len(entries) == 1
+    assert not entries[0].get("fallback"), (
+        "Normal bundled plugin must not have fallback=True"
+    )
+
+
+def test_sibling_purge_does_not_affect_other_plugin_with_same_prefix(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """The sibling module purge in the fallback block must only remove the
+    exact routes module key for the evicted plugin and its namespaced
+    load_sibling modules.  It must NOT delete modules for other plugins
+    whose namespaced IDs share the same prefix.
+
+    Previously, ``k.startswith(f"{_parent_pkg}_")`` would match
+    ``plugin_a_routes`` when purging plugin ``a``, and would also
+    incorrectly match ``plugin_a_5f_b_routes`` (routes for plugin ``a_b``).
+    The fix replaces the startswith check with an exact key match.
+
+    (Thread 1, review-4226937699)
+    """
+    plugins = reset_plugin_state
+    import sys
+
+    # plugin "a" — bundled, fails routes.
+    # plugin "a_b" — also bundled, healthy.
+    # user copy of "a" — provides the fallback.
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+
+    ba_dir = bundled_dir / "a"
+    ba_dir.mkdir()
+    (ba_dir / "plugin.json").write_text(
+        json.dumps({"id": "a", "name": "Plugin A", "routes": "routes.py", "bundled": True})
+    )
+    (ba_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    raise RuntimeError('a broken')\n"
+    )
+
+    ab_dir = bundled_dir / "a_b"
+    ab_dir.mkdir()
+    # `a_b` routes capture a ref so we can assert they ran from the right module.
+    (ab_dir / "plugin.json").write_text(
+        json.dumps({"id": "a_b", "name": "Plugin A_B", "routes": "routes.py", "bundled": True})
+    )
+    (ab_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    app.state.ab_setup_ran = True\n"
+    )
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    ua_dir = user_dir / "a"
+    ua_dir.mkdir()
+    (ua_dir / "plugin.json").write_text(
+        json.dumps({"id": "a", "name": "Plugin A (user)", "routes": "routes.py"})
+    )
+    (ua_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    app.state.a_fallback_ran = True\n"
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    fake_app = type("FakeApp", (), {})()
+    fake_app.state = type("State", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    # plugin "a_b" routes should have run without being clobbered by
+    # the prefix-based purge.
+    assert getattr(fake_app.state, "ab_setup_ran", False) is True, (
+        "plugin 'a_b' setup() was not called — its module was incorrectly "
+        "purged during the 'a' fallback sibling purge"
+    )
+    # plugin "a" fallback also ran.
+    assert getattr(fake_app.state, "a_fallback_ran", False) is True, (
+        "plugin 'a' fallback setup() did not run"
+    )
+
 
 def test_bundled_flag_requires_both_in_tree_directory_and_manifest_field(
     tmp_path, reset_plugin_state, monkeypatch

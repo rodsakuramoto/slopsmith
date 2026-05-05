@@ -3989,6 +3989,26 @@ async function loadPlugins() {
                     `;
                     labelWrap.appendChild(badge);
                 }
+                // "Fallback" warning badge: the bundled copy failed to load its
+                // routes, so the server fell back to this older user-installed
+                // copy.  Warn users so they know the bundled build is broken and
+                // can check the server startup log for the root cause.
+                if (plugin.fallback) {
+                    const fallbackDesc = 'The bundled copy of this plugin failed to start. This is a fallback from your user-installed copy. Check the server startup log for details.';
+                    const fbBadge = document.createElement('span');
+                    fbBadge.className = 'inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-yellow-400/40 bg-yellow-500/10 text-yellow-300';
+                    fbBadge.title = fallbackDesc;
+                    fbBadge.setAttribute('aria-label', 'Fallback — ' + fallbackDesc);
+                    fbBadge.setAttribute('role', 'img');
+                    fbBadge.innerHTML = `
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                        </svg>
+                        Fallback
+                    `;
+                    labelWrap.appendChild(fbBadge);
+                }
                 summary.appendChild(labelWrap);
                 // Chevron icon — built via setAttributeNS so the SVG sits in
                 // the SVG namespace and renders correctly. Plugin label is
