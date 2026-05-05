@@ -584,7 +584,7 @@ def test_startup_status_fallback_req_error_not_cleared_by_route_success(
     )
 
 
-
+def test_startup_status_e2e_real_plugin_loader(tmp_path, monkeypatch, isolate_logging):
     """Integration: run startup_events() with the REAL load_plugins against a
     minimal test plugin, using the production background-thread code path.
 
