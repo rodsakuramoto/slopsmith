@@ -894,10 +894,11 @@ def test_bundled_plugin_always_wins_over_slopsmith_plugins_dir_copy(
     # Exactly one highway_3d entry registered.
     hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
     assert len(hw3d_entries) == 1
-    # The loader emits a warning about the ignored user copy.
+    # The loader emits a warning about the ignored user copy, naming its path.
     assert (
         "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
         and "ignored" in caplog.text
+        and str(user_dir / "highway_3d") in caplog.text
     )
 
 
@@ -949,10 +950,11 @@ def test_bundled_plugin_wins_over_user_copy_and_logs_warning(
     assert str(kept["_dir"]) == str(plugin_dir)
     assert kept.get("bundled") is True
 
-    # The loader must emit the specific warning about the ignored user copy.
+    # The loader must emit the specific warning about the ignored user copy, naming its path.
     assert (
         "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
         and "ignored" in caplog.text
+        and str(user_plugin_dir) in caplog.text
     )
 
 
@@ -1005,10 +1007,11 @@ def test_bundled_plugin_wins_over_verbatim_user_copy(
     assert str(kept["_dir"]) == str(plugin_dir)
     assert kept.get("bundled") is True
 
-    # The loader emits the warning about the ignored user copy.
+    # The loader emits the warning about the ignored user copy, naming its path.
     assert (
         "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
         and "ignored" in caplog.text
+        and str(user_plugin_dir) in caplog.text
     )
 
 
@@ -1067,10 +1070,11 @@ def test_bundled_plugin_wins_over_copy_in_same_plugins_dir(
     # Bundled flag set on the kept copy.
     assert kept.get("bundled") is True
 
-    # The loader emits the specific warning about the ignored user copy.
+    # The loader emits the specific warning about the ignored user copy, naming its path.
     assert (
         "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
         and "ignored" in caplog.text
+        and str(user_plugin_dir) in caplog.text
     )
 
 
@@ -1124,10 +1128,11 @@ def test_bundled_plugin_wins_over_copy_in_same_plugins_dir_bundled_sorts_first(
     # Bundled flag set on the kept copy.
     assert kept.get("bundled") is True
 
-    # The loader emits the specific warning about the ignored user copy.
+    # The loader emits the specific warning about the ignored user copy, naming its path.
     assert (
         "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
         and "ignored" in caplog.text
+        and str(user_plugin_dir) in caplog.text
     )
 
 
@@ -1186,10 +1191,11 @@ def test_bundled_plugin_wins_over_verbatim_copy_in_same_plugins_dir(
     # Bundled flag set on the kept copy.
     assert kept.get("bundled") is True
 
-    # Warning about the ignored user copy must be emitted.
+    # Warning about the ignored user copy must be emitted, naming its path.
     assert (
         "User-installed copy of bundled plugin 'highway_3d'" in caplog.text
         and "ignored" in caplog.text
+        and str(user_plugin_dir) in caplog.text
     )
 
 
