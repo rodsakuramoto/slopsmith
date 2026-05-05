@@ -1141,6 +1141,14 @@ async def startup_events():
                 # checks at every call site, so partial route registration
                 # inside an already-running fn() remains an accepted edge case.
                 _cancelled = threading.Event()
+                # Tracks whether _do() has passed the cancellation guard and
+                # started calling fn(). Used on timeout to decide whether a
+                # fallback is safe: if _started is not set, _cancelled will
+                # prevent fn() from running (safe to fallback); if _started
+                # is set, fn() is mid-flight and activating a fallback would
+                # race with it (fallback skipped — caller checks
+                # `e.setup_mid_flight` on the re-raised TimeoutError).
+                _started = threading.Event()
 
                 def _do():
                     if _cancelled.is_set():
@@ -1149,6 +1157,7 @@ async def startup_events():
                         if not fut.done():
                             fut.set_result(None)
                         return
+                    _started.set()
                     try:
                         fn()
                         fut.set_result(None)
@@ -1158,16 +1167,30 @@ async def startup_events():
                 loop.call_soon_threadsafe(_do)
                 try:
                     fut.result(timeout=60)
-                except concurrent.futures.TimeoutError:
+                except concurrent.futures.TimeoutError as _te:
                     _pid = getattr(fn, "_plugin_id", "unknown")
-                    log.warning(
-                        "route registration for %r timed out after 60 s; "
-                        "if setup() was already executing (mid-flight), any routes "
-                        "it registered before the timeout cannot be removed and may "
-                        "conflict with the user-copy fallback — this is an accepted "
-                        "edge case (Python threads cannot be interrupted mid-execution).",
-                        _pid,
-                    )
+                    _mid_flight = _started.is_set()
+                    if _mid_flight:
+                        log.warning(
+                            "route registration for %r timed out after 60 s and "
+                            "setup() was already mid-flight; any routes registered "
+                            "before the timeout cannot be removed. The user-copy "
+                            "fallback will NOT be activated to prevent concurrent "
+                            "router mutation (Python threads cannot be interrupted "
+                            "mid-execution). Restart the server to recover.",
+                            _pid,
+                        )
+                        # Signal to load_plugins() that fallback is unsafe
+                        # for this plugin — the original setup() is still
+                        # running and may add more routes concurrently.
+                        _te.setup_mid_flight = True
+                    else:
+                        log.warning(
+                            "route registration for %r timed out after 60 s; "
+                            "setup() had not started yet, so it has been cancelled "
+                            "and the user-copy fallback (if any) can proceed safely.",
+                            _pid,
+                        )
                     # Prevent the still-queued _do() from executing if it
                     # hasn't started yet — avoids races with any fallback.
                     _cancelled.set()

@@ -725,6 +725,12 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
     # Track plugin_ids whose routes.setup() raised an exception, so we
     # can fall back to evicted user copies for those plugin_ids below.
     _route_failed_ids: set[str] = set()
+    # Track plugin_ids whose bundled setup() timed out while already
+    # running (mid-flight). For those, activating the fallback is unsafe
+    # because the original setup() may still be mutating the router
+    # concurrently — fallback routes would mount on top of partial bundled
+    # routes, producing duplicate or conflicting endpoints.
+    _route_mid_flight_ids: set[str] = set()
 
     for idx, (plugin_id, plugin_dir, manifest) in enumerate(plugin_load_specs):
         _emit_progress(
@@ -831,6 +837,12 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             except Exception as e:
                 log.exception("Failed to load routes for plugin %r", plugin_id)
                 _route_failed_ids.add(plugin_id)
+                # If this was a mid-flight timeout, mark the plugin so the
+                # fallback block skips it — the original setup() may still be
+                # running and registering routes concurrently; mounting a
+                # fallback on top would produce duplicate/conflicting endpoints.
+                if getattr(e, "setup_mid_flight", False):
+                    _route_mid_flight_ids.add(plugin_id)
                 # Detect partial route registration: if setup() mounted any
                 # handlers before raising, those routes stay permanently (no
                 # FastAPI deregistration API). Warn loudly so maintainers can
@@ -842,13 +854,30 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                         "these handlers cannot be removed and may conflict with any fallback.",
                         plugin_id, _routes_after - _routes_before,
                     )
-                # Record bare-import modules added during the failed load so
-                # the fallback block can purge them (Thread 1, review-4226783807).
-                # Only store when a fallback user copy is available; no-op otherwise.
+                # Compute bare-import modules added during the failed load.
+                # IMPORTANT: Filter strictly to modules whose __file__ lives
+                # inside this plugin's directory — the naive set-diff would
+                # capture every module imported by any concurrent thread
+                # (metadata scan, stdlib lazy imports, etc.) between the
+                # snapshot and the failure, causing the fallback block to
+                # delete unrelated entries from sys.modules.
+                # Purge them NOW (not deferred) so subsequent plugins in the
+                # main loop don't accidentally resolve this plugin's helpers
+                # when they do bare `import helper`.  The fallback block's
+                # per-key pop() is a harmless no-op when the keys are already
+                # absent.
                 if plugin_id in _pending_evictions:
-                    _pending_eviction_stale_modules[plugin_id] = (
-                        set(sys.modules) - _sysmod_before_routes
-                    )
+                    _plugin_dir_str = str(plugin_dir) + os.sep
+                    _stale = set()
+                    for _k in set(sys.modules) - _sysmod_before_routes:
+                        _mod = sys.modules.get(_k)
+                        _mf = getattr(_mod, "__file__", None)
+                        if _mf and str(_mf).startswith(_plugin_dir_str):
+                            _stale.add(_k)
+                    _pending_eviction_stale_modules[plugin_id] = _stale
+                    # Purge immediately to prevent module leakage into later plugins.
+                    for _k in _stale:
+                        sys.modules.pop(_k, None)
                 _emit_progress(
                     "plugin-error",
                     f"Failed loading routes for '{plugin_id}'",
@@ -914,14 +943,29 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
     # the primary mitigation is thorough testing of bundled releases.
     #
     # NOTE on timeout race: in async mode the bundled setup() runs on the
-    # event-loop thread via route_setup_fn. If it times out (>60 s), the
-    # load_plugins() thread raises TimeoutError and proceeds to activate the
-    # fallback, but the original setup() may still be running concurrently
-    # and can register additional routes after the fallback is already active.
-    # This race is also accepted as a very-unlikely edge case; prefer async-
-    # safe and idempotent setup() implementations in bundled plugins.
+    # event-loop thread via route_setup_fn. If it times out (>60 s) while
+    # setup() has ALREADY STARTED executing, `_route_mid_flight_ids` is set
+    # for that plugin and the fallback is skipped — the original setup() may
+    # still be mutating the router concurrently and mounting a second set of
+    # routes on top would produce duplicate/conflicting endpoints. The
+    # mid-flight case is detected by the `setup_mid_flight` attribute on the
+    # TimeoutError re-raised by _route_setup_on_main (server.py).
+    # If the timeout fires BEFORE _do() has started, the _cancelled flag
+    # in _route_setup_on_main prevents the queued callback from executing,
+    # making the fallback safe in that case.
     for evicted_id, evicted_spec in _pending_evictions.items():
         if evicted_id not in _route_failed_ids:
+            continue
+        if evicted_id in _route_mid_flight_ids:
+            log.warning(
+                "Skipping fallback for %r: bundled setup() timed out while already "
+                "executing; the router may have partial routes from the bundled copy. "
+                "Restart the server to recover.",
+                evicted_id,
+            )
+            # Remove the broken bundled entry too — its routes are in an
+            # unknown state and it should not appear in /api/plugins.
+            _loaded_batch[:] = [e for e in _loaded_batch if e["id"] != evicted_id]
             continue
         _ev_id, ev_dir, ev_manifest = evicted_spec
         log.warning(
@@ -929,7 +973,14 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             "falling back to user-installed copy at %s.",
             evicted_id, ev_dir,
         )
-        # Remove the broken bundled entry from the batch.
+        # Remove the broken bundled entry from the batch, recording its
+        # original position so the fallback is inserted there instead of
+        # being appended at the end (appending would change the order of
+        # plugins in /api/plugins and the frontend playSong wrapper chain).
+        _bundled_orig_idx = next(
+            (i for i, e in enumerate(_loaded_batch) if e["id"] == evicted_id),
+            len(_loaded_batch),
+        )
         _loaded_batch[:] = [e for e in _loaded_batch if e["id"] != evicted_id]
         # Ensure the fallback directory is on sys.path.
         ev_dir_str = str(ev_dir)
@@ -1014,7 +1065,7 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                     )
                 fallback_routes_ok = False
         if fallback_routes_ok:
-            _loaded_batch.append({
+            _loaded_batch.insert(_bundled_orig_idx, {
                 "id": evicted_id,
                 "name": ev_manifest.get("name", evicted_id),
                 "nav": ev_manifest.get("nav"),

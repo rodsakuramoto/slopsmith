@@ -1657,6 +1657,128 @@ def test_plugins_complete_loaded_count_when_both_routes_fail(
     assert complete["total"] == 2
 
 
+def test_fallback_preserves_plugin_order(
+    tmp_path, reset_plugin_state, monkeypatch
+):
+    """When a fallback user copy replaces a broken bundled plugin, it must be
+    inserted at the bundled plugin's original position in LOADED_PLUGINS —
+    not appended at the end — so that /api/plugins order and the frontend
+    playSong wrapper chain are unchanged (Thread 3, review-4227201020).
+
+    Layout:
+      bundled: alpha (healthy), highway_3d (broken), omega (healthy)
+      user dir: highway_3d (working fallback)
+
+    Expected order after fallback: [alpha, highway_3d (fallback), omega]
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+
+    for name, content in [
+        ("alpha", {"id": "alpha", "name": "Alpha", "bundled": True}),
+        ("highway_3d", {"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True}),
+        ("omega", {"id": "omega", "name": "Omega", "bundled": True}),
+    ]:
+        d = bundled_dir / name
+        d.mkdir()
+        (d / "plugin.json").write_text(json.dumps(content))
+        if name == "highway_3d":
+            (d / "routes.py").write_text("def setup(app, ctx):\n    raise RuntimeError('broken')\n")
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_hw = user_dir / "highway_3d"
+    user_hw.mkdir()
+    (user_hw / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)"})
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    fake_app = type("FakeApp", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        plugins.load_plugins(fake_app, {})
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    ids = [p["id"] for p in plugins.LOADED_PLUGINS]
+    assert ids == ["alpha", "highway_3d", "omega"], (
+        f"Fallback entry must occupy the bundled plugin's original position, got order: {ids}"
+    )
+    # The entry at position 1 is the fallback copy.
+    assert plugins.LOADED_PLUGINS[1].get("fallback") is True
+
+
+def test_fallback_skipped_when_setup_was_mid_flight_on_timeout(
+    tmp_path, reset_plugin_state, monkeypatch, caplog
+):
+    """When bundled setup() times out mid-flight (already executing), the loader
+    must NOT activate the user-copy fallback — the original setup() may still be
+    mutating the router concurrently (Thread 4, review-4227201020).
+
+    Simulated by injecting an exception with ``setup_mid_flight=True`` (the
+    attribute _route_setup_on_main attaches when it detects _started is set at
+    timeout).
+    """
+    plugins = reset_plugin_state
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    bundled_plugin_dir = bundled_dir / "highway_3d"
+    bundled_plugin_dir.mkdir()
+    (bundled_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway", "routes": "routes.py", "bundled": True})
+    )
+    (bundled_plugin_dir / "routes.py").write_text("def setup(app, ctx): pass\n")
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    user_plugin_dir = user_dir / "highway_3d"
+    user_plugin_dir.mkdir()
+    (user_plugin_dir / "plugin.json").write_text(
+        json.dumps({"id": "highway_3d", "name": "3D Highway (user)", "routes": "routes.py"})
+    )
+    (user_plugin_dir / "routes.py").write_text(
+        "def setup(app, ctx):\n    app.state.fallback_ran = True\n"
+    )
+
+    monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(user_dir))
+
+    # Inject a route_setup_fn that simulates a mid-flight timeout by raising
+    # a TimeoutError with setup_mid_flight=True.
+    def _mid_flight_timeout_setup_fn(fn):
+        e = __import__("concurrent.futures", fromlist=["TimeoutError"]).TimeoutError()
+        e.setup_mid_flight = True
+        raise e
+
+    fake_app = type("FakeApp", (), {})()
+    fake_app.state = type("State", (), {})()
+    saved_dir = plugins.PLUGINS_DIR
+    plugins.PLUGINS_DIR = bundled_dir
+    try:
+        with capture_logger(caplog, "slopsmith.plugins", level=logging.WARNING):
+            plugins.load_plugins(fake_app, {}, route_setup_fn=_mid_flight_timeout_setup_fn)
+    finally:
+        plugins.PLUGINS_DIR = saved_dir
+
+    # Fallback must NOT have run — original setup() was mid-flight.
+    assert not getattr(fake_app.state, "fallback_ran", False), (
+        "Fallback setup() must not run when bundled setup() was mid-flight at timeout"
+    )
+    # Plugin must be absent from LOADED_PLUGINS (both copies failed).
+    hw3d_entries = [p for p in plugins.LOADED_PLUGINS if p["id"] == "highway_3d"]
+    assert len(hw3d_entries) == 0, (
+        "Plugin must be absent when bundled timed out mid-flight and fallback was skipped"
+    )
+    # Warning about skipping fallback must appear in log.
+    assert "Skipping fallback" in caplog.text or "mid-flight" in caplog.text
+
+
+
 def test_fallback_entry_has_fallback_true_field(
     tmp_path, reset_plugin_state, monkeypatch
 ):
@@ -1949,8 +2071,73 @@ def test_bundled_returned_by_api(tmp_path, reset_plugin_state):
     finally:
         client.close()
 
+def test_fallback_field_is_surfaced_in_api_response(tmp_path, reset_plugin_state):
+    """GET /api/plugins must include a ``fallback`` boolean field for each plugin.
 
-# ── progress_cb tests ─────────────────────────────────────────────────────────
+    - A fallback user-copy entry (bundled routes failed) must surface ``fallback: true``.
+    - A normal plugin must surface ``fallback: false``.
+
+    This ensures the frontend badge rendering is reliable — the badge depends
+    on this field being present in the JSON response from the endpoint, not
+    just in the internal LOADED_PLUGINS list (Thread 6, review-4227201020).
+    """
+    plugins_mod = reset_plugin_state
+
+    plugin_dir = tmp_path / "dummy"
+    plugin_dir.mkdir()
+
+    # Fallback user-copy entry (bundled routes failed, user copy active).
+    plugins_mod.LOADED_PLUGINS.append({
+        "id": "highway_3d",
+        "name": "3D Highway (user fallback)",
+        "nav": None,
+        "type": None,
+        "bundled": False,
+        "fallback": True,
+        "has_screen": False,
+        "has_script": False,
+        "has_settings": False,
+        "has_tour": False,
+        "_dir": plugin_dir,
+        "_manifest": {},
+    })
+
+    # Normal user plugin — must NOT have fallback=true.
+    plugins_mod.LOADED_PLUGINS.append({
+        "id": "normal_plugin",
+        "name": "Normal Plugin",
+        "nav": None,
+        "type": None,
+        "bundled": False,
+        "has_screen": False,
+        "has_script": False,
+        "has_settings": False,
+        "has_tour": False,
+        "_dir": plugin_dir,
+        "_manifest": {},
+    })
+
+    client = _make_api_client(plugins_mod)
+    try:
+        r = client.get("/api/plugins")
+        assert r.status_code == 200
+        ids = {p["id"]: p for p in r.json()}
+
+        # Fallback entry must have fallback=true in the response.
+        assert "fallback" in ids["highway_3d"], (
+            "/api/plugins response must include the 'fallback' key"
+        )
+        assert ids["highway_3d"]["fallback"] is True
+
+        # Normal plugin must have fallback=false in the response.
+        assert "fallback" in ids["normal_plugin"], (
+            "/api/plugins response must include the 'fallback' key for all plugins"
+        )
+        assert ids["normal_plugin"]["fallback"] is False
+    finally:
+        client.close()
+
+
 
 def _run_load_plugins_with_cb(plugins, app, tmp_path, progress_cb, context=None):
     """Like _run_load_plugins but passes a progress_cb spy."""

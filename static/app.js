@@ -3994,12 +3994,9 @@ async function loadPlugins() {
                 // copy.  Warn users so they know the bundled build is broken and
                 // can check the server startup log for the root cause.
                 if (plugin.fallback) {
-                    const fallbackDesc = 'This user-installed copy is serving as a fallback because the bundled version failed to start. Check the server startup log for details.';
                     const fbBadge = document.createElement('span');
                     fbBadge.className = 'inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-yellow-400/40 bg-yellow-500/10 text-yellow-300';
-                    fbBadge.title = fallbackDesc;
-                    fbBadge.setAttribute('aria-label', 'Fallback — ' + fallbackDesc);
-                    fbBadge.setAttribute('role', 'img');
+                    fbBadge.setAttribute('aria-hidden', 'true');
                     fbBadge.innerHTML = `
                         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -4008,6 +4005,14 @@ async function loadPlugins() {
                         Fallback
                     `;
                     labelWrap.appendChild(fbBadge);
+                    // Visible explanation below the badge — accessible to all
+                    // users including those on touch devices or using keyboards
+                    // (browser tooltips are hover-only, so title/aria-label alone
+                    // is not sufficient).
+                    const fbNote = document.createElement('p');
+                    fbNote.className = 'text-xs text-yellow-300/80 mt-0.5';
+                    fbNote.textContent = 'The bundled version failed to start. This older user-installed copy is serving as a fallback. Check the server startup log for details.';
+                    labelWrap.appendChild(fbNote);
                 }
                 summary.appendChild(labelWrap);
                 // Chevron icon — built via setAttributeNS so the SVG sits in
