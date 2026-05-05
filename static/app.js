@@ -4011,7 +4011,7 @@ async function loadPlugins() {
                     // is not sufficient).
                     const fbNote = document.createElement('p');
                     fbNote.className = 'text-xs text-yellow-300/80 mt-0.5';
-                    fbNote.textContent = 'The bundled version failed to start. This older user-installed copy is serving as a fallback. Check the server startup log for details.';
+                    fbNote.textContent = 'The bundled version failed to start. This user-installed copy is serving as a fallback. Check the server startup log for details.';
                     labelWrap.appendChild(fbNote);
                 }
                 summary.appendChild(labelWrap);

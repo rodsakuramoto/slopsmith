@@ -13,6 +13,7 @@ existing colliding plugins are visible.
 """
 
 import contextlib
+import concurrent.futures
 import importlib
 import json
 import logging
@@ -1751,7 +1752,7 @@ def test_fallback_skipped_when_setup_was_mid_flight_on_timeout(
     # Inject a route_setup_fn that simulates a mid-flight timeout by raising
     # a TimeoutError with setup_mid_flight=True.
     def _mid_flight_timeout_setup_fn(fn):
-        e = __import__("concurrent.futures", fromlist=["TimeoutError"]).TimeoutError()
+        e = concurrent.futures.TimeoutError()
         e.setup_mid_flight = True
         raise e
 

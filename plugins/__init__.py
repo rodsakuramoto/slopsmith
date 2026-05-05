@@ -867,12 +867,12 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 # per-key pop() is a harmless no-op when the keys are already
                 # absent.
                 if plugin_id in _pending_evictions:
-                    _plugin_dir_str = str(plugin_dir) + os.sep
+                    _plugin_dir_prefix = str(plugin_dir) + os.sep
                     _stale = set()
                     for _k in set(sys.modules) - _sysmod_before_routes:
                         _mod = sys.modules.get(_k)
                         _mf = getattr(_mod, "__file__", None)
-                        if _mf and str(_mf).startswith(_plugin_dir_str):
+                        if _mf and str(_mf).startswith(_plugin_dir_prefix):
                             _stale.add(_k)
                     _pending_eviction_stale_modules[plugin_id] = _stale
                     # Purge immediately to prevent module leakage into later plugins.
