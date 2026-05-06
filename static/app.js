@@ -3222,13 +3222,15 @@ function _autoMatchViz() {
         .map(o => o.value)
         .filter(v => v !== 'auto' && v !== 'default');
     for (const id of candidateIds) {
-        // 3D Highway gates on WebGL2; if the browser can't run it, skip
-        // it during Auto evaluation so the next candidate (or the 2D
-        // fallback at the end of the loop) takes over instead of
-        // installing a renderer that'll fail at init.
-        if (id === 'highway_3d' && !_canRun3D()) continue;
         const factory = window['slopsmithViz_' + id];
         if (typeof factory !== 'function') continue;
+        // If the factory statically declares contextType='webgl2', gate on
+        // WebGL2 availability so a match never installs a renderer that'll
+        // fail at init. This is the generic version of the old hard-coded
+        // highway_3d check — any future WebGL2 viz gets the same protection
+        // for free without needing a special-case here.
+        const factoryCtxType = typeof factory.contextType === 'string' ? factory.contextType : '2d';
+        if (factoryCtxType === 'webgl2' && !_canRun3D()) continue;
         const predicate = factory.matchesArrangement;
         if (typeof predicate !== 'function') continue;
         let matched = false;
@@ -3268,22 +3270,15 @@ function _autoMatchViz() {
         return;
     }
     // No match — restore the built-in 2D highway. setRenderer(null) is
-    // a no-op when the default is already active. KNOWN LIMITATION:
-    // when the previous Auto pick was a WebGL renderer, the canvas has
-    // been locked to 'webgl' by that renderer's init; reverting to the
-    // default 2D renderer will fail silently (see CLAUDE.md "first
-    // context wins"). That's the same limitation manual picker swaps
-    // already have — a future wave will teach highway to recreate the
-    // canvas on context-type change.
+    // a no-op when the default is already active. If the previous Auto
+    // pick was a WebGL renderer, highway.setRenderer() handles the
+    // context-type change by replacing the canvas element (cloneNode +
+    // replaceWith) so the default 2D renderer's getContext('2d') always
+    // succeeds — no canvas-lock limitation here.
     highway.setRenderer(null);
-    // The built-in 2D renderer is synchronous and always succeeds when the
-    // canvas isn't locked to an incompatible context. For the common case
-    // (no prior WebGL renderer on this canvas) update the label so the user
-    // can see Auto resolved to the built-in highway. For the WebGL-locked
-    // edge case the player stays blank (known limitation — same as manual
-    // picker swaps); the label is a best-effort hint, not a guarantee.
-    // Read from the DOM rather than hard-coding the name so a future rename
-    // of the default entry is automatically reflected.
+    // Update the label so the user can see Auto resolved to the built-in
+    // highway. Read from the DOM rather than hard-coding the name so a
+    // future rename of the default entry is automatically reflected.
     if (hasSong) {
         const defaultOpt = Array.from(sel.options).find(o => o.value === 'default');
         _setAutoVizLabel(defaultOpt ? defaultOpt.text : null);

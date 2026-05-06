@@ -4442,6 +4442,12 @@
 
         /* ── setRenderer contract ────────────────────────────────────────── */
         return {
+            // Tells highway.js this renderer needs a webgl2-capable canvas.
+            // Browsers lock a <canvas> to the first context type acquired,
+            // so when this renderer is installed mid-session highway.js
+            // replaces the underlying <canvas> element so getContext('webgl2')
+            // can succeed (see static/highway.js _replaceCanvas).
+            contextType: 'webgl2',
             init(canvas, bundle) {
                 _unsubscribeFocus();
                 if (wrap || ren) {
@@ -4634,6 +4640,31 @@
     }
 
     window.slopsmithViz_highway_3d = createFactory;
+    // Static metadata read by core (see static/highway.js + static/app.js):
+    //   contextType         — required canvas context type. highway.js
+    //                         replaces the <canvas> element when the
+    //                         requested type differs from the current one,
+    //                         so this renderer can be installed mid-session
+    //                         even if the canvas was previously bound to 2D.
+    //   matchesArrangement  — Auto-mode predicate. When the picker is on
+    //                         "Auto", core installs the first registered
+    //                         viz whose predicate returns truthy on the
+    //                         current song_info. Lead/Rhythm/Bass/Guitar
+    //                         arrangements route here; Keys arrangements
+    //                         are matched by the piano plugin instead.
+    //                         _canRun3D() in app.js still gates Auto from
+    //                         picking us on machines without WebGL2.
+    window.slopsmithViz_highway_3d.contextType = 'webgl2';
+    // Canonical guitar arrangement names (server.py: _ALLOWED_ARRANGEMENT_NAMES)
+    // are Lead / Rhythm / Bass / Combo. `guitar` is included as a safety
+    // net for sources that use a generic name (older imports, third-party
+    // sloppaks). Word boundaries (\b) keep us from accidentally matching
+    // arrangements that merely contain these as substrings (e.g. a
+    // "BasslineKeys" arrangement would otherwise match `bass`).
+    window.slopsmithViz_highway_3d.matchesArrangement = function (songInfo) {
+        const arr = (songInfo && songInfo.arrangement) || '';
+        return /\b(?:lead|rhythm|bass|combo|guitar)\b/i.test(arr);
+    };
 
     // Register guided tour. The window 'load' event has already fired by the
     // time a dynamically-injected plugin script runs, so call register() directly.
