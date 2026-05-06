@@ -335,9 +335,6 @@ def _run_demucs_remote(full_ogg: Path, out_dir: Path, model: str) -> Path:
 
 def _run_demucs(full_ogg: Path, out_dir: Path, model: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "demucs", "-n", model, "-o", str(out_dir), str(full_ogg)]
-    # Point model-weight caches at the persistent config volume so we don't
-    # re-download on every container restart (~300MB per model).
     env = os.environ.copy()
     config_dir = env.get("CONFIG_DIR", "/config")
     cache_root = Path(config_dir) / "torch_cache"
@@ -346,14 +343,27 @@ def _run_demucs(full_ogg: Path, out_dir: Path, model: str) -> Path:
     env.setdefault("XDG_CACHE_HOME", str(cache_root))
     # Propagate in-process sys.path additions (plugin loader adds
     # /config/pip_packages at runtime, not via PYTHONPATH) so the child
-    # python can also find demucs/torch/torchcodec.
+    # python can also find demucs/torch/torchcodec. PYTHONPATH alone
+    # is insufficient on Windows embeddable Python, where the ._pth
+    # file forces isolated mode and the env var is ignored — so we
+    # also inject sys.path explicitly via a -c bootstrap before
+    # delegating to demucs.
     pip_target = str(Path(config_dir) / "pip_packages")
-    extra_paths = [p for p in sys.path if p and p != ""]
+    extra_paths = [p for p in sys.path if p]
+    if pip_target not in extra_paths:
+        extra_paths.insert(0, pip_target)
     merged = os.pathsep.join(
-        [pip_target] + [p for p in extra_paths if p != pip_target]
-        + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+        extra_paths + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
     )
     env["PYTHONPATH"] = merged
+    bootstrap = (
+        "import sys, json, runpy; "
+        "sys.path[:0] = json.loads(sys.argv[1]); "
+        "sys.argv = [sys.argv[0]] + sys.argv[2:]; "
+        "runpy.run_module('demucs', run_name='__main__')"
+    )
+    cmd = [sys.executable, "-c", bootstrap, json.dumps(extra_paths),
+           "-n", model, "-o", str(out_dir), str(full_ogg)]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         err_tail = (r.stderr or "").strip().splitlines()[-5:]
