@@ -145,6 +145,7 @@
     // 1.0× at slider=0.5 so the previous locked view is the midpoint.
     const CAM_LOCK_ZOOM_MIN = 0.55;  // slider=0 — closest, biggest fretboard
     const CAM_LOCK_ZOOM_MAX = 1.45;  // slider=1 — furthest
+    const CAM_LOCK_CENTER_FRET = 6;  // default camera X center (first-position midpoint)
 
     // Note: we deliberately do NOT scale the camUpdate lerp speed with
     // cameraSmoothing. Smoothing widens the hysteresis dead zones so the
@@ -1502,7 +1503,7 @@
         }
 
         // Camera state
-        let tgtX = 0, curX = 0;
+        let tgtX = fretMid(CAM_LOCK_CENTER_FRET), curX = fretMid(CAM_LOCK_CENTER_FRET);
         let tgtDist = CAM_DIST_BASE, curDist = CAM_DIST_BASE;
         // Last committed lowFretBonus contribution baked into tgtDist
         // (see candidateDist block — bonus is applied on top of the
@@ -1517,6 +1518,30 @@
         let prevLockActive = false;
         let tgtLookY = 0, curLookY = 0;   // lerped look-at Y for self-correcting camera
         let aspectScale = 1;
+        // _camSnapped / _camPreScanned / _songKey: together they gate the first-data snap.
+        //
+        // On the first update() frame where bundle.notes is available,
+        // _camPreScanned is set and the full notes array is scanned (O(N), once)
+        // to check whether ANY fretted note (f > 0) exists.  If none do (e.g. an
+        // all-open-string bass arrangement), _camSnapped is set to true immediately
+        // so the per-frame pre-pass is disabled for the entire song.
+        //
+        // For charts that do have fretted notes, a lightweight O(window) pre-pass
+        // runs before any drawNote() call on every frame until the first frame
+        // where fretted notes appear in the camera targeting window (preWSum > 0).
+        // At that point curX/curDist are snapped directly to the computed targets,
+        // eliminating the camera swoop for songs with long silent intros.
+        //
+        // Once _camSnapped is true it is never cleared for the current song; the
+        // pre-pass is a permanent no-op thereafter and the camera reverts to
+        // normal lerp-based tracking for the rest of the song.
+        //
+        // _songKey tracks the active song/arrangement so the snap state resets
+        // automatically when the user switches songs or arrangements via
+        // reconnect() (which does not call renderer.destroy/init).
+        let _camSnapped = false;
+        let _camPreScanned = false;
+        let _songKey = null;
 
         // Lifecycle flags
         let _isReady = false;
@@ -2942,6 +2967,106 @@
             }
         }
 
+        /* ── Camera target helper ────────────────────────────────────────── */
+        // Compute and apply tgtX + tgtDist from note-window-accumulated data.
+        // Used by BOTH the snap pre-pass (before drawNote() calls, skipDistHyst=true)
+        // and the main per-frame camera-target block (skipDistHyst=false) so the
+        // two paths can never drift out of sync.
+        //
+        // wX/wSum        recency-weighted fret-position centroid accumulator
+        // distMin/Max    min/max fret seen in the camera targeting window
+        // distGot        true iff at least one fretted note was in the window
+        // camHystF       X-axis hysteresis factor (from cameraSmoothing)
+        // camDistHystF   dist hysteresis factor (from zoomSmoothing)
+        // skipDistHyst   true on the snap/first-data frame — no previous tgtDist
+        //                state exists, so bypass the dead-zone gate
+        //
+        // Side-effects: updates tgtX, tgtDist, prevLowFretBonus.
+        // Returns: computed lockActive flag (caller is responsible for setting
+        //          prevLockActive from the returned value).
+        function _applyNoteCamTargets(wX, wSum, distMin, distMax, distGot,
+                                      camHystF, camDistHystF, skipDistHyst) {
+            const lockActive = cameraLockLow && (!distGot || distMax <= 12);
+            if (lockActive) {
+                // Locked view: frets 0-12 fit in frame, with the peak
+                // low-fret bonus baked in so nut chords stay framed.
+                // Both halves derive from the same helpers as the
+                // dynamic branch so future tuning of the base zoom
+                // curve or low-fret pullback can't desync them.
+                const lockedBaseU  = camBaseDistU(12);
+                const lockedBonusU = camLowFretPullbackU(1);
+                // cameraLockZoom slider 0..1 blends between MIN (closest)
+                // and MAX (furthest). Default 0.5 maps to ~1.0× so existing
+                // users see the same locked view as before this slider.
+                const lockZoomMul  = CAM_LOCK_ZOOM_MIN +
+                    (CAM_LOCK_ZOOM_MAX - CAM_LOCK_ZOOM_MIN) * cameraLockZoom;
+                tgtX             = fretMid(CAM_LOCK_CENTER_FRET);
+                tgtDist          = (lockedBaseU + lockedBonusU) * K * lockZoomMul;
+                prevLowFretBonus = lockedBonusU;
+            } else if (distGot) {
+                // Base zoom scales by fret count (distMax - distMin).
+                const baseDistU     = camBaseDistU(distMax - distMin);
+                // Low-fret pullback: world-X distance between frets is
+                // logarithmic, so a 2-fret span at the nut takes much
+                // more horizontal screen than the same span at fret 12.
+                // The base term scales by *fret count*, not world-X
+                // span, so low-fret clusters were under-allotted camera
+                // distance and clipped at the left edge (e.g. F power
+                // chord at fret 1 partially off-screen). Add a tapered
+                // bonus that kicks in below fret 5 and peaks at fret 1
+                // (≈16 extra fret-span units, i.e. 16*K world-units of
+                // distance), without affecting mid/high neck framing.
+                const lowFretBonusU = camLowFretPullbackU(distMin);
+                if (skipDistHyst) {
+                    // First data frame — no previous tgtDist state; apply
+                    // directly without the hysteresis dead-zone check.
+                    tgtDist = (baseDistU + lowFretBonusU) * K;
+                } else {
+                    // tgtDist scales at (3 * K) per fret-span unit, so the
+                    // hysteresis threshold (a fret-span dead zone) converts
+                    // to tgtDist-space by multiplying by 3 * K — NOT by
+                    // FRET_WIDTH_MID, which is X-axis world-units-per-fret
+                    // and a different unit (would over-tighten the gate by
+                    // ~4x at SCALE = 2.25).
+                    //
+                    // Hysteresis is applied to the BASE portion only. The
+                    // lowFretBonus changes by 4 fret-span units per integer
+                    // fret near the nut, which sits below the default-
+                    // cameraSmoothing (cs=0.5) dead zone of ~8.25 fret-span
+                    // units (= 2.75 * 3) and would otherwise be suppressed
+                    // for fret 2 → 1 / 3 → 1 transitions — exactly the
+                    // corrections this bonus exists to provide. So gate the
+                    // base, then always reflect bonus changes on top by
+                    // tracking the last-committed bonus contribution
+                    // (prevLowFretBonus) and adjusting tgtDist for its
+                    // delta whether or not the base hysteresis fires.
+                    //
+                    // First frame after a lock release bypasses the gate
+                    // entirely so a >12 fret note that disengaged the lock
+                    // is guaranteed to widen the view. Without this, a
+                    // small span jump (12→13 frets) at default settings
+                    // can sit inside the dead zone and the camera fails
+                    // to follow the high note that just opened the lock.
+                    const candidateBase = baseDistU * K;
+                    const baseTgt       = tgtDist - prevLowFretBonus * K;
+                    const justUnlocked  = prevLockActive;
+                    if (justUnlocked || Math.abs(candidateBase - baseTgt) > camDistHystF * 3 * K) {
+                        tgtDist = (baseDistU + lowFretBonusU) * K;
+                    } else if (lowFretBonusU !== prevLowFretBonus) {
+                        tgtDist = baseTgt + lowFretBonusU * K;
+                    }
+                }
+                prevLowFretBonus = lowFretBonusU;
+            }
+            // X-axis: recency-weighted centroid with a hysteresis dead zone
+            // so small cluster shifts don't trigger visible pan motion.
+            if (!lockActive && wSum > 0) {
+                const candidateX = wX / wSum;
+                if (Math.abs(candidateX - tgtX) > camHystF * FRET_WIDTH_MID) tgtX = candidateX;
+            }
+            return lockActive;
+        }
+
         /* ── Per-frame rendering ─────────────────────────────────────────── */
         function update(bundle) {
             // Materialize the text-size multiplier from the user's slider.
@@ -3119,6 +3244,110 @@
             // instead of cameraSmoothing, so the user can dial X-pan and
             // zoom calmness independently.
             const camDistHystF = CAM_DIST_HYST_T + (CAM_DIST_HYST_C - CAM_DIST_HYST_T) * zoomSmoothing;
+
+            // ── Song-change detection ─────────────────────────────────────────
+            // reconnect() (used for arrangement switches and splitscreen song
+            // changes) does not call renderer.destroy/init, so _camSnapped and
+            // _camPreScanned would persist into the new song and the snap pre-pass
+            // would never fire again.  Detect the change by comparing the current
+            // song+arrangement identity against the last-seen key, and reset the
+            // camera snap state (and the camera position itself) whenever it flips.
+            {
+                const si = bundle.songInfo;
+                // bundle.songInfo has no filename field (the WS song_info message
+                // never includes it).  Use window.slopsmith.currentSong.filename
+                // — set by highway.js from the WS URL — combined with the
+                // arrangement index as a reliable per-song-arrangement key.
+                const currentSong = window.slopsmith && window.slopsmith.currentSong;
+                const key = currentSong ? currentSong.filename + '\0' + (si ? (si.arrangement_index ?? '') : '') : null;
+                if (key !== null && key !== _songKey) {
+                    _songKey = key;
+                    _camSnapped = false;
+                    _camPreScanned = false;
+                    tgtX = curX = fretMid(CAM_LOCK_CENTER_FRET);
+                    tgtDist = curDist = CAM_DIST_BASE;
+                    prevLowFretBonus = 0;
+                    prevLockActive = false;
+                }
+            }
+
+            // ── Camera pre-pass (first-data snap) ────────────────────────────
+            // Before any drawNote() call, iterate notes/chords to accumulate
+            // the camera targeting data for THIS frame.  If this is the first
+            // frame where fretted notes appear in the targeting window, snap
+            // curX/curDist directly to the computed targets so open-string note
+            // placement (which reads curX) and the camera are consistent on the
+            // snap frame.  After the snap _camSnapped is true and this block
+            // becomes a permanent no-op.  Open-string notes (f === 0) do not
+            // contribute to preWX/preWSum and therefore do not trigger the snap.
+            if (!_camSnapped) {
+                // One-time full-chart scan (runs exactly once when both bundle.notes
+                // and bundle.chords are available).  If no fretted note exists
+                // anywhere in either array the snap can never fire, so we disable
+                // the per-frame pre-pass immediately to avoid permanent overhead.
+                // Both arrays are checked because some arrangements have fretted
+                // notes only inside chords (chord-only charts, keys arrangements).
+                if (!_camPreScanned && notes && chords) {
+                    _camPreScanned = true;
+                    const hasFrettedNote  = notes.some(n => n.f > 0 && validString(n.s));
+                    const hasFrettedChord = chords.some(
+                        ch => ch.notes && ch.notes.some(cn => cn.f > 0 && validString(cn.s)));
+                    if (!hasFrettedNote && !hasFrettedChord) _camSnapped = true;
+                }
+                if (!_camSnapped) {
+                    let preWX = 0, preWSum = 0, preDistMin = 99, preDistMax = 0, preDistGot = false;
+                    if (notes) {
+                        for (const n of notes) {
+                            // bundle.notes is time-sorted: skip fully-expired sustains,
+                            // break once the onset is beyond the camera window.
+                            if (n.t + (n.sus || 0) < camT0) continue;
+                            if (n.t > camT1) break;
+                            if (!validString(n.s)) continue;
+                            const nInWin  = n.f > 0 && n.t >= camT0;
+                            const nSusNow = n.f > 0 && n.t < camT0 && n.t + (n.sus || 0) >= now;
+                            if (nInWin || nSusNow) {
+                                const w = Math.exp(-Math.abs(n.t - now) / camTau);
+                                preWX += fretMid(n.f) * w; preWSum += w;
+                                if (n.f < preDistMin) preDistMin = n.f;
+                                if (n.f > preDistMax) preDistMax = n.f;
+                                preDistGot = true;
+                            }
+                        }
+                    }
+                    if (chords) {
+                        for (const ch of chords) {
+                            if (!ch.notes) continue;
+                            // bundle.chords is time-sorted: break once onset is beyond window.
+                            if (ch.t > camT1) break;
+                            const chNotes = filterValidNotes(ch.notes);
+                            if (!chNotes.length) continue;
+                            let maxSus = 0;
+                            for (const n of chNotes) if ((n.sus || 0) > maxSus) maxSus = n.sus;
+                            if (ch.t + maxSus < camT0) continue; // fully expired
+                            const chOnsetInWin = ch.t >= camT0;
+                            const chSusNow     = ch.t < camT0 && ch.t + maxSus >= now;
+                            if (!chOnsetInWin && !chSusNow) continue;
+                            const chW = Math.exp(-Math.abs(ch.t - now) / camTau);
+                            for (const cn of chNotes) {
+                                const cnOk = chOnsetInWin || (chSusNow && ch.t + (cn.sus || 0) >= now);
+                                if (cn.f > 0 && cnOk) {
+                                    preWX += fretMid(cn.f) * chW; preWSum += chW;
+                                    if (cn.f < preDistMin) preDistMin = cn.f;
+                                    if (cn.f > preDistMax) preDistMax = cn.f;
+                                    preDistGot = true;
+                                }
+                            }
+                        }
+                    }
+                    if (preWSum > 0) {
+                        _applyNoteCamTargets(preWX, preWSum, preDistMin, preDistMax, preDistGot,
+                                             camHystF, camDistHystF, /* skipDistHyst= */ true);
+                        curX    = tgtX;
+                        curDist = tgtDist;
+                        _camSnapped = true;
+                    }
+                } // end !_camSnapped (post-prescan guard)
+            }
 
             // ── Single notes ──────────────────────────────────────────────
             const lastFretForString = new Array(nStr).fill(undefined);
@@ -3581,79 +3810,13 @@
             // open-string passages — even though they're well within the
             // 1-12 range. Treat "no fretted notes seen" as a lockable state
             // (camDistMax stays at 0, ≤ 12 is trivially true).
-            const lockActive = cameraLockLow && (!camDistGot || camDistMax <= 12);
-            if (lockActive) {
-                // Locked view: frets 0-12 fit in frame, with the peak
-                // low-fret bonus baked in so nut chords stay framed.
-                // Both halves derive from the same helpers as the
-                // dynamic branch so future tuning of the base zoom
-                // curve or low-fret pullback can't desync them.
-                const lockedBaseU   = camBaseDistU(12);
-                const lockedBonusU  = camLowFretPullbackU(1);
-                // cameraLockZoom slider 0..1 blends between MIN (closest)
-                // and MAX (furthest). Default 0.5 maps to ~1.0× so existing
-                // users see the same locked view as before this slider.
-                const lockZoomMul = CAM_LOCK_ZOOM_MIN +
-                    (CAM_LOCK_ZOOM_MAX - CAM_LOCK_ZOOM_MIN) * cameraLockZoom;
-                tgtX    = fretMid(6);
-                tgtDist = (lockedBaseU + lockedBonusU) * K * lockZoomMul;
-                prevLowFretBonus = lockedBonusU;
-            }
-            if (!lockActive && camDistGot) {
-                // Base zoom scales by fret count (camDistMax-camDistMin).
-                const baseDistU     = camBaseDistU(camDistMax - camDistMin);
-                // Low-fret pullback: world-X distance between frets is
-                // logarithmic, so a 2-fret span at the nut takes much
-                // more horizontal screen than the same span at fret 12.
-                // The base term scales by *fret count*, not world-X
-                // span, so low-fret clusters were under-allotted camera
-                // distance and clipped at the left edge (e.g. F power
-                // chord at fret 1 partially off-screen). Add a tapered
-                // bonus that kicks in below fret 5 and peaks at fret 1
-                // (≈16 extra fret-span units, i.e. 16*K world-units of
-                // distance), without affecting mid/high neck framing.
-                const lowFretBonusU = camLowFretPullbackU(camDistMin);
-                // tgtDist scales at (3 * K) per fret-span unit, so the
-                // hysteresis threshold (a fret-span dead zone) converts
-                // to tgtDist-space by multiplying by 3 * K — NOT by
-                // FRET_WIDTH_MID, which is X-axis world-units-per-fret
-                // and a different unit (would over-tighten the gate by
-                // ~4x at SCALE = 2.25).
-                //
-                // Hysteresis is applied to the BASE portion only. The
-                // lowFretBonus changes by 4 fret-span units per integer
-                // fret near the nut, which sits below the default-
-                // cameraSmoothing (cs=0.5) dead zone of ~8.25 fret-span
-                // units (= 2.75 * 3) and would otherwise be suppressed
-                // for fret 2 → 1 / 3 → 1 transitions — exactly the
-                // corrections this bonus exists to provide. So gate the
-                // base, then always reflect bonus changes on top by
-                // tracking the last-committed bonus contribution
-                // (prevLowFretBonus) and adjusting tgtDist for its
-                // delta whether or not the base hysteresis fires.
-                //
-                // First frame after a lock release bypasses the gate
-                // entirely so a >12 fret note that disengaged the lock
-                // is guaranteed to widen the view. Without this, a
-                // small span jump (12→13 frets) at default settings
-                // can sit inside the dead zone and the camera fails
-                // to follow the high note that just opened the lock.
-                const candidateBase = baseDistU * K;
-                const baseTgt       = tgtDist - prevLowFretBonus * K;
-                const justUnlocked  = prevLockActive;
-                if (justUnlocked || Math.abs(candidateBase - baseTgt) > camDistHystF * 3 * K) {
-                    tgtDist = (baseDistU + lowFretBonusU) * K;
-                } else if (lowFretBonusU !== prevLowFretBonus) {
-                    tgtDist = baseTgt + lowFretBonusU * K;
-                }
-                prevLowFretBonus = lowFretBonusU;
-            }
+            // All lock/dist/X logic lives in _applyNoteCamTargets() so the
+            // snap pre-pass (above) and this steady-state path share exactly
+            // one implementation.
+            const lockActive = _applyNoteCamTargets(
+                camWX, camWSum, camDistMin, camDistMax, camDistGot,
+                camHystF, camDistHystF, /* skipDistHyst= */ false);
             prevLockActive = lockActive;
-            if (!lockActive && camWSum > 0) {
-                const candidateX = camWX / camWSum;
-                const hystWorld  = camHystF * FRET_WIDTH_MID;
-                if (Math.abs(candidateX - tgtX) > hystWorld) tgtX = candidateX;
-            }
 
             // ── Chord diagram: track chord, drive entrance + crossfade animations ─
             {
@@ -4255,9 +4418,12 @@
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
             gNote = gSus = gBeat = gTechArrow = gTapChevron = null;
-            tgtX = curX = 0; tgtDist = curDist = CAM_DIST_BASE; tgtLookY = curLookY = 0; nStr = NSTR; _oobStringWarned = false;
+            tgtX = curX = fretMid(CAM_LOCK_CENTER_FRET); tgtDist = curDist = CAM_DIST_BASE; tgtLookY = curLookY = 0; nStr = NSTR; _oobStringWarned = false;
             prevLowFretBonus = 0;
             prevLockActive = false;
+            _camSnapped = false;
+            _camPreScanned = false;
+            _songKey = null;
         }
 
         function canvasSize(canvas) {
