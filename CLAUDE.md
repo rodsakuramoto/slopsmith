@@ -311,6 +311,45 @@ window.slopsmith.diagnostics.contribute('my_plugin', {
 
 Loaded from `static/diagnostics.js` ASAP in `<head>` so the console-wrap is in place before any other script runs. Available on the `window.slopsmith.diagnostics` namespace alongside `snapshotConsole()`, `snapshotHardware()`, `snapshotUa()`, `snapshotLocalStorage()`, `snapshotContributions()`. Keep your payload small (< 100 KB) and don't include secrets — bundles are shared with maintainers.
 
+### Keyboard Shortcuts
+
+Plugins can register keyboard shortcuts via the global `window.registerShortcut()` function. Shortcuts appear in the `?` help panel.
+
+```js
+window.registerShortcut({
+    key: 'k',                       // key value (e.key) or key code (e.code)
+    description: 'Toggle my view',  // shown in the help panel
+    scope: 'player',                // 'global' | 'player' | 'library' | 'settings' | 'plugin-{id}'
+    condition: () => _isMyViewActive, // optional guard
+    handler: (e) => _myAction()      // called when shortcut triggers
+});
+```
+
+**Scope** controls when the shortcut is active:
+- `global` — works on any screen
+- `player` — only on the player screen
+- `library` — only on the home/favorites screens
+- `settings` — only on the settings screen
+- `plugin-{id}` — only when your plugin's screen is active
+
+**Panel-scoped shortcuts:** For plugins that create multiple panels (e.g., splitscreen), shortcuts are automatically scoped to the active panel. Use `const panel = window.createShortcutPanel(id)` to create a panel (it returns the panel object — keep the reference so you can call `panel.clearShortcuts()` during cleanup) and `window.setActiveShortcutPanel(id)` to switch between them. Each panel has its own shortcut registry, so multiple panels can have the same key without collisions.
+
+**Condition** is an optional guard function. If it returns false, the shortcut is skipped even if in scope.
+
+**Key matching:** The handler matches against both `e.key` (character produced) and `e.code` (physical key). Use `e.key` for letters/symbols that depend on keyboard layout, and `e.code` for special keys (e.g. `Space`, `ArrowLeft`).
+
+**Built-in shortcuts:**
+
+| Key | Description |
+|-----|-------------|
+| `?` | Show keyboard shortcuts panel (global) |
+| `Space` | Play/Pause (player only) |
+| `←` / `→` | Seek ±5 seconds (player only) |
+| `Escape` | Back to library (player only) |
+| `[` / `]` | Audio offset ±10ms (Shift: ±50ms) (player only) |
+
+**Debugging:** Open browser console and type `_listShortcuts()` to inspect registered shortcuts.
+
 ### General plugin guidelines
 
 - Wrap your plugin code in an IIFE: `(function () { 'use strict'; ... })();`
@@ -318,6 +357,7 @@ Loaded from `static/diagnostics.js` ASAP in `<head>` so the console-wrap is in p
 - If hooking `window.playSong`, always call the original and `await` it
 - If hooking `window.showScreen`, clean up your state when leaving the player screen
 - Use `window.slopsmith.emit()` / `window.slopsmith.on()` for inter-plugin communication
+- Use `window.registerShortcut()` to add keyboard shortcuts. Clean up with `window.unregisterShortcut(key, scope)` — pass the same scope you registered with, since the default is `'global'` and won't match `player`/`library`/`settings`/`plugin-*` bindings. For panel-scoped shortcuts, prefer `panel.clearShortcuts()`.
 
 ## Song Formats
 

@@ -163,6 +163,7 @@ let _lastLibSelected = null;
 // song launched from a deep-link / plugin screen still gets a sane
 // fallback ('home').
 let _playerOriginScreen = 'home';
+let _settingsOriginScreen = 'home';
 
 // One-shot flag set in `showScreen` when the user enters Home or
 // Favorites. Consumed by the very next library render so the
@@ -506,24 +507,120 @@ function _trapFocusInModal(modal) {
 // with the version of app.js the user actually loaded.
 function _openShortcutsModal() {
     if (document.getElementById('shortcuts-modal')) return;
-    const SHORTCUTS = [
-        ['Library', [
-            ['/',          'Focus search'],
-            ['↑ ↓ ← →',    'Move selection (grid 2D, tree vertical)'],
-            ['→',          'Tree: expand header / step into open one'],
-            ['←',          'Tree: collapse header / jump to parent'],
-            ['Home / End', 'Jump to first / last item'],
-            ['Enter / Space', 'Play song; toggle artist / album header'],
-            ['c',          'Convert PSARC entry to .sloppak'],
-            ['f',          'Toggle favorite'],
-            ['e',          'Edit metadata'],
-            ['?',          'Show this cheat sheet'],
-        ]],
-        ['Modals', [
-            ['Esc',        'Close the open modal (edit metadata, this overlay)'],
-            ['Esc',        'Otherwise: clear + blur the focused search box'],
-        ]],
+
+    function _isTreeMode() {
+        // Check if we're in tree view (not grid) on the active library screen
+        const screen = document.querySelector('.screen.active');
+        if (!screen) return false;
+        const tree = screen.querySelector('#lib-tree,#fav-tree');
+        return tree && !tree.classList.contains('hidden');
+    }
+
+    const ctx = _getCurrentContext();
+
+    // Library shortcuts that are handled by the navigation system (not in registry)
+    const navShortcuts = [
+        { keys: '↑ ↓', desc: 'Move selection' },
+        { keys: '→', desc: 'Step in', condition: _isTreeMode },
+        { keys: '←', desc: 'Step out', condition: _isTreeMode },
+        { keys: 'Home / End', desc: 'Jump to first / last item' },
+        { keys: 'Enter / Space', desc: 'Activate selection (play song / toggle header)' },
     ];
+
+    // Filter out items whose condition returns false
+    const filterNavItems = (items) => items.filter(item => !item.condition || item.condition());
+
+    // Format a shortcut entry for display, including modifier prefixes
+    const formatShortcut = (s) => {
+        const mods = s.modifiers || {};
+        let label = '';
+        if (mods.ctrl) label += 'Ctrl+';
+        if (mods.alt) label += 'Alt+';
+        if (mods.shift) label += 'Shift+';
+        if (mods.meta) label += 'Meta+';
+        return label + s.key;
+    };
+
+    // Get shortcuts from active panel by scope
+    const getPanelShortcuts = (panel, scope) => {
+        const shortcuts = [];
+        for (const [key, s] of panel.shortcuts) {
+            if (s.scope === scope) {
+                shortcuts.push({ keys: formatShortcut(s), desc: s.description });
+            }
+        }
+        return shortcuts;
+    };
+
+    const activePanel = _panels.get(_activePanel);
+    const defaultPanel = _panels.get('default');
+
+    // Merge shortcuts from both active and default panel for display
+    const mergeShortcuts = (scope) => {
+        const result = [];
+        if (activePanel) result.push(...getPanelShortcuts(activePanel, scope));
+        if (defaultPanel && defaultPanel !== activePanel) result.push(...getPanelShortcuts(defaultPanel, scope));
+        return result;
+    };
+
+    const playerShortcuts = mergeShortcuts('player');
+    const globalShortcuts = mergeShortcuts('global');
+    const libraryShortcuts = mergeShortcuts('library');
+
+    // Get plugin shortcuts for current plugin screen
+    const pluginShortcuts = [];
+    if (ctx.isPlugin && activePanel) {
+        for (const [key, s] of activePanel.shortcuts) {
+            if (s.scope.startsWith('plugin-') && s.scope === ctx.screen) {
+                pluginShortcuts.push({ keys: formatShortcut(s), desc: s.description });
+            }
+        }
+    }
+
+    // Get shortcuts from other panels (if multiple panels exist)
+    const otherPanelShortcuts = [];
+    if (_panels.size > 1) {
+        for (const [panelId, panel] of _panels) {
+            if (panelId === _activePanel) continue;
+            for (const [key, s] of panel.shortcuts) {
+                otherPanelShortcuts.push({ keys: formatShortcut(s), desc: s.description, panel: panelId });
+            }
+        }
+    }
+
+    // Build sections based on current context
+    const sections = [];
+    if (ctx.isSettings) {
+        sections.push({ heading: 'Settings', items: mergeShortcuts('settings') });
+    } else if (ctx.isLibrary) {
+        sections.push({ heading: 'Library', items: [
+            ...filterNavItems(navShortcuts),
+            ...libraryShortcuts,
+            { keys: 'Esc', desc: 'Clear search' }
+        ]});
+    }
+    if (ctx.isPlayer) {
+        sections.push({ heading: 'Player', items: playerShortcuts });
+    }
+    if (!ctx.isSettings && globalShortcuts.length > 0) {
+        sections.push({ heading: 'Global', items: globalShortcuts });
+    }
+    if (pluginShortcuts.length > 0) {
+        sections.push({ heading: 'Current Plugin', items: pluginShortcuts });
+    }
+    if (otherPanelShortcuts.length > 0) {
+        // Group other panel shortcuts by panel
+        const byPanel = new Map();
+        for (const item of otherPanelShortcuts) {
+            if (!byPanel.has(item.panel)) {
+                byPanel.set(item.panel, []);
+            }
+            byPanel.get(item.panel).push(item);
+        }
+        for (const [panelId, items] of byPanel) {
+            sections.push({ heading: `Panel ${panelId}`, items });
+        }
+    }
 
     const modal = document.createElement('div');
     modal.id = 'shortcuts-modal';
@@ -540,8 +637,8 @@ function _openShortcutsModal() {
         && _scModal && _scModal.contains(_lastLibSelected))
         ? _lastLibSelected : null;
 
-    const sections = SHORTCUTS.map(([heading, rows]) => {
-        const items = rows.map(([keys, desc]) => `
+    const sectionsHtml = sections.map(section => {
+        const itemsHtml = section.items.map(({ keys, desc }) => `
             <div class="flex items-baseline justify-between gap-4 py-1.5">
                 <span class="text-sm text-gray-300">${esc(desc)}</span>
                 <kbd class="text-xs font-mono px-2 py-0.5 rounded bg-dark-600 border border-gray-700 text-gray-200 whitespace-nowrap">${esc(keys)}</kbd>
@@ -549,8 +646,8 @@ function _openShortcutsModal() {
         `).join('');
         return `
             <section class="mb-4 last:mb-0">
-                <h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">${esc(heading)}</h4>
-                ${items}
+                <h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">${esc(section.heading)}</h4>
+                ${itemsHtml}
             </section>
         `;
     }).join('');
@@ -560,12 +657,12 @@ function _openShortcutsModal() {
             <div class="flex items-center justify-between mb-4">
                 <h3 class="text-lg font-bold text-white">Keyboard shortcuts</h3>
                 <button type="button" data-shortcuts-close
-                        class="text-gray-500 hover:text-white transition" aria-label="Close shortcuts">
+                        class="text-gray-500 hover:text-white transition flex items-center gap-1.5" aria-label="Close shortcuts">
+                    <span class="text-xs text-gray-600">Esc</span>
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
             </div>
-            ${sections}
-            <p class="text-[11px] text-gray-500 mt-4">Tip: shortcuts bail out while you're typing in inputs, so you can always type the literal keys.</p>
+            ${sectionsHtml}
         </div>
     `;
 
@@ -710,6 +807,8 @@ document.addEventListener('keydown', (e) => {
 
 // ── Screen Navigation ─────────────────────────────────────────────────────
 async function showScreen(id) {
+    // Capture the previous screen before changing active classes
+    const prevScreenId = document.querySelector('.screen.active')?.id;
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     // Mark the next render as a screen-entry so it scrolls the
@@ -721,7 +820,18 @@ async function showScreen(id) {
     _bumpLibNavGeneration();
     if (id === 'home') { _libScrollOnNextRender.home = true; loadLibrary(); }
     if (id === 'favorites') { _libScrollOnNextRender.favorites = true; loadFavorites(); }
-    if (id === 'settings') loadSettings();
+    if (id === 'settings') {
+        // Record where we came from so Esc can go back. The player screen
+        // is torn down by the `id !== 'player'` branch below, so
+        // re-entering it via showScreen() would land on a dead screen —
+        // fall back to the player's own origin (or 'home') instead.
+        if (prevScreenId && prevScreenId !== 'settings') {
+            _settingsOriginScreen = prevScreenId === 'player'
+                ? (_playerOriginScreen || 'home')
+                : prevScreenId;
+        }
+        loadSettings();
+    }
     if (id !== 'player') {
         highway.stop();
         if (window._juceMode) {
@@ -3528,20 +3638,489 @@ setInterval(() => {
     if (!_countingIn) highway.setTime(ct);
 }, 1000 / 60);
 
-// Keyboard shortcuts (player only)
+// ── Centralized Keyboard Shortcut Registry ───────────────────────────────
+//
+// Plugins can register keyboard shortcuts via window.registerShortcut().
+// Shortcuts are scope-aware (global, player, library, plugin-specific) and
+// support optional condition callbacks for dynamic enable/disable.
+//
+// Panel-scoped shortcuts:
+//   - Each panel has its own shortcut registry
+//   - Use window.createShortcutPanel(id) to create a panel
+//   - Use window.setActiveShortcutPanel(id) to set the active panel
+//   - Shortcuts are registered to the active panel
+//   - This allows multiple panels (e.g., splitscreen) to have their own shortcuts
+//
+// API:
+//   window.registerShortcut({
+//     key: string,              // Required: key value (e.key) or key code (e.code)
+//     description: string,     // Required: shown in help panel
+//     scope: 'global' | 'player' | 'library' | 'settings' | 'plugin-{id}',  // Default: 'global'
+//     condition: () => boolean,  // Optional: dynamic enable/disable guard
+//     handler: (e) => void,    // Required: callback when shortcut triggers
+//     modifiers: {              // Optional: require modifier keys
+//       ctrl?: boolean,
+//       alt?: boolean,
+//       shift?: boolean,
+//       meta?: boolean
+//     }
+//   });
+//
+// Panel API:
+//   window.createShortcutPanel(id) - Create a new panel
+//   window.setActiveShortcutPanel(id) - Set the active panel for registration
+//   window.getActiveShortcutPanel() - Get the current active panel
+//   window.isInShortcutPanel() - Check if running in a panel (not default)
+//   window.getGlobalShortcutContext() - Get default panel for truly global shortcuts
+//
+// Note: The handler receives the KeyboardEvent, so you can check
+// e.shiftKey, e.altKey, etc. directly in your handler if you need
+// behavior that depends on modifier state (e.g., different actions
+// for Shift+key vs key alone). Use the modifiers option when you
+// want the shortcut to ONLY fire with specific modifiers.
+//
+// See CLAUDE.md for full documentation.
+
+// ── Window ID system for per-window shortcuts ────────────────────────────────
+// Each window gets a unique ID so plugins can register window-specific shortcuts.
+// This is useful for popup windows (e.g., splitscreen plugin) that need their
+// own keyboard shortcuts.
+
+let _shortcutWindowId = null;
+
+window.getShortcutWindowId = () => {
+    if (_shortcutWindowId) return _shortcutWindowId;
+    // Generate a unique ID for this window
+    _shortcutWindowId = 'win-' + Math.random().toString(36).substr(2, 9);
+    return _shortcutWindowId;
+};
+
+// ── Shortcut registry ───────────────────────────────────────────────────────
+
+// ── Panel-scoped shortcut system ───────────────────────────────────────────
+// Each panel has its own shortcut registry. This allows multiple panels
+// (e.g., splitscreen) to have their own keyboard shortcuts without collisions.
+
+class ShortcutPanel {
+    constructor(id) {
+        this.id = id;
+        this.shortcuts = new Map();
+    }
+    
+    _compositeKey(key, scope) {
+        return `${scope}::${key}`;
+    }
+    
+    registerShortcut(options) {
+        const { key, description, scope = 'global', condition = null, handler, modifiers = null } = options;
+        
+        if (!key || !handler) {
+            console.error(`registerShortcut: key and handler are required`);
+            return;
+        }
+        
+        // Validate scope
+        const validScopes = ['global', 'player', 'library', 'settings'];
+        const isValidScope = validScopes.includes(scope) || 
+                             scope.startsWith('plugin-');
+        if (!isValidScope) {
+            console.warn(`registerShortcut: invalid scope '${scope}'. Valid scopes are: global, player, library, settings, or plugin-{id}`);
+        }
+        
+        // Conflict detection: warn if key+scope is already registered
+        const compositeKey = this._compositeKey(key, scope);
+        if (this.shortcuts.has(compositeKey)) {
+            console.warn(`registerShortcut [${this.id}]: '${key}' in scope '${scope}' is already registered; overwriting. Previous:`, this.shortcuts.get(compositeKey));
+        }
+        
+        this.shortcuts.set(compositeKey, { key, description, scope, condition, handler, modifiers });
+    }
+    
+    unregisterShortcut(key, scope) {
+        return this.shortcuts.delete(this._compositeKey(key, scope));
+    }
+    
+    clearShortcuts() {
+        this.shortcuts.clear();
+    }
+    
+    listShortcuts() {
+        return Array.from(this.shortcuts.entries()).map(([ck, s]) => [s.key, s]);
+    }
+}
+
+// Global panel management
+const _panels = new Map();
+let _activePanel = null;
+let _defaultPanel = null;
+
+// Create default panel on init
+const defaultPanel = new ShortcutPanel('default');
+_panels.set('default', defaultPanel);
+_defaultPanel = 'default';
+_activePanel = 'default';
+
+// ── Panel API ───────────────────────────────────────────────────────────────
+
+window.createShortcutPanel = (id) => {
+    if (_panels.has(id)) {
+        console.warn(`createShortcutPanel: panel '${id}' already exists`);
+        return _panels.get(id);
+    }
+    const panel = new ShortcutPanel(id);
+    _panels.set(id, panel);
+    return panel;
+};
+
+window.setActiveShortcutPanel = (id) => {
+    if (!_panels.has(id)) {
+        console.error(`setActiveShortcutPanel: panel '${id}' does not exist`);
+        return;
+    }
+    _activePanel = id;
+};
+
+window.getActiveShortcutPanel = () => _activePanel;
+
+window.isInShortcutPanel = () => {
+    return _activePanel !== 'default';
+};
+
+window.getGlobalShortcutContext = () => {
+    console.warn('getGlobalShortcutContext: Global shortcuts are exceptional. Consider using panel-scoped shortcuts instead.');
+    return _panels.get('default');
+};
+
+// ── Shortcut registry (routes to active panel) ───────────────────────────────
+
+window.registerShortcut = (options) => {
+    const panelId = _activePanel || _defaultPanel || 'default';
+    const panel = _panels.get(panelId);
+    
+    if (!panel) {
+        console.error(`registerShortcut: No panel found for registration: ${panelId}`);
+        return;
+    }
+    
+    panel.registerShortcut(options);
+};
+
+window.unregisterShortcut = (key, scope) => {
+    // Try the active panel first to preserve panel isolation; fall back to
+    // other panels so a shortcut registered before a panel switch is still
+    // removable.
+    const resolvedScope = scope || 'global';
+    const activePanelId = _activePanel || _defaultPanel || 'default';
+    const activePanel = _panels.get(activePanelId);
+    if (activePanel && activePanel.unregisterShortcut(key, resolvedScope)) {
+        return true;
+    }
+    for (const [panelId, panel] of _panels) {
+        if (panelId === activePanelId) continue;
+        if (panel.unregisterShortcut(key, resolvedScope)) {
+            return true;
+        }
+    }
+    return false;
+};
+
+window.clearWindowShortcuts = (windowId) => {
+    // Remove all shortcuts registered for a specific window
+    // This is for backward compatibility with window-specific shortcuts
+    let removed = 0;
+    for (const [panelId, panel] of _panels) {
+        if (panelId.startsWith(`window-${windowId}`)) {
+            panel.clearShortcuts();
+            _panels.delete(panelId);
+            removed++;
+        }
+    }
+    return removed;
+};
+
+function _getCurrentContext() {
+    const currentScreen = document.querySelector('.screen.active')?.id;
+    return {
+        screen: currentScreen,
+        windowId: window.getShortcutWindowId(),
+        activePanel: _activePanel,
+        isPlayer: currentScreen === 'player',
+        isLibrary: ['home', 'favorites'].includes(currentScreen),
+        isSettings: currentScreen === 'settings',
+        isPlugin: currentScreen?.startsWith('plugin-')
+    };
+}
+
+function _isShortcutActive(shortcut, ctx) {
+    if (shortcut.scope === 'global') return true;
+    if (shortcut.scope === 'player' && ctx.isPlayer) return true;
+    if (shortcut.scope === 'library' && ctx.isLibrary) return true;
+    if (shortcut.scope === 'settings' && ctx.isSettings) return true;
+    if (shortcut.scope.startsWith('plugin-')) {
+        const pluginId = shortcut.scope.replace('plugin-', '');
+        return ctx.screen === `plugin-${pluginId}`;
+    }
+    return false;
+}
+
+function _modifiersMatch(e, modifiers) {
+    if (!modifiers) return true;
+    if (modifiers.ctrl !== undefined && modifiers.ctrl !== e.ctrlKey) return false;
+    if (modifiers.alt !== undefined && modifiers.alt !== e.altKey) return false;
+    if (modifiers.shift !== undefined && modifiers.shift !== e.shiftKey) return false;
+    if (modifiers.meta !== undefined && modifiers.meta !== e.metaKey) return false;
+    return true;
+}
+
+// Debug mode for keyboard shortcuts
+let _DEBUG_SHORTCUTS = false;
+
+window._setDebugShortcuts = (enabled) => {
+    _DEBUG_SHORTCUTS = enabled;
+    console.log(`[Shortcuts] Debug mode ${enabled ? 'ENABLED' : 'DISABLED'}`);
+};
+
+window._listShortcuts = () => {
+    console.log('=== Registered Shortcuts ===');
+    for (const [panelId, panel] of _panels) {
+        console.log(`Panel: ${panelId}`);
+        for (const [, s] of panel.shortcuts) {
+            console.log(`  ${s.key.padEnd(15)} | ${s.scope.padEnd(10)} | ${s.description}`);
+        }
+    }
+    console.log('=== End ===');
+};
+
+window._testShortcut = (key, scope) => {
+    // Mirror the dispatcher: try the active panel first, then default.
+    const resolvedScope = scope || 'global';
+    const tried = new Set();
+    const panelOrder = [_activePanel, _defaultPanel, 'default'].filter(id => {
+        if (!id || tried.has(id)) return false;
+        tried.add(id);
+        return true;
+    });
+
+    for (const panelId of panelOrder) {
+        const panel = _panels.get(panelId);
+        if (!panel) continue;
+        const shortcut = panel.shortcuts.get(panel._compositeKey(key, resolvedScope));
+        if (!shortcut) continue;
+
+        const ctx = _getCurrentContext();
+        const active = _isShortcutActive(shortcut, ctx);
+        let conditionMet = true;
+        if (shortcut.condition) {
+            try { conditionMet = !!shortcut.condition(); }
+            catch (err) { conditionMet = `threw: ${err.message}`; }
+        }
+        console.log(`Shortcut '${key}' [${resolvedScope}] [${panelId}]:`, {
+            description: shortcut.description,
+            scope: shortcut.scope,
+            currentContext: ctx,
+            isActive: active,
+            conditionMet
+        });
+        return;
+    }
+
+    console.log(`Shortcut '${key}' (scope: ${resolvedScope}) not registered in any panel`);
+};
+
+// Expose internals for debugging (prefixed with _ to indicate private)
+// These are for development/debugging only and should not be used by plugins.
+window._panels = _panels;
+window._getCurrentContext = _getCurrentContext;
+window._isShortcutActive = _isShortcutActive;
+
+// ── Registry-based keydown handler ─────────────────────────────────────────
+//
+// This handler processes all registered shortcuts through the central registry.
+// It runs after the library navigation handler (which handles /, ?, c, f, e, etc.)
+// and before any other keydown listeners.
+
 document.addEventListener('keydown', e => {
-    if (!document.getElementById('player').classList.contains('active')) return;
-    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
-    else if (e.code === 'ArrowLeft') seekBy(-5);
-    else if (e.code === 'ArrowRight') seekBy(5);
-    else if (e.code === 'Escape') showScreen(_playerOriginScreen || 'home');
-    // A/V offset live-calibration — watch the highway and listen to
-    // the audio while tuning. Shift for coarse ±50 ms, bare key for
-    // fine ±10 ms. Match on e.key (the produced character) rather
-    // than e.code (physical-key position) so layouts where `[`/`]`
-    // are AltGr combinations (QWERTZ, AZERTY) still fire correctly.
-    else if (e.key === '[') { e.preventDefault(); nudgeAvOffsetMs(e.shiftKey ? -50 : -10); }
-    else if (e.key === ']') { e.preventDefault(); nudgeAvOffsetMs(e.shiftKey ?  50 :  10); }
+    // Don't intercept if typing in an input field
+    if (_isTextInput(e.target) || _isInsideInteractiveControl(e.target)) return;
+
+    const ctx = _getCurrentContext();
+    const activePanel = _panels.get(_activePanel);
+    const defaultPanel = _panels.get('default');
+    
+    if (!activePanel && !defaultPanel) return;
+
+    if (_DEBUG_SHORTCUTS) {
+        console.log('[Shortcuts] Key pressed:', { key: e.key, code: e.code, ctx, activePanel: _activePanel });
+    }
+
+    // Try active panel first, then fall back to default
+    const panelsToDispatch = [];
+    if (activePanel && activePanel !== defaultPanel) panelsToDispatch.push(activePanel);
+    if (defaultPanel) panelsToDispatch.push(defaultPanel);
+
+    for (const panel of panelsToDispatch) {
+        for (const [, shortcut] of panel.shortcuts) {
+        // Match on both e.key (character produced) and e.code (physical key)
+        if (e.key !== shortcut.key && e.code !== shortcut.key) continue;
+
+        // Check modifier keys if specified
+        if (!_modifiersMatch(e, shortcut.modifiers)) continue;
+
+        if (_DEBUG_SHORTCUTS) {
+            console.log('[Shortcuts] Matched shortcut:', shortcut.key, shortcut);
+        }
+
+        // Check scope
+        if (!_isShortcutActive(shortcut, ctx)) {
+            if (_DEBUG_SHORTCUTS) {
+                console.log('[Shortcuts] Not active - scope mismatch:', shortcut.scope, ctx);
+            }
+            continue;
+        }
+
+        // Check condition callback — guard against plugin errors
+        if (shortcut.condition) {
+            try {
+                if (!shortcut.condition()) {
+                    if (_DEBUG_SHORTCUTS) {
+                        console.log('[Shortcuts] Not active - condition failed');
+                    }
+                    continue;
+                }
+            } catch (err) {
+                console.error('[Shortcuts] condition() threw for key:', shortcut.key, err);
+                continue;
+            }
+        }
+
+        e.preventDefault();
+        if (_DEBUG_SHORTCUTS) {
+            console.log('[Shortcuts] Executing handler for:', shortcut.key);
+        }
+        // Guard handler against plugin errors
+        try {
+            shortcut.handler(e);
+        } catch (err) {
+            console.error('[Shortcuts] handler() threw for key:', shortcut.key, err);
+        }
+        return;
+    }
+}
+
+    if (_DEBUG_SHORTCUTS) {
+        console.log('[Shortcuts] No shortcut matched for:', e.key, e.code);
+    }
+});
+
+// ── Window cleanup ───────────────────────────────────────────────────────────
+// Clean up window-specific shortcuts when a window is closed.
+// This is important for popup windows (e.g., splitscreen plugin) that
+// may be closed by the user.
+
+window.addEventListener('beforeunload', () => {
+    const windowId = window.getShortcutWindowId();
+    const removed = window.clearWindowShortcuts(windowId);
+    if (removed > 0 && _DEBUG_SHORTCUTS) {
+        console.log(`[Shortcuts] Cleaned up ${removed} shortcuts for window ${windowId}`);
+    }
+});
+
+// ── Register built-in shortcuts ───────────────────────────────────────────
+
+// Global shortcuts
+registerShortcut({
+    key: '?',
+    description: 'Show keyboard shortcuts',
+    scope: 'global',
+    handler: () => _openShortcutsModal()
+});
+
+// Library shortcuts
+registerShortcut({
+    key: '/',
+    description: 'Focus search',
+    scope: 'library',
+    handler: () => {
+        const input = _activeSearchInput();
+        if (input) input.focus();
+    }
+});
+
+registerShortcut({
+    key: 'c',
+    description: 'Convert PSARC entry to .sloppak',
+    scope: 'library',
+    handler: () => {
+        // Handled by library navigation - this is for documentation only
+    }
+});
+
+registerShortcut({
+    key: 'f',
+    description: 'Toggle favorite',
+    scope: 'library',
+    handler: () => {
+        // Handled by library navigation - this is for documentation only
+    }
+});
+
+registerShortcut({
+    key: 'e',
+    description: 'Edit metadata',
+    scope: 'library',
+    handler: () => {
+        // Handled by library navigation - this is for documentation only
+    }
+});
+
+// Player shortcuts
+registerShortcut({
+    key: 'Space',
+    description: 'Play/Pause',
+    scope: 'player',
+    handler: () => togglePlay()
+});
+
+registerShortcut({
+    key: 'ArrowLeft',
+    description: 'Seek back 5 seconds',
+    scope: 'player',
+    handler: () => seekBy(-5)
+});
+
+registerShortcut({
+    key: 'ArrowRight',
+    description: 'Seek forward 5 seconds',
+    scope: 'player',
+    handler: () => seekBy(5)
+});
+
+registerShortcut({
+    key: 'Escape',
+    description: 'Back to library',
+    scope: 'player',
+    handler: () => showScreen(_playerOriginScreen || 'home')
+});
+
+registerShortcut({
+    key: 'Escape',
+    description: 'Go back to previous screen',
+    scope: 'settings',
+    handler: () => showScreen(_settingsOriginScreen || 'home')
+});
+
+registerShortcut({
+    key: '[',
+    description: 'Offset audio back (Shift: 50ms, else 10ms)',
+    scope: 'player',
+    handler: (e) => nudgeAvOffsetMs(e.shiftKey ? -50 : -10)
+});
+
+registerShortcut({
+    key: ']',
+    description: 'Offset audio forward (Shift: 50ms, else 10ms)',
+    scope: 'player',
+    handler: (e) => nudgeAvOffsetMs(e.shiftKey ? 50 : 10)
 });
 
 // ── Edit metadata modal ─────────────────────────────────────────────────

@@ -2,14 +2,18 @@
 
 A self-contained web application for browsing, playing, and practicing Rocksmith 2014 Custom DLC (CDLC). Runs entirely in Docker — no local dependencies required.
 
-[![Video Overview](https://img.youtube.com/vi/f_XTS9tVeaU/maxresdefault.jpg)](https://www.youtube.com/watch?v=f_XTS9tVeaU)
+[![Video Overview](docs/player-3d.webp)](https://www.youtube.com/watch?v=f_XTS9tVeaU)
 
 > **Looking for a desktop app?** [Slopsmith Desktop](https://github.com/byrongamatos/slopsmith-desktop) is a standalone native app for non-technical users — no Docker required. It includes everything in the web version plus a built-in audio engine with VST3/AU/LV2 plugin hosting, Neural Amp Modeler (NAM) for amp simulation, cabinet IR loading, and automatic tone switching that changes your signal chain as tones change during a song.
 
 ![Library](docs/library.png)
 ![3D Highway Player](docs/player-3d.jpg)
 
-> The screenshot above shows the **3D Highway** — a bundled visualization plugin selectable from the viz picker, featuring depth-aware camera, lighting, and per-string lane glow. The **Classic 2D Highway** is also available in the picker.
+> The screenshot above shows the **3D Highway** — a bundled visualization plugin selectable from the viz picker, featuring depth-aware camera, lighting, and per-string lane glow. 
+
+![Classic 2D Highway](docs/player-2d.jpg)
+
+> The **Classic 2D Highway** is also available in the picker for low-powered devices.
 
 ## Features
 
@@ -295,6 +299,24 @@ pytest
 ```
 
 CI runs the same suite on every push and PR against `main` (see `.github/workflows/tests.yml`). Contributions adding tests are welcome — the current targets are `lib/tunings.py` and `lib/song.py`; natural follow-ups would be the pure helpers in `lib/sloppak_convert.py` and the tempo/tick math in `lib/gp2rs.py`.
+
+### Browser tests
+
+Keyboard shortcuts and UI interactions are tested with Playwright. To run them:
+
+```bash
+# Start the server first
+DLC_PATH=/path/to/your/dlc docker compose up -d
+
+# Install dependencies
+npm install
+npm run install:playwright
+
+# Run tests
+npm test
+```
+
+See `tests/browser/README.md` for full documentation on browser tests.
 
 ## License
 
