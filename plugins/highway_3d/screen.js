@@ -95,7 +95,7 @@
     // two parallel trails framed inside the wide flat note body;
     // fretted notes get a single centered trail.
     const OPEN_SUS_OFFSETS = Object.freeze([-NW * 3, NW * 3]);
-    const SINGLE_SUS_OFFSET = Object.freeze([0]);
+    const SINGLE_SUS_OFFSETS = Object.freeze([0]);
     const N_RAD = 1.5 * K;
     const SW = 2 * K, SH = 1.5 * K;
 
@@ -4111,9 +4111,9 @@
                         // X — visually echoes the wide flat open-note body.
                         // Fretted notes keep the single-trail path. Offsets
                         // arrays are module-scoped (see OPEN_SUS_OFFSETS /
-                        // SINGLE_SUS_OFFSET) so this hot path doesn't
+                        // SINGLE_SUS_OFFSETS) so this hot path doesn't
                         // allocate per call.
-                        const offsets = n.f === 0 ? OPEN_SUS_OFFSETS : SINGLE_SUS_OFFSET;
+                        const offsets = n.f === 0 ? OPEN_SUS_OFFSETS : SINGLE_SUS_OFFSETS;
                         for (let i = 0; i < offsets.length; i++) {
                             const xOff = x + offsets[i];
                             const trOut = pSusOutline.get();
