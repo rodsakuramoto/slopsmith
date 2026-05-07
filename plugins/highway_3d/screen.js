@@ -4101,13 +4101,20 @@
                         const len = Math.min(remSus, AHEAD) * TS;
                         const zPos = dZ(susStart - now) - len / 2;
                         const tw = NW * 0.85, th = NH * 0.12;
-                        const trOut = pSusOutline.get();
-                        trOut.position.set(x, y, zPos);
-                        trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, len);
-                        const tr = pSus.get();
-                        tr.material = mSus[s];
-                        tr.position.set(x, y, zPos);
-                        tr.scale.set(tw, th, len);
+                        // Open strings get two parallel trails offset along
+                        // X — visually echoes the wide flat open-note body.
+                        // Fretted notes keep the single-trail path.
+                        const offsets = n.f === 0 ? [-NW * 3, NW * 3] : [0];
+                        for (let i = 0; i < offsets.length; i++) {
+                            const xOff = x + offsets[i];
+                            const trOut = pSusOutline.get();
+                            trOut.position.set(xOff, y, zPos);
+                            trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, len);
+                            const tr = pSus.get();
+                            tr.material = mSus[s];
+                            tr.position.set(xOff, y, zPos);
+                            tr.scale.set(tw, th, len);
+                        }
                     }
                 }
 
