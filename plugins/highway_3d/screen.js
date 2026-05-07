@@ -90,6 +90,12 @@
 
     // Shorter, flatter notes (joel style)
     const NW = 5 * K, NH = 3 * K, ND = 0.5 * K;
+    // Sustain-trail X offsets per note class. Module-scoped to avoid
+    // per-call allocation in drawNote()'s hot path. Open strings get
+    // two parallel trails framed inside the wide flat note body;
+    // fretted notes get a single centered trail.
+    const OPEN_SUS_OFFSETS = Object.freeze([-NW * 3, NW * 3]);
+    const SINGLE_SUS_OFFSET = Object.freeze([0]);
     const N_RAD = 1.5 * K;
     const SW = 2 * K, SH = 1.5 * K;
 
@@ -4103,8 +4109,11 @@
                         const tw = NW * 0.85, th = NH * 0.12;
                         // Open strings get two parallel trails offset along
                         // X — visually echoes the wide flat open-note body.
-                        // Fretted notes keep the single-trail path.
-                        const offsets = n.f === 0 ? [-NW * 3, NW * 3] : [0];
+                        // Fretted notes keep the single-trail path. Offsets
+                        // arrays are module-scoped (see OPEN_SUS_OFFSETS /
+                        // SINGLE_SUS_OFFSET) so this hot path doesn't
+                        // allocate per call.
+                        const offsets = n.f === 0 ? OPEN_SUS_OFFSETS : SINGLE_SUS_OFFSET;
                         for (let i = 0; i < offsets.length; i++) {
                             const xOff = x + offsets[i];
                             const trOut = pSusOutline.get();
