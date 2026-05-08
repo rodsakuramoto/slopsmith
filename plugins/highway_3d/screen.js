@@ -4082,6 +4082,12 @@
                 }
             }
 
+            // Fret span of the dynamic highway lane (wire dMin .. dMax). Reused
+            // so fret-column measure markers stay inside the same horizontal
+            // band as the blue track — previously markers used every inlay
+            // fret and stuck out past the lane whenever the camera narrowed.
+            let hwyLaneFretClipMin = null, hwyLaneFretClipMax = null;
+
             // ── Dynamic highway lane ──────────────────────────────────────
             if (activeFrets.size > 0) {
                 let minF = 99, maxF = 0;
@@ -4091,6 +4097,8 @@
                     dMax = dMax + (3 - (dMax - dMin));
                     if (dMax > NFRETS) { dMax = NFRETS; dMin = Math.max(0, dMax - 4); }
                 }
+                hwyLaneFretClipMin = dMin;
+                hwyLaneFretClipMax = dMax;
                 const xL = fretX(dMin), xR = fretX(dMax);
                 const margin = NW * 0.5;
                 const laneW = (xR - xL) + margin * 2;
@@ -4256,16 +4264,18 @@
 
                     const dt = b.time - now;
                     const z = dZ(dt);
-                    // Distance compensation: grow world-scale linearly
-                    // with dt so perspective foreshortening doesn't make
-                    // far markers tiny.
-                    const distScale = 1 + Math.min(1, dt / AHEAD) * 1.2;
+                    // Sprite scale matches the per-note connector fret label
+                    // (drawNote → pNoteFretLabel) so cadence markers read the
+                    // same size at a given Z — no extra world-scale boost.
+                    const clipMin = hwyLaneFretClipMin;
+                    const clipMax = hwyLaneFretClipMax;
                     for (const f of FRET_COLUMN_MARKER_FRETS) {
                         let show;
                         if (f === 12) show = cached.hasLow || cached.hasHigh;
                         else if (f < 12) show = cached.hasLow;
                         else show = cached.hasHigh;
                         if (!show) continue;
+                        if (clipMin != null && (f <= clipMin || f > clipMax)) continue;
                         const lit = activeFrets.has(f);
                         const color = lit ? '#bbbbbb' : '#666666';
                         const sp = pFretColMarker.get();
@@ -4276,7 +4286,7 @@
                         }
                         sp.material.opacity = 0.85;
                         sp.position.set(fretMid(f), labelY, z);
-                        const sz = NH * 3.8 * _textSizeMul * distScale;
+                        const sz = NH * 2.2 * _textSizeMul;
                         sp.scale.set(sz, sz, 1);
                     }
                 }
