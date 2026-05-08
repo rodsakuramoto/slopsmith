@@ -2616,7 +2616,8 @@ window.jucePlayer = jucePlayer;
 
 // Desktop JUCE backing uses an empty <audio> element; plugins such as Section Map
 // still seek via audio.currentTime / pause / play. Mirror those onto jucePlayer
-// while _juceMode is active, and serialize ops so pause→seek→(seeked→play) works.
+// while _juceMode is active. Same-tick pause+seek coalesce into a single seek
+// (no stopBacking before seek — HTML5 needed that for buffering; JUCE does not).
 let _resetJuceAudioShimChain = function () {};
 (function _installJuceAudioElementShim() {
     if (!window.slopsmithDesktop?.audio) return;
@@ -2630,6 +2631,9 @@ let _resetJuceAudioShimChain = function () {};
     const nativePause = mediaProto.pause;
 
     let chain = Promise.resolve();
+    /** Same-tick pause + seek (Section Map): coalesce to one seek — no stopBacking before seek. */
+    let _juceShimBatch = null;
+    let _juceShimBatchFlushScheduled = false;
     function enqueue(fn) {
         const p = chain.then(fn);
         chain = p.catch((e) => {
@@ -2637,8 +2641,48 @@ let _resetJuceAudioShimChain = function () {};
         });
         return p;
     }
+    function scheduleJuceShimBatchFlush() {
+        if (_juceShimBatchFlushScheduled) return;
+        _juceShimBatchFlushScheduled = true;
+        queueMicrotask(() => {
+            _juceShimBatchFlushScheduled = false;
+            const batch = _juceShimBatch;
+            _juceShimBatch = null;
+            if (!batch || !window._juceMode) return;
+            const wantsPause = !!batch.wantsPause;
+            const seekTime = batch.seekTime;
+            if (wantsPause && seekTime !== undefined) {
+                enqueue(async () => {
+                    await jucePlayer.seek(seekTime);
+                    audio.dispatchEvent(new Event('seeked'));
+                });
+                return;
+            }
+            if (wantsPause) {
+                enqueue(async () => {
+                    await jucePlayer.pause();
+                    isPlaying = false;
+                    document.getElementById('btn-play').textContent = '▶ Play';
+                    const sm = window.slopsmith;
+                    if (sm) {
+                        sm.isPlaying = false;
+                        sm.emit('song:pause', { time: jucePlayer.currentTime });
+                    }
+                });
+                return;
+            }
+            if (seekTime !== undefined) {
+                enqueue(async () => {
+                    await jucePlayer.seek(seekTime);
+                    audio.dispatchEvent(new Event('seeked'));
+                });
+            }
+        });
+    }
     _resetJuceAudioShimChain = function () {
         chain = Promise.resolve();
+        _juceShimBatch = null;
+        _juceShimBatchFlushScheduled = false;
     };
 
     Object.defineProperty(audio, 'currentTime', {
@@ -2649,10 +2693,9 @@ let _resetJuceAudioShimChain = function () {};
         set(v) {
             if (window._juceMode) {
                 const t = Math.max(0, Number(v) || 0);
-                enqueue(async () => {
-                    await jucePlayer.seek(t);
-                    audio.dispatchEvent(new Event('seeked'));
-                });
+                _juceShimBatch = _juceShimBatch || {};
+                _juceShimBatch.seekTime = t;
+                scheduleJuceShimBatchFlush();
                 return;
             }
             ctDesc.set.call(this, v);
@@ -2670,16 +2713,9 @@ let _resetJuceAudioShimChain = function () {};
 
     audio.pause = function () {
         if (window._juceMode) {
-            enqueue(async () => {
-                await jucePlayer.pause();
-                isPlaying = false;
-                document.getElementById('btn-play').textContent = '▶ Play';
-                const sm = window.slopsmith;
-                if (sm) {
-                    sm.isPlaying = false;
-                    sm.emit('song:pause', { time: jucePlayer.currentTime });
-                }
-            });
+            _juceShimBatch = _juceShimBatch || {};
+            _juceShimBatch.wantsPause = true;
+            scheduleJuceShimBatchFlush();
             return;
         }
         nativePause.call(audio);
