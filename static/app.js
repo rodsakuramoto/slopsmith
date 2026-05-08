@@ -2614,6 +2614,97 @@ const jucePlayer = {
 };
 window.jucePlayer = jucePlayer;
 
+// Desktop JUCE backing uses an empty <audio> element; plugins such as Section Map
+// still seek via audio.currentTime / pause / play. Mirror those onto jucePlayer
+// while _juceMode is active, and serialize ops so pause→seek→(seeked→play) works.
+let _resetJuceAudioShimChain = function () {};
+(function _installJuceAudioElementShim() {
+    if (!window.slopsmithDesktop?.audio) return;
+
+    const mediaProto = HTMLMediaElement.prototype;
+    const ctDesc = Object.getOwnPropertyDescriptor(mediaProto, 'currentTime');
+    const pausedDesc = Object.getOwnPropertyDescriptor(mediaProto, 'paused');
+    if (!ctDesc?.get || !ctDesc?.set || !pausedDesc?.get) return;
+
+    const nativePlay = mediaProto.play;
+    const nativePause = mediaProto.pause;
+
+    let chain = Promise.resolve();
+    function enqueue(fn) {
+        const p = chain.then(fn);
+        chain = p.catch((e) => {
+            console.warn('[juce-audio-shim]', e);
+        });
+        return p;
+    }
+    _resetJuceAudioShimChain = function () {
+        chain = Promise.resolve();
+    };
+
+    Object.defineProperty(audio, 'currentTime', {
+        get() {
+            if (window._juceMode) return jucePlayer.currentTime;
+            return ctDesc.get.call(this);
+        },
+        set(v) {
+            if (window._juceMode) {
+                const t = Math.max(0, Number(v) || 0);
+                enqueue(async () => {
+                    await jucePlayer.seek(t);
+                    audio.dispatchEvent(new Event('seeked'));
+                });
+                return;
+            }
+            ctDesc.set.call(this, v);
+        },
+        configurable: true,
+    });
+
+    Object.defineProperty(audio, 'paused', {
+        get() {
+            if (window._juceMode) return !isPlaying;
+            return pausedDesc.get.call(this);
+        },
+        configurable: true,
+    });
+
+    audio.pause = function () {
+        if (window._juceMode) {
+            enqueue(async () => {
+                await jucePlayer.pause();
+                isPlaying = false;
+                document.getElementById('btn-play').textContent = '▶ Play';
+                const sm = window.slopsmith;
+                if (sm) {
+                    sm.isPlaying = false;
+                    sm.emit('song:pause', { time: jucePlayer.currentTime });
+                }
+            });
+            return;
+        }
+        nativePause.call(audio);
+    };
+
+    audio.play = function () {
+        if (window._juceMode) {
+            const p = enqueue(async () => {
+                const started = await jucePlayer.play();
+                if (started) {
+                    isPlaying = true;
+                    document.getElementById('btn-play').textContent = '⏸ Pause';
+                    const sm = window.slopsmith;
+                    if (sm) {
+                        sm.isPlaying = true;
+                        sm.emit('song:play', { time: jucePlayer.currentTime });
+                    }
+                }
+            });
+            return p.then(() => undefined);
+        }
+        return nativePlay.call(audio);
+    };
+})();
+
 function _audioTime() { return window._juceMode ? jucePlayer.currentTime : audio.currentTime; }
 function _audioDuration() { return window._juceMode ? jucePlayer.duration : audio.duration; }
 async function _audioSeek(s) {
@@ -2729,6 +2820,7 @@ async function playSong(filename, arrangement) {
         window._juceMode = false;
         window._juceAudioUrl = null;
     }
+    _resetJuceAudioShimChain();
     audio.pause();
     audio.src = '';
     isPlaying = false;
