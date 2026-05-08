@@ -2156,6 +2156,17 @@ function createHighway() {
                                                         if (gen !== _wsGen) return; // stale
                                                         window._juceMode = true;
                                                         window._juceAudioUrl = audioUrl;
+                                                        // Match native backing gain to the Song mixer / persisted volume
+                                                        // (default engine backing is ~0.7 linear; HTML path uses audio.volume).
+                                                        let songPct = window.slopsmith?.audio?.readSongVolume?.();
+                                                        if (!Number.isFinite(songPct)) {
+                                                            try {
+                                                                songPct = parseFloat(localStorage.getItem('volume'));
+                                                            } catch (_e) { songPct = NaN; }
+                                                        }
+                                                        if (!Number.isFinite(songPct)) songPct = 80;
+                                                        songPct = Math.min(100, Math.max(0, songPct));
+                                                        await juceApi.setGain('backing', songPct / 100);
                                                         // Clear the HTML5 element so it does not buffer an unused track
                                                         audio.src = '';
                                                         return;
