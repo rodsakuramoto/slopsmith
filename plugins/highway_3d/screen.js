@@ -4093,9 +4093,27 @@
                 let minF = 99, maxF = 0;
                 activeFrets.forEach(f => { if (f > 0) { minF = Math.min(minF, f); maxF = Math.max(maxF, f); } });
                 let dMin = minF - 1, dMax = maxF;
-                if (dMax - dMin < 4) {
-                    dMax = dMax + (3 - (dMax - dMin));
-                    if (dMax > NFRETS) { dMax = NFRETS; dMin = Math.max(0, dMax - 4); }
+                // Highway lane always spans exactly 4 fret-index steps (dMax − dMin):
+                // grow small clusters outward, shrink wide ones with a centred window.
+                const HWY_LANE_SPAN = 4;
+                let span = dMax - dMin;
+                if (span > HWY_LANE_SPAN) {
+                    dMin = Math.round((dMin + dMax - HWY_LANE_SPAN) / 2);
+                    dMax = dMin + HWY_LANE_SPAN;
+                    if (dMax > NFRETS) {
+                        dMax = NFRETS;
+                        dMin = dMax - HWY_LANE_SPAN;
+                    }
+                    if (dMin < 0) {
+                        dMin = 0;
+                        dMax = HWY_LANE_SPAN;
+                    }
+                } else if (span < HWY_LANE_SPAN) {
+                    const need = HWY_LANE_SPAN - span;
+                    dMax = Math.min(NFRETS, dMax + need);
+                    if (dMax - dMin < HWY_LANE_SPAN) {
+                        dMin = Math.max(0, dMin - (HWY_LANE_SPAN - (dMax - dMin)));
+                    }
                 }
                 hwyLaneFretClipMin = dMin;
                 hwyLaneFretClipMax = dMax;
