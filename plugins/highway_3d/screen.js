@@ -79,6 +79,68 @@
         return /bass/i.test(bundle?.songInfo?.arrangement || '') ? 4 : NSTR;
     }
 
+    /** Rocksmith tuning entries are semitone offsets from instrument standard. */
+    const _NOTE_NAMES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+    // Open-string MIDI (thick → thin), matched to RS string index 0 low.
+    const _BASE_OPEN_MIDI_BASS4 = Object.freeze([28, 33, 38, 43]);
+    const _BASE_OPEN_MIDI_BASS5 = Object.freeze([23, 28, 33, 38, 43]);
+    const _BASE_OPEN_MIDI_GUITAR6 = Object.freeze([40, 45, 50, 55, 59, 64]);
+    const _BASE_OPEN_MIDI_GUITAR7 = Object.freeze([35, 40, 45, 50, 55, 59, 64]);
+    // F#/B/E standard extension — low string is a fifth below RS 7‑string low B.
+    const _BASE_OPEN_MIDI_GUITAR8 = Object.freeze([28, 35, 40, 45, 50, 55, 59, 64]);
+
+    function _baseOpenStringMidis(sc, arrangement) {
+        const isBass = /bass/i.test(arrangement || '');
+        if (sc === 4 && isBass) return _BASE_OPEN_MIDI_BASS4.slice();
+        if (sc === 4) return _BASE_OPEN_MIDI_GUITAR6.slice(0, 4);
+        if (sc === 5 && isBass) return _BASE_OPEN_MIDI_BASS5.slice();
+        if (sc === 5) return _BASE_OPEN_MIDI_GUITAR6.slice(0, 5);
+        if (sc === 7) return _BASE_OPEN_MIDI_GUITAR7.slice();
+        if (sc === 8) return _BASE_OPEN_MIDI_GUITAR8.slice();
+        if (Number.isFinite(sc) && sc > 8) {
+            const out = Array.from(_BASE_OPEN_MIDI_GUITAR8);
+            let last = out[out.length - 1];
+            while (out.length < sc) {
+                last += 5;
+                out.push(last);
+            }
+            return out.slice(0, sc);
+        }
+        const g6 = _BASE_OPEN_MIDI_GUITAR6.slice();
+        if (Number.isFinite(sc) && sc < 6 && sc >= 1) return g6.slice(0, sc);
+        return g6;
+    }
+
+    function _midiToPitchLabel(midi) {
+        const m = Math.round(midi);
+        const octave = Math.floor(m / 12) - 1;
+        const n = _NOTE_NAMES_SHARP[(m % 12 + 12) % 12];
+        return n + octave;
+    }
+
+    /**
+     * @param {number} nEffective string count clamped like nStr / resolveStringCount
+     * @param {Record<string, unknown>} songInfo WS song_info blob (subset)
+     */
+    function _openStringPitchLabelsForTuning(bundle, songInfo, nEffective) {
+        const n = Number.isFinite(nEffective) ? Math.min(Math.max(1, Math.trunc(nEffective)), MAX_RENDER_STRINGS) : resolveStringCount(bundle);
+        let tuning = (songInfo && songInfo.tuning) || bundle.tuning;
+        let cap = songInfo && songInfo.capo;
+        cap = Number.isFinite(cap) ? cap : (Number.isFinite(bundle.capo) ? bundle.capo : 0);
+        if (!Array.isArray(tuning)) tuning = [];
+
+        const base = _baseOpenStringMidis(n, songInfo?.arrangement);
+        const labels = [];
+        for (let s = 0; s < n; s++) {
+            const offRaw = tuning[s];
+            const off = Number.isFinite(offRaw) ? offRaw : 0;
+            const midi = (base[s] !== undefined ? base[s] : 40) + off + cap;
+            labels.push(_midiToPitchLabel(midi));
+        }
+        return labels;
+    }
+
     const STR_THICK = 0.25 * K;
 
     const S_BASE = 3 * K;
@@ -1300,7 +1362,7 @@
         let scene = null, cam = null, ren = null;
         let wrap = null;
         let ambLight = null, dirLight = null;
-        let fretG = null, noteG = null, beatG = null, lblG = null;
+        let fretG = null, tuningLblG = null, noteG = null, beatG = null, lblG = null;
         let gNote = null, gSus = null, gBeat = null, gTechArrow = null, gTapChevron = null;
         let mStr = [], mGlow = [], mSus = [], mProj = [], mProjGlow = [];
         let mWhiteOutline = null, mSusOutline = null;
@@ -1468,12 +1530,19 @@
         // place — without this the layer stays at its built-in opacity
         // until the next palette change rebuilds buildBoard().
         let stringLineGlows = [];
+        /** Left edge X of drawable string meshes; updated in buildBoard() at nut / fret junction. */
+        let boardStringStartX = fretX(0);
+        /** Open-string label column X — over headstock, left of nut (set in buildBoard()). */
+        let boardTuningLabelX = -4.2 * K;
         // Fret inlay number label sprites (one per INLAY_LABEL_FRETS entry).
         // Retained so update() can rescale them live when _textSizeMul changes.
         let _inlayLabels = [];
         // Cloned SpriteMaterials for the inlay labels — disposed on rebuild and
         // destroy() to prevent GPU leaks across palette changes or panel reuse.
         let _inlayMats = [];
+        // Open-string tuning labels beside the headstock (issue: per-song tuning).
+        let _tuningLabelSprites = [], _tuningLabelMats = [];
+        let _lastOpenStringLblSig = '';
         // Scratch Color used by _applyVibrancy() to avoid allocating a
         // fresh THREE.Color each time the user drags a slider.
         // Allocated lazily once Three.js is loaded inside initScene().
@@ -1687,6 +1756,63 @@
             });
             txtCache[k] = mat;
             return mat;
+        }
+
+        function _disposeOpenStringPitchSprites() {
+            for (const m of _tuningLabelMats) {
+                try { m.map?.dispose(); m.dispose(); } catch (_) { /* idempotent */ }
+            }
+            _tuningLabelMats = [];
+            _tuningLabelSprites = [];
+            _lastOpenStringLblSig = '';
+            if (!tuningLblG) return;
+            while (tuningLblG.children.length) tuningLblG.remove(tuningLblG.children[0]);
+        }
+
+        function _openStringLabelSignature(bundle, labels) {
+            const si = bundle && bundle.songInfo;
+            const tun = si && si.tuning;
+            let tStr = '';
+            if (Array.isArray(tun)) tStr = tun.slice(0, labels.length).join(',');
+            else if (bundle && Array.isArray(bundle.tuning)) tStr = bundle.tuning.slice(0, labels.length).join(',');
+            const capo =
+                si && Number.isFinite(si.capo) ? si.capo
+                    : (bundle && Number.isFinite(bundle.capo) ? bundle.capo : '');
+            const arrIdx = si && si.arrangement_index != null ? si.arrangement_index : '';
+            let palSig = '';
+            const nLab = labels.length;
+            if (typeof T !== 'undefined' && T?.Color && activePalette) {
+                palSig = activePalette.slice(0, nLab).map(c => new T.Color(c).getHexString()).join('/');
+            }
+            return `${nStr}|${capo}|${tStr}|${arrIdx}|${labels.join(',')}|${palSig}|${_textSizeMul.toFixed(3)}|${boardStringStartX.toFixed(6)}|${boardTuningLabelX.toFixed(6)}`;
+        }
+
+        function _syncOpenStringPitchLabels(bundle) {
+            if (!tuningLblG || !T || !bundle) return;
+            const labels = _openStringPitchLabelsForTuning(bundle, bundle.songInfo, nStr);
+            const sig = _openStringLabelSignature(bundle, labels);
+            if (sig === _lastOpenStringLblSig && _tuningLabelSprites.length === nStr) return;
+            _disposeOpenStringPitchSprites();
+            _lastOpenStringLblSig = sig;
+            // Left of nut/cordas — centered on headstock mass so text does not sit on the strings.
+            const labelX = boardTuningLabelX;
+            const zLabel = -0.08 * K;
+            const scalePx = 2.42 * _textSizeMul * K;
+            for (let s = 0; s < nStr; s++) {
+                const hex = '#' + new T.Color(activePalette[s % activePalette.length]).getHexString();
+                const mat = txtMat(labels[s] || '?', hex, false, 'noteFret').clone();
+                mat.depthTest = false;
+                mat.depthWrite = false;
+                mat.transparent = true;
+                const sp = new T.Sprite(mat);
+                sp.center.set(0, 0.5);
+                sp.scale.set(scalePx, scalePx, 1);
+                sp.position.set(labelX, sY(s), zLabel);
+                sp.renderOrder = 8;
+                tuningLblG.add(sp);
+                _tuningLabelSprites.push(sp);
+                _tuningLabelMats.push(mat);
+            }
         }
 
         // ── Object pool ────────────────────────────────────────────────────
@@ -2399,6 +2525,7 @@
             scene.add(dirLight);
 
             fretG = new T.Group(); scene.add(fretG);
+            tuningLblG = new T.Group(); scene.add(tuningLblG);
             noteG = new T.Group(); scene.add(noteG);
             beatG = new T.Group(); scene.add(beatG);
             lblG = new T.Group(); scene.add(lblG);
@@ -3090,9 +3217,21 @@
             // Thin Line strings (glow layer). Retained in stringLineGlows[]
             // so vibrancy slider changes can mutate opacity in place
             // without rebuilding the board geometry.
+            // Nut lateral layout (matches headstock block below): playing strings start at the
+            // fretboard-facing edge so they never project through nut/headstock.
+            const nutLenX = 1.55 * K;
+            const nutXC = -0.78 * K;
+            const xHeadLeft = -6.85 * K;
+            const nutRearX = nutXC - nutLenX * 0.5;
+            const nutFrontX = nutXC + nutLenX * 0.5;
+            boardStringStartX = nutFrontX + 0.03 * K;
+            boardTuningLabelX = (nutRearX + xHeadLeft) * 0.5 - 0.15 * K;
+            const stringEndX = fretX(NFRETS) + 2 * K;
+            const strSpan = Math.max(stringEndX - boardStringStartX, 1.5 * K);
+
             const lineGlowOp = 0.15 + 0.35 * vibrancy;
             for (let s = 0; s < nStr; s++) {
-                const pts = [new T.Vector3(-2 * K, sY(s), 0), new T.Vector3(fretX(NFRETS) + 2 * K, sY(s), 0)];
+                const pts = [new T.Vector3(boardStringStartX, sY(s), 0), new T.Vector3(stringEndX, sY(s), 0)];
                 const g = new T.BufferGeometry().setFromPoints(pts);
                 const line = new T.Line(g, new T.LineBasicMaterial({ color: activePalette[s], transparent: true, opacity: lineGlowOp }));
                 fretG.add(line);
@@ -3100,9 +3239,8 @@
             }
 
             // BoxGeometry strings — emissive glow driven by updateStringHighlights()
-            const strLen = fretX(NFRETS) + 4 * K;
             for (let s = 0; s < nStr; s++) {
-                const g = new T.BoxGeometry(strLen, STR_THICK, STR_THICK);
+                const g = new T.BoxGeometry(strSpan, STR_THICK, STR_THICK);
                 // Each string gets its own material instance so emissiveIntensity is per-string
                 // (and per-frame opacity is set by updateStringHighlights via _vibrancyIdleOp)
                 const mat = new T.MeshStandardMaterial({
@@ -3111,9 +3249,124 @@
                     transparent: true, opacity: _vibrancyIdleOp, roughness: 1,
                 });
                 const mesh = new T.Mesh(g, mat);
-                mesh.position.set(strLen / 2 - 2 * K, sY(s), 0);
+                mesh.position.set(boardStringStartX + strSpan * 0.5, sY(s), 0);
                 fretG.add(mesh);
                 stringLines.push(mesh);
+            }
+
+            // Guitar nut + headstock — fresh layout from reference: light maple block
+            // with a smooth convex ramp toward the nut joint; thin off-white nut;
+            // six top notches. All Z < 0 so string plane z=0 stays in front.
+            {
+                const yTopN = Math.max(sY(0), sY(nStr - 1));
+                const yBottomN = Math.min(sY(0), sY(nStr - 1));
+                const yMidN = (yTopN + yBottomN) / 2;
+                const spanY = Math.abs(yTopN - yBottomN) + S_GAP * 1.05;
+
+                const nutD = 0.95 * K;
+                const nutZc = -0.62 * K;
+                const nutH = spanY * 1.06;
+                const nutHalfH = nutH * 0.5;
+
+                const zBack = -1.38 * K;
+                const zJoint = -0.58 * K;
+
+                const mapleMat = new T.MeshStandardMaterial({
+                    color: 0xd4b48a, roughness: 0.55, metalness: 0.02,
+                });
+                const mapleDark = new T.MeshStandardMaterial({
+                    color: 0xa08058, roughness: 0.62, metalness: 0.02,
+                });
+
+                const coreLen = Math.max(nutRearX - xHeadLeft, 2 * K);
+                const coreCX = (nutRearX + xHeadLeft) * 0.5;
+                const headCoreD = 1.05 * K;
+                const headCore = new T.Mesh(
+                    new T.BoxGeometry(coreLen, spanY * 1.12, headCoreD),
+                    mapleDark,
+                );
+                headCore.position.set(coreCX, yMidN, zBack - headCoreD * 0.35);
+                fretG.add(headCore);
+
+                const xs = 14;
+                const ys = 12;
+                const yLo = yMidN - spanY * 0.58;
+                const yHi = yMidN + spanY * 0.58;
+                const posR = new Float32Array((xs + 1) * (ys + 1) * 3);
+                const idxR = [];
+                let ri = 0;
+                for (let j = 0; j <= ys; j++) {
+                    const v = j / ys;
+                    const wy = yLo + v * (yHi - yLo);
+                    const yArc = 1 - Math.abs((wy - yMidN) / (spanY * 0.55 + 1e-6));
+                    const yArcCl = Math.max(0, Math.min(1, yArc));
+                    for (let i = 0; i <= xs; i++) {
+                        const u = i / xs;
+                        const wx = xHeadLeft + u * (nutRearX - xHeadLeft);
+                        const smooth = Math.sin(u * Math.PI * 0.5);
+                        let wz = zBack + (zJoint - zBack) * smooth;
+                        wz += 0.14 * K * yArcCl * yArcCl;
+                        posR[ri++] = wx;
+                        posR[ri++] = wy;
+                        posR[ri++] = wz;
+                    }
+                }
+                const row = ys + 1;
+                for (let i = 0; i < xs; i++) {
+                    for (let j = 0; j < ys; j++) {
+                        const a = i * row + j;
+                        const b = a + row;
+                        idxR.push(a, b, a + 1, b, b + 1, a + 1);
+                    }
+                }
+                const rampGeo = new T.BufferGeometry();
+                rampGeo.setAttribute('position', new T.BufferAttribute(posR, 3));
+                rampGeo.setIndex(idxR);
+                rampGeo.computeVertexNormals();
+                fretG.add(new T.Mesh(rampGeo, mapleMat));
+
+                const boneMat = new T.MeshStandardMaterial({
+                    color: 0xf5f3f0, roughness: 0.38, metalness: 0.02,
+                });
+                const boneTop = new T.MeshStandardMaterial({
+                    color: 0xfaf8f5, roughness: 0.32, metalness: 0.02,
+                });
+                const grooveMat = new T.MeshStandardMaterial({
+                    color: 0xbcbab6, roughness: 0.85, metalness: 0,
+                });
+
+                const nutBody = new T.Mesh(
+                    new T.BoxGeometry(nutLenX, nutH, nutD),
+                    boneMat,
+                );
+                nutBody.position.set(nutXC, yMidN, nutZc);
+                fretG.add(nutBody);
+
+                const crownR = nutLenX * 0.52;
+                const crownSeg = new T.CylinderGeometry(
+                    crownR, crownR, nutLenX * 0.92, 20, 1, true,
+                    Math.PI * 0.08, Math.PI * 0.42,
+                );
+                const crown = new T.Mesh(crownSeg, boneTop);
+                crown.rotation.z = Math.PI * 0.5;
+                crown.position.set(
+                    nutXC,
+                    yMidN + nutHalfH - 0.02 * K,
+                    nutZc + nutD * 0.22,
+                );
+                fretG.add(crown);
+
+                const slotDrop = 0.11 * K;
+                const slotHalfW = STR_THICK * 1.15;
+                const slotZ = nutZc + nutD * 0.12;
+                for (let st = 0; st < nStr; st++) {
+                    const gr = new T.Mesh(
+                        new T.BoxGeometry(slotHalfW * 2, slotDrop, nutD * 0.42),
+                        grooveMat,
+                    );
+                    gr.position.set(nutXC, sY(st), slotZ);
+                    fretG.add(gr);
+                }
             }
 
             // Fret wires
@@ -3311,6 +3564,8 @@
                 const s = 5.5 * _textSizeMul * K;
                 lbl.scale.set(s, s, 1);
             }
+            _syncOpenStringPitchLabels(bundle);
+
             pNote.reset(); pSus.reset(); pSusOutline.reset(); pTechArrow.reset(); pTapChevron.reset(); pLbl.reset();
             pBeat.reset(); pSec.reset();
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
@@ -4596,6 +4851,7 @@
             _diagEntranceT = 1.0; _diagLastKey = null;
 
             if (wrap) { wrap.remove(); wrap = null; }
+            _disposeOpenStringPitchSprites();
             if (scene) {
                 // Don't dispose material.map textures here. Texture
                 // lifetime belongs to whoever allocated it; the bg
@@ -4634,7 +4890,7 @@
             _ownedClonedMats.length = 0;
             txtCache = {};
             if (ren) { ren.dispose(); ren = null; }
-            scene = cam = noteG = beatG = lblG = fretG = null;
+            scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
             ambLight = dirLight = null;
             mStr = []; mGlow = []; mSus = []; mProj = []; mProjGlow = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = null; stringLines = []; stringLineGlows = [];
             for (const m of _inlayMats) m?.dispose?.(); _inlayMats = []; _inlayLabels = [];
