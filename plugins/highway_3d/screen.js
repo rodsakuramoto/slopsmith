@@ -2962,31 +2962,36 @@
             mBeatM = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 });
             mBeatQ = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.07 });
 
-            // ── Projection meshes — one per string, own material clone each ──
-            // Ghosts sit in the string plane (Z=0). Nudging Z forward to avoid
-            // z-fight used to skew screen-space Y vs the strings under the
-            // perspective camera; polygonOffset + depthWrite:false keeps ghosts legible.
-            const _projGhostMat = (base) => {
-                const mat = base.clone();
+            // ── Board ghost: hollow wireframe matching outline mesh scale ──
+            // Same BoxGeometry as notes; EdgesGeometry + LineSegments gives an
+            // unfilled frame so the solid core+outline can nest at the hit line.
+            const _mkProjLineMat = (colorHex, baseOp) => {
+                const mat = new T.LineBasicMaterial({
+                    color: colorHex,
+                    transparent: true,
+                    opacity: baseOp,
+                    depthWrite: false,
+                });
                 mat.polygonOffset = true;
                 mat.polygonOffsetFactor = -2;
                 mat.polygonOffsetUnits = -2;
-                mat.depthWrite = false;
                 return mat;
             };
-            projMeshArr = activePalette.map((_, s) => {
-                const m = new T.Mesh(gNote, _projGhostMat(mProj[s]));
-                m.visible = false;
-                m.renderOrder = 2;
-                noteG.add(m);
-                return m;
+            projMeshArr = activePalette.map(() => {
+                const geo = new T.EdgesGeometry(gNote);
+                const ls = new T.LineSegments(geo, _mkProjLineMat(0xffffff, 0.9));
+                ls.visible = false;
+                ls.renderOrder = 2;
+                noteG.add(ls);
+                return ls;
             });
             projGlowArr = activePalette.map((_, s) => {
-                const m = new T.Mesh(gNote, _projGhostMat(mProjGlow[s]));
-                m.visible = false;
-                m.renderOrder = 3;
-                noteG.add(m);
-                return m;
+                const geo = new T.EdgesGeometry(gNote);
+                const ls = new T.LineSegments(geo, _mkProjLineMat(activePalette[s], 0.35));
+                ls.visible = false;
+                ls.renderOrder = 3;
+                noteG.add(ls);
+                return ls;
             });
 
             // ── Pools ──────────────────────────────────────────────────────
@@ -3491,11 +3496,10 @@
         // and aren't reachable from here — buildBoard re-runs from the
         // palette listener to regenerate them with the new colors.
         //
-        // projMeshArr / projGlowArr meshes hold per-mesh CLONES of
-        // mProj / mProjGlow (each string needs its own opacity,
-        // overridden per-frame in drawNote), so updating mProj/mProjGlow
-        // alone wouldn't retint the projection ghosts. Walk those
-        // cloned materials too.
+        // projMeshArr / projGlowArr are LineSegments (hollow wireframe
+        // matching the flying note's white outline scale). Each string
+        // has its own materials so opacity can be driven in drawNote();
+        // the outer glow line tracks the palette colour on pg.
         function _applyPaletteToMaterials() {
             for (let s = 0; s < activePalette.length; s++) {
                 const c = activePalette[s];
@@ -3504,16 +3508,10 @@
                 if (mSus[s]) mSus[s].color.setHex(c);
                 if (mProj[s]) { mProj[s].color.setHex(c); mProj[s].emissive.setHex(c); }
                 if (mProjGlow[s]) mProjGlow[s].emissive.setHex(c);
-                // Clones live on the projection meshes themselves.
                 const pm = projMeshArr && projMeshArr[s];
-                if (pm && pm.material) {
-                    pm.material.color.setHex(c);
-                    pm.material.emissive?.setHex?.(c);
-                }
+                if (pm && pm.material) pm.material.color.setHex(0xffffff);
                 const pg = projGlowArr && projGlowArr[s];
-                if (pg && pg.material) {
-                    pg.material.emissive?.setHex?.(c);
-                }
+                if (pg && pg.material) pg.material.color.setHex(c);
             }
             // Re-apply vibrancy: mGlow's color is a lerp between white and
             // the palette colour, so a palette swap must rebuild that
@@ -3577,13 +3575,8 @@
                 }
                 // mGlow[s].emissiveIntensity is per-frame in update();
                 // see Phase 4 comment block.
-                const pm = projMeshArr && projMeshArr[s];
-                if (pm && pm.material) pm.material.emissiveIntensity = 0.002 * g;
                 const pg = projGlowArr && projGlowArr[s];
-                if (pg && pg.material) {
-                    pg.material.emissiveIntensity = 1.5 * g;
-                    pg.material.opacity           = 0.1 * g;
-                }
+                if (pg && pg.material) pg.material.opacity = 0.1 * g;
             }
             if (mWhiteOutline) mWhiteOutline.emissiveIntensity = 0.6 * g;
             if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.0 * g;
@@ -5753,30 +5746,32 @@
                 }
             }
 
-            // ── Board projection (ghost at Z=0, always drawn for isNext) ─
+            // ── Board projection (hollow ghost at Z=0, always drawn for isNext) ─
             const PROJ_WIN = 0.6;
             const projFactor = Math.max(0, Math.min(1, 1 - dt / PROJ_WIN));
             const isBlocked = dt < 0.15 && n.sus > 0;
             if (n.f > 0 && isNext && dt > 0 && dt < PROJ_WIN && projFactor > 0.05 && !isBlocked) {
+                const approachRotGhost = Math.max(0, Math.min(1, dt / AHEAD)) * Math.PI / 2;
+                // Match drawNote outline: scale (1.1,1.1,2.8), same Z-rotation path.
+                const projRim = approachRotGhost + (isHarm ? Math.PI / 4 : 0);
+
                 const proj = projMeshArr[s];
                 // _vibrancyProjOp (0.15..0.5) is the vibrancy-scaled idle floor;
                 // scale the whole opacity by (_vibrancyProjOp / 0.15) so the slider
                 // affects the projection the same way it affects note bodies.
                 const projScale = _vibrancyProjOp / 0.15;
-                proj.material.opacity = projScale * ((skipBody ? 0.1 : 0.15) + projFactor * 0.6);
+                proj.material.opacity = projScale * ((skipBody ? 0.1 : 0.15) + projFactor * 0.65);
                 proj.position.set(x, y, 0);
-                proj.scale.set(1, 1, 1);
-                proj.rotation.z = isHarm ? Math.PI / 4 : 0;
+                proj.scale.set(1.1, 1.1, 2.8);
+                proj.rotation.z = projRim;
                 proj.visible = true;
 
                 const glow = projGlowArr[s];
-                // glowMul=0 hides the glow layer entirely; higher values restore
-                // the pulsing halo. Multiply after the animating factor so the
-                // shape of the animation curve is preserved.
-                glow.material.opacity = (0.05 + projFactor * 0.25) * (0.9 + Math.sin(now * 10) * 0.1) * glowMul;
+                // Slightly larger wireframe halo; opacity pulses like the old filled glow.
+                glow.material.opacity = (0.08 + projFactor * 0.3) * (0.9 + Math.sin(now * 10) * 0.1) * glowMul;
                 glow.position.set(x, y, 0);
-                glow.scale.set(projFactor * 1.1, projFactor * 1.1, 1);
-                glow.rotation.z = isHarm ? Math.PI / 4 : 0;
+                glow.scale.set(1.16, 1.16, 2.92);
+                glow.rotation.z = projRim;
                 glow.visible = true;
             }
         }
