@@ -3633,17 +3633,33 @@
                 })));
             }
 
-            // Fret dots
-            const dg = new T.SphereGeometry(1.5 * K, 8, 6);
-            const dm = new T.MeshBasicMaterial({ color: 0x556677 });
+            // Fret dots — translucent + depthWrite:false so spheres don't steal the
+            // depth buffer from the transparent string meshes (which would clip the
+            // strings where geometry overlaps). Slight negative Z recessed under the
+            // string plane. Radius 10% below the former 1.5*K dots.
+            const dotRZ = (1.5 * K * 0.9);
+            const dg = new T.SphereGeometry(dotRZ, 8, 6);
+            const dm = new T.MeshBasicMaterial({
+                color: 0x556677,
+                transparent: true,
+                opacity: 1,
+                depthWrite: false,
+            });
+            const dotZBack = -STR_THICK * 0.85;
             const my = (sY(0) + sY(nStr - 1)) / 2;
+            const addDot = (x, y) => {
+                const d = new T.Mesh(dg, dm);
+                d.position.set(x, y, dotZBack);
+                d.renderOrder = -120;
+                fretG.add(d);
+            };
             for (const f of DOTS) {
                 const cx = fretMid(f);
                 if (DDOTS.has(f)) {
-                    let d = new T.Mesh(dg, dm); d.position.set(cx, my - S_GAP * 0.7, 0); fretG.add(d);
-                    d = new T.Mesh(dg, dm); d.position.set(cx, my + S_GAP * 0.7, 0); fretG.add(d);
+                    addDot(cx, my - S_GAP * 0.7);
+                    addDot(cx, my + S_GAP * 0.7);
                 } else {
-                    const d = new T.Mesh(dg, dm); d.position.set(cx, my, 0); fretG.add(d);
+                    addDot(cx, my);
                 }
             }
 
