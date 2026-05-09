@@ -165,6 +165,32 @@
     // fretted notes get a single centered trail.
     const OPEN_SUS_OFFSETS = Object.freeze([-NW * 3, NW * 3]);
     const SINGLE_SUS_OFFSETS = Object.freeze([0]);
+
+    /** Longitudinal samples for slide-sustain prism (indexed BufferGeometry). */
+    const SLIDE_RIBBON_SAMPLES = 96;
+    /** Pre-built index buffer: `SLIDE_RIBBON_SAMPLES` × 8 tris × 3 verts. */
+    const SLIDE_RIBBON_INDICES = (() => {
+        const S = SLIDE_RIBBON_SAMPLES;
+        const idx = new Uint16Array(S * 24);
+        let o = 0;
+        for (let k = 0; k < S; k++) {
+            const b = k * 4;
+            const nx = (k + 1) * 4;
+            // Bottom (-Y outward)
+            idx[o++] = b; idx[o++] = b + 1; idx[o++] = nx + 1;
+            idx[o++] = b; idx[o++] = nx + 1; idx[o++] = nx;
+            // Top (+Y outward)
+            idx[o++] = b + 3; idx[o++] = nx + 3; idx[o++] = nx + 2;
+            idx[o++] = b + 3; idx[o++] = nx + 2; idx[o++] = b + 2;
+            // Left (-X outward)
+            idx[o++] = b; idx[o++] = nx; idx[o++] = nx + 3;
+            idx[o++] = b; idx[o++] = nx + 3; idx[o++] = b + 3;
+            // Right (+X outward)
+            idx[o++] = b + 1; idx[o++] = b + 2; idx[o++] = nx + 2;
+            idx[o++] = b + 1; idx[o++] = nx + 2; idx[o++] = nx + 1;
+        }
+        return idx;
+    })();
     const N_RAD = 1.5 * K;
     const SW = 2 * K, SH = 1.5 * K;
 
@@ -1596,6 +1622,7 @@
         let pFretLbl, pLane, pLaneDivider;
         let pChordBox, pChordLbl, pBarreLine;
         let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron;
+        let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
 
         // Dynamic glowing string meshes (BoxGeometry, one per string)
@@ -2701,6 +2728,21 @@
             pNote = pool(noteG, () => new T.Mesh(gNote, mStr[0]));
             pSus = pool(noteG, () => new T.Mesh(gSus, mSus[0]));
             pSusOutline = pool(noteG, () => new T.Mesh(gSus, mSusOutline));
+            const mkSlideRibbonGeo = () => {
+                const nVert = 4 * (SLIDE_RIBBON_SAMPLES + 1);
+                const g = new T.BufferGeometry();
+                g.setAttribute('position', new T.Float32BufferAttribute(new Float32Array(nVert * 3), 3));
+                // Three r170 only wraps plain Arrays in Uint16BufferAttribute; passing a
+                // TypedArray assigns it raw onto .index — WebGL expects .index.array.byteLength.
+                g.setIndex(Array.from(SLIDE_RIBBON_INDICES));
+                return g;
+            };
+            pSusRibbon = pool(noteG, () => new T.Mesh(mkSlideRibbonGeo(), mSus[0]));
+            pSusRibbonOl = pool(noteG, () => {
+                const m = new T.Mesh(mkSlideRibbonGeo(), mSusOutline);
+                m.renderOrder = -3;
+                return m;
+            });
             // One shared material per technique-mesh type. The pool factory
             // hands out fresh meshes that all reference the same material,
             // so a dense HO/PO passage doesn't churn N MeshLambertMaterial
@@ -3641,7 +3683,7 @@
             }
             _syncOpenStringPitchLabels(bundle);
 
-            pNote.reset(); pSus.reset(); pSusOutline.reset(); pTechArrow.reset(); pTapChevron.reset(); pLbl.reset();
+            pNote.reset(); pSus.reset(); pSusOutline.reset(); pSusRibbon.reset(); pSusRibbonOl.reset(); pTechArrow.reset(); pTapChevron.reset(); pLbl.reset();
             pBeat.reset(); pSec.reset();
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             if (projGlowArr) for (const m of projGlowArr) m.visible = false;
@@ -4670,6 +4712,27 @@
             }
         }
 
+        /**
+         * Indexed slide-sustain prism (~SLIDE_RIBBON_SAMPLES longitudinal
+         * slices) — smooth contour vs stacked BoxGeometry segments.
+         */
+        function slideRibbonUpdatePositions(geom, strandBaseX, tw, th, y, sliceDur, susStart, now, n, slideSt) {
+            const pa = geom.attributes.position.array;
+            const S = SLIDE_RIBBON_SAMPLES;
+            let v = 0;
+            for (let k = 0; k <= S; k++) {
+                const Tk = susStart + (k / S) * sliceDur;
+                const zk = dZ(Tk - now);
+                const xc = strandBaseX + slideOffsetWorldX(n, Tk, slideSt);
+                pa[v++] = xc - tw * 0.5; pa[v++] = y - th * 0.5; pa[v++] = zk;
+                pa[v++] = xc + tw * 0.5; pa[v++] = y - th * 0.5; pa[v++] = zk;
+                pa[v++] = xc + tw * 0.5; pa[v++] = y + th * 0.5; pa[v++] = zk;
+                pa[v++] = xc - tw * 0.5; pa[v++] = y + th * 0.5; pa[v++] = zk;
+            }
+            geom.attributes.position.needsUpdate = true;
+            geom.computeVertexNormals();
+        }
+
         /* ── Note renderer ───────────────────────────────────────────────── */
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
@@ -4839,24 +4902,27 @@
                             const zPos = dZ(susStart - now) - len / 2;
                             emitSusStrip(x, len, zPos);
                         } else {
-                            // Charter-style diagonal sustain: lateral X eased over
-                            // chart time via slideOffsetWorldX; small Z slices trace
-                            // a smooth shear along the neck.
-                            const N = Math.max(
-                                12,
-                                Math.min(48, Math.ceil(sliceDur / (1 / 60))),
-                            );
-                            for (let j = 0; j < N; j++) {
-                                const T0 = susStart + (j / N) * sliceDur;
-                                const T1 = susStart + ((j + 1) / N) * sliceDur;
-                                const z0 = dZ(T0 - now);
-                                const z1 = dZ(T1 - now);
-                                const segLen = Math.abs(z0 - z1);
-                                if (segLen < 1e-9) continue;
-                                const zC = (z0 + z1) * 0.5;
-                                const tMid = (T0 + T1) * 0.5;
-                                const xc = x + slideOffsetWorldX(n, tMid, slideSt);
-                                emitSusStrip(xc, segLen, zC);
+                            for (let si = 0; si < offsets.length; si++) {
+                                const strandX = x + offsets[si];
+                                const olMesh = pSusRibbonOl.get();
+                                olMesh.scale.set(1, 1, 1);
+                                olMesh.rotation.set(0, 0, 0);
+                                olMesh.position.set(0, 0, 0);
+                                olMesh.material = mSusOutline;
+                                slideRibbonUpdatePositions(
+                                    olMesh.geometry, strandX,
+                                    tw + 0.4 * K, th + 0.4 * K,
+                                    y, sliceDur, susStart, now, n, slideSt,
+                                );
+                                const body = pSusRibbon.get();
+                                body.scale.set(1, 1, 1);
+                                body.rotation.set(0, 0, 0);
+                                body.position.set(0, 0, 0);
+                                body.material = mSus[s];
+                                slideRibbonUpdatePositions(
+                                    body.geometry, strandX, tw, th, y,
+                                    sliceDur, susStart, now, n, slideSt,
+                                );
                             }
                         }
                     }
@@ -5182,7 +5248,7 @@
             _laneTargetColor = null;
             _renderScale = 1;
             mBeatM = mBeatQ = null;
-            pNote = pSus = pSusOutline = pLbl = pBeat = pSec = null;
+            pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
             pFretLbl = pLane = pLaneDivider = pChordBox = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = null;
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
