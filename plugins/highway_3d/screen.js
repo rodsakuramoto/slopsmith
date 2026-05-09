@@ -294,8 +294,8 @@
     const FRET_COL_MARKER_ANCHOR_FWD = 3;
 
     /**
-     * @param {number[]} cadence Ascending frets (e.g. DOTS).
      * @param {number} anchorFret Chart anchor `.fret` (world start fret).
+     * @param {number[]} [cadence] Ascending frets (e.g. DOTS).
      * @returns {number[]}
      */
     function fretColumnMarkersForAnchor(anchorFret, cadence = DOTS) {
