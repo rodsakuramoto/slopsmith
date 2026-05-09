@@ -1715,6 +1715,16 @@
         // Shared materials/geometry for the lane stripes — see initScene().
         // Hoisted so draw() can reference them when assigning per-stripe.
         let mLaneOdd = null, mLaneEven = null, gLanePlane = null;
+        // Anchor-driven lane scratch buffers. Per-frame the loop builds up
+        // to HWY_LANE_TIME_SLICES segments, but consecutive slices that share
+        // an anchor (the common case) collapse into the same entry. Held as
+        // four parallel arrays so the per-frame work allocates nothing once
+        // the buffers reach their steady-state size.
+        const _laneSegDMin = [];
+        const _laneSegDMax = [];
+        const _laneSegZ0 = [];
+        const _laneSegZ1 = [];
+        let _laneSegLen = 0;
         let pChordBox, pChordFrameFill, pChordLbl, pBarreLine;
         let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron;
         let pSusRibbon = null, pSusRibbonOl = null;
@@ -4759,7 +4769,12 @@
                     }
 
                     const sliceDt = AHEAD / HWY_LANE_TIME_SLICES;
-                    const rawSeg = [];
+                    // Single-pass build-and-merge into the parallel-array
+                    // scratch buffers. Consecutive slices that resolve to the
+                    // same anchor bounds collapse into one segment by extending
+                    // its z1; otherwise a new entry appends. No per-frame array
+                    // or {b,z0,z1} object allocations.
+                    _laneSegLen = 0;
                     for (let k = 0; k < HWY_LANE_TIME_SLICES; k++) {
                         const dt0 = k * sliceDt;
                         const dt1 = (k + 1) * sliceDt;
@@ -4768,15 +4783,16 @@
                         if (!b) continue;
                         const z0 = dZ(dt0) + TS * BEHIND;
                         const z1 = dZ(dt1) + TS * BEHIND;
-                        rawSeg.push({ b, z0, z1 });
-                    }
-                    const merged = [];
-                    for (const r of rawSeg) {
-                        const last = merged[merged.length - 1];
-                        if (last && last.b.dMin === r.b.dMin && last.b.dMax === r.b.dMax) {
-                            last.z1 = r.z1;
+                        if (_laneSegLen > 0
+                            && _laneSegDMin[_laneSegLen - 1] === b.dMin
+                            && _laneSegDMax[_laneSegLen - 1] === b.dMax) {
+                            _laneSegZ1[_laneSegLen - 1] = z1;
                         } else {
-                            merged.push({ b: r.b, z0: r.z0, z1: r.z1 });
+                            _laneSegDMin[_laneSegLen] = b.dMin;
+                            _laneSegDMax[_laneSegLen] = b.dMax;
+                            _laneSegZ0[_laneSegLen] = z0;
+                            _laneSegZ1[_laneSegLen] = z1;
+                            _laneSegLen++;
                         }
                     }
                     {
@@ -4785,11 +4801,13 @@
                         // material so set it once per frame, not per mesh.
                         mLaneOdd.opacity = laneOp;
                         mLaneEven.opacity = laneOp;
-                        for (const seg of merged) {
-                            const stripLen = Math.max(Math.abs(seg.z1 - seg.z0), 1e-6);
-                            const zc = (seg.z0 + seg.z1) * 0.5;
-                            const fLow = seg.b.dMin + 1;
-                            const fHi = seg.b.dMax;
+                        for (let s = 0; s < _laneSegLen; s++) {
+                            const segZ0 = _laneSegZ0[s];
+                            const segZ1 = _laneSegZ1[s];
+                            const stripLen = Math.max(Math.abs(segZ1 - segZ0), 1e-6);
+                            const zc = (segZ0 + segZ1) * 0.5;
+                            const fLow = _laneSegDMin[s] + 1;
+                            const fHi = _laneSegDMax[s];
                             for (let f = fLow; f <= fHi; f++) {
                                 const xl = xFret(f - 1), xr = xFret(f);
                                 const laneW = Math.abs(xr - xl);
@@ -4807,10 +4825,14 @@
                     {
                         const yPos = boardY + 0.03 * K;
                         const divOp = 0.02 + highwayIntensity * 0.1;
-                        for (const seg of merged) {
-                            const dz = Math.max(Math.abs(seg.z1 - seg.z0), 1e-6);
-                            const zMid = (seg.z0 + seg.z1) * 0.5;
-                            for (let f = Math.floor(seg.b.dMin); f <= Math.ceil(seg.b.dMax); f++) {
+                        for (let s = 0; s < _laneSegLen; s++) {
+                            const segZ0 = _laneSegZ0[s];
+                            const segZ1 = _laneSegZ1[s];
+                            const dz = Math.max(Math.abs(segZ1 - segZ0), 1e-6);
+                            const zMid = (segZ0 + segZ1) * 0.5;
+                            const dMinSeg = _laneSegDMin[s];
+                            const dMaxSeg = _laneSegDMax[s];
+                            for (let f = Math.floor(dMinSeg); f <= Math.ceil(dMaxSeg); f++) {
                                 const div = pLaneDivider.get();
                                 div.position.set(xFret(f), yPos, zMid);
                                 div.scale.set(1, 1, dz);
