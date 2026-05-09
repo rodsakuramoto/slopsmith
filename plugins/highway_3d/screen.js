@@ -1592,7 +1592,7 @@
         // (s, f, t).
         let mHitOutline = null, mMissOutline = null;
         let pSusOutline = null;
-        let projMeshArr = null, projGlowArr = null;
+        let projMeshArr = null;
         let _probe = null;
         let _laneTargetColor = null;
         let _renderScale = 1;
@@ -2888,6 +2888,31 @@
             // Rectangular note geometry
             gNote = new T.BoxGeometry(NW, NH, ND);
 
+            /** Filled ring matching flying-note outline (1.1) minus core (1.0); hollow centre. */
+            function mkGhostFrameGeometry() {
+                const ow = NW * 1.1;
+                const oh = NH * 1.1;
+                const iw = NW;
+                const ih = NH;
+                const depth = ND * 2.8;
+                const shape = new T.Shape();
+                shape.moveTo(-ow / 2, -oh / 2);
+                shape.lineTo(-ow / 2, oh / 2);
+                shape.lineTo(ow / 2, oh / 2);
+                shape.lineTo(ow / 2, -oh / 2);
+                shape.lineTo(-ow / 2, -oh / 2);
+                const hole = new T.Path();
+                hole.moveTo(-iw / 2, -ih / 2);
+                hole.lineTo(iw / 2, -ih / 2);
+                hole.lineTo(iw / 2, ih / 2);
+                hole.lineTo(-iw / 2, ih / 2);
+                hole.lineTo(-iw / 2, -ih / 2);
+                shape.holes.push(hole);
+                const g = new T.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+                g.translate(0, 0, -depth / 2);
+                return g;
+            }
+
             gSus = new T.BoxGeometry(1, 1, 1);
             gBeat = new T.BufferGeometry().setFromPoints(
                 [new T.Vector3(0, 0, 0), new T.Vector3(1, 0, 0)],
@@ -2962,36 +2987,27 @@
             mBeatM = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 });
             mBeatQ = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.07 });
 
-            // ── Board ghost: hollow wireframe matching outline mesh scale ──
-            // Same BoxGeometry as notes; EdgesGeometry + LineSegments gives an
-            // unfilled frame so the solid core+outline can nest at the hit line.
-            const _mkProjLineMat = (colorHex, baseOp) => {
-                const mat = new T.LineBasicMaterial({
-                    color: colorHex,
+            // ── Board ghost: filled rim (ExtrudeGeometry w/ hole) in string colour ──
+            // Matches outline 1.1× vs core 1.0× like drawNote; centre stays empty.
+            projMeshArr = activePalette.map((_, s) => {
+                const geo = mkGhostFrameGeometry();
+                const mat = new T.MeshStandardMaterial({
+                    color: activePalette[s],
+                    emissive: activePalette[s],
+                    emissiveIntensity: 0.002,
                     transparent: true,
-                    opacity: baseOp,
+                    opacity: 0.65,
+                    roughness: 1,
                     depthWrite: false,
+                    polygonOffset: true,
+                    polygonOffsetFactor: -2,
+                    polygonOffsetUnits: -2,
                 });
-                mat.polygonOffset = true;
-                mat.polygonOffsetFactor = -2;
-                mat.polygonOffsetUnits = -2;
-                return mat;
-            };
-            projMeshArr = activePalette.map(() => {
-                const geo = new T.EdgesGeometry(gNote);
-                const ls = new T.LineSegments(geo, _mkProjLineMat(0xffffff, 0.9));
-                ls.visible = false;
-                ls.renderOrder = 2;
-                noteG.add(ls);
-                return ls;
-            });
-            projGlowArr = activePalette.map((_, s) => {
-                const geo = new T.EdgesGeometry(gNote);
-                const ls = new T.LineSegments(geo, _mkProjLineMat(activePalette[s], 0.35));
-                ls.visible = false;
-                ls.renderOrder = 3;
-                noteG.add(ls);
-                return ls;
+                const m = new T.Mesh(geo, mat);
+                m.visible = false;
+                m.renderOrder = 2;
+                noteG.add(m);
+                return m;
             });
 
             // ── Pools ──────────────────────────────────────────────────────
@@ -3496,10 +3512,8 @@
         // and aren't reachable from here — buildBoard re-runs from the
         // palette listener to regenerate them with the new colors.
         //
-        // projMeshArr / projGlowArr are LineSegments (hollow wireframe
-        // matching the flying note's white outline scale). Each string
-        // has its own materials so opacity can be driven in drawNote();
-        // the outer glow line tracks the palette colour on pg.
+        // projMeshArr holds filled rim meshes (ExtrudeGeometry frame); centre
+        // is open. Palette + vibrancy mutate each mesh's material like mStr.
         function _applyPaletteToMaterials() {
             for (let s = 0; s < activePalette.length; s++) {
                 const c = activePalette[s];
@@ -3509,9 +3523,10 @@
                 if (mProj[s]) { mProj[s].color.setHex(c); mProj[s].emissive.setHex(c); }
                 if (mProjGlow[s]) mProjGlow[s].emissive.setHex(c);
                 const pm = projMeshArr && projMeshArr[s];
-                if (pm && pm.material) pm.material.color.setHex(0xffffff);
-                const pg = projGlowArr && projGlowArr[s];
-                if (pg && pg.material) pg.material.color.setHex(c);
+                if (pm && pm.material) {
+                    pm.material.color.setHex(c);
+                    pm.material.emissive.setHex(c);
+                }
             }
             // Re-apply vibrancy: mGlow's color is a lerp between white and
             // the palette colour, so a palette swap must rebuild that
@@ -3575,8 +3590,8 @@
                 }
                 // mGlow[s].emissiveIntensity is per-frame in update();
                 // see Phase 4 comment block.
-                const pg = projGlowArr && projGlowArr[s];
-                if (pg && pg.material) pg.material.opacity = 0.1 * g;
+                const pm = projMeshArr && projMeshArr[s];
+                if (pm && pm.material) pm.material.emissiveIntensity = 0.002 * g;
             }
             if (mWhiteOutline) mWhiteOutline.emissiveIntensity = 0.6 * g;
             if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.0 * g;
@@ -4156,7 +4171,6 @@
             pNote.reset(); pSus.reset(); pSusOutline.reset(); pSusRibbon.reset(); pSusRibbonOl.reset(); pTechArrow.reset(); pTapChevron.reset(); pLbl.reset();
             pBeat.reset(); pSec.reset();
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
-            if (projGlowArr) for (const m of projGlowArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
             pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
             pFretColMarker.reset();
@@ -5746,13 +5760,12 @@
                 }
             }
 
-            // ── Board projection (hollow ghost at Z=0, always drawn for isNext) ─
+            // ── Board ghost: filled rim at Z=0 (always drawn for isNext) ─
             const PROJ_WIN = 0.6;
             const projFactor = Math.max(0, Math.min(1, 1 - dt / PROJ_WIN));
             const isBlocked = dt < 0.15 && n.sus > 0;
             if (n.f > 0 && isNext && dt > 0 && dt < PROJ_WIN && projFactor > 0.05 && !isBlocked) {
                 const approachRotGhost = Math.max(0, Math.min(1, dt / AHEAD)) * Math.PI / 2;
-                // Match drawNote outline: scale (1.1,1.1,2.8), same Z-rotation path.
                 const projRim = approachRotGhost + (isHarm ? Math.PI / 4 : 0);
 
                 const proj = projMeshArr[s];
@@ -5760,19 +5773,12 @@
                 // scale the whole opacity by (_vibrancyProjOp / 0.15) so the slider
                 // affects the projection the same way it affects note bodies.
                 const projScale = _vibrancyProjOp / 0.15;
-                proj.material.opacity = projScale * ((skipBody ? 0.1 : 0.15) + projFactor * 0.65);
+                proj.material.opacity = projScale * ((skipBody ? 0.1 : 0.15) + projFactor * 0.65) *
+                    (0.35 + 0.65 * glowMul);
                 proj.position.set(x, y, 0);
-                proj.scale.set(1.1, 1.1, 2.8);
+                proj.scale.set(1, 1, 1);
                 proj.rotation.z = projRim;
                 proj.visible = true;
-
-                const glow = projGlowArr[s];
-                // Slightly larger wireframe halo; opacity pulses like the old filled glow.
-                glow.material.opacity = (0.08 + projFactor * 0.3) * (0.9 + Math.sin(now * 10) * 0.1) * glowMul;
-                glow.position.set(x, y, 0);
-                glow.scale.set(1.16, 1.16, 2.92);
-                glow.rotation.z = projRim;
-                glow.visible = true;
             }
         }
 
@@ -5950,7 +5956,7 @@
             mBarre?.dispose?.(); mBarre = null;
             _paletteColorTmp = null;
             lyricsCanvas = lyricsCtx = null;
-            projMeshArr = projGlowArr = null;
+            projMeshArr = null;
             _probe = null;
             _laneTargetColor = null;
             _renderScale = 1;
