@@ -2883,9 +2883,22 @@
                 g.setAttribute('normal', new T.Float32BufferAttribute(normals, 3));
                 return g;
             };
-            pSusRibbon = pool(noteG, () => new T.Mesh(mkSlideRibbonGeo(), mSus[0]));
+            // Ribbon meshes mutate vertex positions every frame in
+            // slideRibbonUpdatePositions but the mesh itself stays at (0,0,0)
+            // and the geometry's bounding sphere is never recomputed. With
+            // frustum culling on, Three.js tests the (0,0,0)-centred bounds
+            // and culls the ribbon as soon as the camera pans away from world
+            // origin, so slides flicker in/out. Disable culling on these
+            // meshes — the ribbon footprint is small and they're already
+            // gated by t0/t1 reachability before render.
+            pSusRibbon = pool(noteG, () => {
+                const m = new T.Mesh(mkSlideRibbonGeo(), mSus[0]);
+                m.frustumCulled = false;
+                return m;
+            });
             pSusRibbonOl = pool(noteG, () => {
                 const m = new T.Mesh(mkSlideRibbonGeo(), mSusOutline);
+                m.frustumCulled = false;
                 m.renderOrder = -3;
                 return m;
             });
@@ -4683,8 +4696,8 @@
                         const fHi = seg.b.dMax;
                         const laneOp = HWY_LANE_STRIPE_OP_BASE + highwayIntensity * HWY_LANE_STRIPE_OP_INT;
                         for (let f = fLow; f <= fHi; f++) {
-                            const xl = fretX(f - 1), xr = fretX(f);
-                            const laneW = xr - xl;
+                            const xl = xFret(f - 1), xr = xFret(f);
+                            const laneW = Math.abs(xr - xl);
                             const lane = pLane.get();
                             lane.position.set((xl + xr) * 0.5, boardY + 0.02 * K, zc);
                             lane.rotation.x = -Math.PI / 2;
@@ -4705,7 +4718,7 @@
                             const zMid = (seg.z0 + seg.z1) * 0.5;
                             for (let f = Math.floor(seg.b.dMin); f <= Math.ceil(seg.b.dMax); f++) {
                                 const div = pLaneDivider.get();
-                                div.position.set(fretX(f), yPos, zMid);
+                                div.position.set(xFret(f), yPos, zMid);
                                 div.scale.set(1, 1, dz);
                                 div.material.opacity = divOp;
                                 div.renderOrder = 2;
@@ -4751,8 +4764,8 @@
                     const fLow = dMin + 1;
                     const fHi = dMax;
                     for (let f = fLow; f <= fHi; f++) {
-                        const xl = fretX(f - 1), xr = fretX(f);
-                        const laneWStrip = xr - xl;
+                        const xl = xFret(f - 1), xr = xFret(f);
+                        const laneWStrip = Math.abs(xr - xl);
                         const lane = pLane.get();
                         lane.position.set((xl + xr) / 2, boardY + 0.02 * K, zLane);
                         lane.rotation.x = -Math.PI / 2;
@@ -4769,7 +4782,7 @@
                         const yPos = boardY + 0.03 * K;
                         for (let f = Math.floor(divMin); f <= Math.ceil(divMax); f++) {
                             const div = pLaneDivider.get();
-                            div.position.set(fretX(f), yPos, dZ(0) - divLen * 0.5 + TS * BEHIND);
+                            div.position.set(xFret(f), yPos, dZ(0) - divLen * 0.5 + TS * BEHIND);
                             div.scale.set(1, 1, divLen);
                             div.material.opacity = 0.02 + highwayIntensity * 0.1;
                             div.renderOrder = 2;
@@ -5182,11 +5195,17 @@
         function slideRibbonUpdatePositions(geom, strandBaseX, tw, th, y, sliceDur, susStart, now, n, slideSt) {
             const pa = geom.attributes.position.array;
             const S = SLIDE_RIBBON_SAMPLES;
+            // slideOffsetWorldX is defined at module scope so it returns a
+            // right-handed delta (built from non-lefty fretMid). strandBaseX is
+            // already lefty-mirrored via xFretMid at the call site, so the
+            // delta needs the same sign flip to keep the slide tracking the
+            // mirrored fretboard direction.
+            const dirMul = _leftyCached ? -1 : 1;
             let v = 0;
             for (let k = 0; k <= S; k++) {
                 const Tk = susStart + (k / S) * sliceDur;
                 const zk = dZ(Tk - now);
-                const xc = strandBaseX + slideOffsetWorldX(n, Tk, slideSt);
+                const xc = strandBaseX + dirMul * slideOffsetWorldX(n, Tk, slideSt);
                 pa[v++] = xc - tw * 0.5; pa[v++] = y - th * 0.5; pa[v++] = zk;
                 pa[v++] = xc + tw * 0.5; pa[v++] = y - th * 0.5; pa[v++] = zk;
                 pa[v++] = xc + tw * 0.5; pa[v++] = y + th * 0.5; pa[v++] = zk;
