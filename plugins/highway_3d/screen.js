@@ -654,8 +654,9 @@
         return _bgBandsCache;
     }
 
-    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
+    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: true, fretNumberGhostScope: 'rocksmith', cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
     const BG_STYLE_IDS = ['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video'];
+    const FRET_NUMBER_GHOST_SCOPE_IDS = ['rocksmith', 'all'];
 
     function _bgPanelKey(canvas) {
         const ss = window.slopsmithSplitscreen;
@@ -719,6 +720,8 @@
             if (val === 'classic') val = 'steady';
             return CAMERA_MODE_IDS.includes(val) ? val : BG_DEFAULTS.cameraMode;
         }
+        if (key === 'fretNumberGhostScope')
+            return FRET_NUMBER_GHOST_SCOPE_IDS.includes(val) ? val : BG_DEFAULTS.fretNumberGhostScope;
         if (key === 'nutColor' || key === 'headstockColor') {
             if (typeof val !== 'string') return BG_DEFAULTS[key];
             const t = val.trim();
@@ -779,6 +782,10 @@
     window.h3dBgSetReactive = (v) => _bgWriteGlobal('reactive', !!v);
     window.h3dBgSetPalette = (v) => _bgWriteGlobal('palette', v);
     window.h3dBgSetShowFretOnNote = (v) => _bgWriteGlobal('showFretOnNote', !!v);
+    window.h3dBgSetFretNumberGhostScope = (v) => {
+        const s = String(v);
+        _bgWriteGlobal('fretNumberGhostScope', FRET_NUMBER_GHOST_SCOPE_IDS.includes(s) ? s : BG_DEFAULTS.fretNumberGhostScope);
+    };
     window.h3dBgSetCameraSmoothing = (v) => _bgWriteGlobal('cameraSmoothing', v);
     window.h3dBgSetZoomSmoothing = (v) => _bgWriteGlobal('zoomSmoothing', v);
     window.h3dBgSetTiltSmoothing = (v) => _bgWriteGlobal('tiltSmoothing', v);
@@ -1638,10 +1645,10 @@
         // than the module-level S_COL, so a palette swap re-tints the
         // panel live without touching module-level state.
         let activePalette = PALETTES.default;
-        // Show fret number on each fretted note body (issue #12). Off
-        // by default — opt-in setting for players who like the at-a-
-        // glance fret cue.
+        // Fret digits on the board ghost (hollow preview at Z=0), not on
+        // flying note bodies — see fretNumberGhostScope for Rocksmith vs all.
         let showFretOnNote = false;
+        let fretNumberGhostScope = 'rocksmith';
         // Camera-X smoothing dial (issue #34). 0 = twitchy (track every
         // upcoming fret), 1 = calm (ignore small intra-cluster shifts).
         // Cached here and refreshed via the bg listener to avoid a
@@ -3246,6 +3253,7 @@
                     return;
                 }
                 if (changedKey === 'reactive' || changedKey === 'showFretOnNote' ||
+                    changedKey === 'fretNumberGhostScope' ||
                     changedKey === 'cameraSmoothing' || changedKey === 'zoomSmoothing' ||
                     changedKey === 'tiltSmoothing' || changedKey === 'cameraLockLow' ||
                     changedKey === 'cameraLockZoom' || changedKey === 'cameraMode' ||
@@ -3430,6 +3438,7 @@
                 _applyPaletteToMaterials();
             }
             showFretOnNote = _bgReadSetting(panelKey, 'showFretOnNote');
+            fretNumberGhostScope = _bgReadSetting(panelKey, 'fretNumberGhostScope');
             cameraSmoothing = _bgReadSetting(panelKey, 'cameraSmoothing');
             // Mirror-at-first-read: zoom + tilt sliders inherit cameraSmoothing
             // when the user has never explicitly written them. Once the user
@@ -4513,7 +4522,7 @@
                         if (ab) singleOpenX = (xFret(ab.dMin) + xFret(ab.dMax)) / 2;
                     }
                     const singleOpenLaneW = n.f === 0 ? openNoteLaneBoxW(n.t) : undefined;
-                    drawNote(n, now, singleOpenX, isNext, skipLabel, false, 0.05, singleOpenLaneW);
+                    drawNote(n, now, singleOpenX, isNext, skipLabel, false, 0.05, singleOpenLaneW, false);
                     lastFretForString[n.s] = n.f;
                     // Onset in window OR started before the window but
                     // still sustaining right now. Gate sustain carry-over
@@ -4691,6 +4700,7 @@
                             isRepeat,
                             DIAG_LINGER_S,
                             cn.f === 0 ? laneWForOpenStrings : undefined,
+                            true,
                         );
                         lastFretForString[cn.s] = cn.f;
                         // gate by THIS note's own sustain against the
@@ -5449,7 +5459,7 @@
         /* ── Note renderer ───────────────────────────────────────────────── */
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
-        function drawNote(n, now, openX, isNext, skipLabel, skipBody, linger = 0.05, openChordBoxWidth) {
+        function drawNote(n, now, openX, isNext, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false) {
             const s = n.s;
             // Belt + suspenders: callers already gate via validString(),
             // but drawNote is also entered through { ...cn } chord-note
@@ -5548,25 +5558,6 @@
                     lb.material = txtMat(0, hit ? '#fff' : '#ddd', false, 'open');
                     lb.scale.set(NW * 0.7 * _textSizeMul * openWScale, NH * 0.8 * _textSizeMul * openWScale, 1);
                     lb.position.set(x, y + vibrato, noteZ + 0.01 * K);
-                } else if (showFretOnNote && n.f > 0) {
-                    // Embedded fret number on the note body (issue #12).
-                    // The `n.f > 0` guard is redundant in the normal
-                    // path (we're already in the else of `n.f === 0`)
-                    // but matches the rest of the renderer's "fretted
-                    // means n.f > 0" convention (e.g. approachRot,
-                    // connector label) and side-steps any bogus
-                    // negative / NaN fret values from a malformed
-                    // chart. Sprite is camera-facing so it stays
-                    // readable through the note's approach-rotation.
-                    // Core sits at noteZ + 0.001 (raw world units, not
-                    // K-scaled), so place the label at noteZ + 0.005
-                    // — definitively in front of the core regardless
-                    // of how K resolves, units consistent with the
-                    // core's offset.
-                    const lb = pLbl.get();
-                    lb.material = txtMat(n.f, hit ? '#fff' : '#eee', false, 'noteFret');
-                    lb.scale.set(NW * 0.7 * _textSizeMul, NH * 0.85 * _textSizeMul, 1);
-                    lb.position.set(x, y + vibrato, noteZ + 0.005);
                 }
 
                 // ── Sustain trail ─────────────────────────────────────────
@@ -5780,6 +5771,17 @@
                 proj.scale.set(1, 1, 1);
                 proj.rotation.z = projRim;
                 proj.visible = true;
+
+                const ghostFretOk = showFretOnNote && (
+                    fretNumberGhostScope === 'all' ||
+                    (fretNumberGhostScope === 'rocksmith' && fromChord)
+                );
+                if (ghostFretOk) {
+                    const lb = pLbl.get();
+                    lb.material = txtMat(n.f, '#ffffff', false, 'noteFret');
+                    lb.scale.set(NW * 0.7 * _textSizeMul, NH * 0.85 * _textSizeMul, 1);
+                    lb.position.set(x, y, 0.012);
+                }
             }
         }
 

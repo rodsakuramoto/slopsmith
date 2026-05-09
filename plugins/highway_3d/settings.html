@@ -372,14 +372,32 @@
         Per-note display options.
     </p>
 
-    <!-- Show fret number on note body (#12) -->
-    <div class="flex items-center gap-3 mt-3">
+    <!-- Fret digits on board ghost (#12) — not on flying notes -->
+    <div class="mt-3 space-y-2">
         <label class="flex items-center gap-2 text-sm text-gray-300">
-            <input type="checkbox" id="h3d-show-fret-on-note"
-                   onchange="window.h3dBgSetShowFretOnNote && window.h3dBgSetShowFretOnNote(this.checked)"
+            <input type="checkbox" id="h3d-show-fret-on-note" checked
                    class="accent-accent">
             Show fret numbers on notes
         </label>
+        <p class="text-[10px] text-gray-500 ml-6">
+            Numbers appear on the hollow preview on the fretboard only (not on gems coming down the highway).
+        </p>
+        <div id="h3d-fret-ghost-scope-wrap" class="ml-6 mt-2 space-y-2 border-l border-gray-700 pl-3">
+            <p class="text-xs font-medium text-gray-400">Where to show</p>
+            <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                <input type="radio" name="h3d-fret-ghost-scope" id="h3d-fret-ghost-scope-rocksmith" value="rocksmith"
+                       class="accent-accent">
+                In chords &amp; arpeggios (Rocksmith style)
+            </label>
+            <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                <input type="radio" name="h3d-fret-ghost-scope" id="h3d-fret-ghost-scope-all" value="all"
+                       class="accent-accent">
+                All notes
+            </label>
+            <p class="text-[10px] text-gray-500">
+                Rocksmith style uses chord-hand events only. Single-note lines (including arpeggios charted as separate notes) need <em>All notes</em>.
+            </p>
+        </div>
     </div>
 </div>
 
@@ -527,7 +545,7 @@
          no-selection / NaN state. -->
     <script>
         (function () {
-            const DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
+            const DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: true, fretNumberGhostScope: 'rocksmith', cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
             const VALID_STYLES = new Set(['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video']);
             const VALID_PALETTES = new Set(['default', 'neon', 'pastel']);
             const VALID_CAMERA_MODES = new Set(['steady', 'lookahead']);
@@ -536,6 +554,7 @@
             // chord diagram (the renderer enforces the same id list via
             // CHORD_DIAG_POSITION_IDS), so reuse the validator here.
             const VALID_SECTION_HUD_POSITIONS = VALID_CHORD_DIAG_POSITIONS;
+            const VALID_FRET_GHOST_SCOPES = new Set(['rocksmith', 'all']);
             // Custom images are persisted as base64 data URLs in
             // localStorage. base64 expands the byte count by ~4/3, and
             // localStorage values are stored as UTF-16 (two bytes per
@@ -613,6 +632,10 @@
                 if (v === 'false' || v === '0') return false;
                 return fallback;
             }
+            function coerceFretGhostScope(v, fallback) {
+                if (v === null || v === undefined) return fallback;
+                return VALID_FRET_GHOST_SCOPES.has(String(v)) ? String(v) : fallback;
+            }
             function coerceCadence(v) {
                 const n = parseInt(v, 10);
                 if (!Number.isFinite(n)) return DEFAULTS.fretColumnMarkerCadence;
@@ -625,7 +648,7 @@
                 return fallback;
             }
 
-            let storedStyle = null, storedI = null, storedR = null, storedPalette = null, storedFretOnNote = null;
+            let storedStyle = null, storedI = null, storedR = null, storedPalette = null, storedFretOnNote = null, storedFretNumberGhostScope = null;
             let storedCameraSmoothing = null;
             let storedCameraMode = null;
             let storedCustomImageDataUrl = null, storedCustomImageName = null;
@@ -655,6 +678,7 @@
                 storedR = localStorage.getItem('h3d_bg_reactive');
                 storedPalette = localStorage.getItem('h3d_bg_palette');
                 storedFretOnNote = localStorage.getItem('h3d_bg_showFretOnNote');
+                storedFretNumberGhostScope = localStorage.getItem('h3d_bg_fretNumberGhostScope');
                 storedCameraSmoothing = localStorage.getItem('h3d_bg_cameraSmoothing');
                 storedCameraMode = localStorage.getItem('h3d_bg_cameraMode');
                 storedZoomSmoothing = localStorage.getItem('h3d_bg_zoomSmoothing');
@@ -686,6 +710,7 @@
             const reactive = coerceBool(storedR, DEFAULTS.reactive);
             const palette = coercePalette(storedPalette);
             const showFretOnNote = coerceBool(storedFretOnNote, DEFAULTS.showFretOnNote);
+            const fretNumberGhostScope = coerceFretGhostScope(storedFretNumberGhostScope, DEFAULTS.fretNumberGhostScope);
             const cameraSmoothing = coerceUnitInterval(storedCameraSmoothing, DEFAULTS.cameraSmoothing);
             // zoom + tilt smoothing mirror cameraSmoothing on first read so
             // existing users carry their calmness over to the new axes.
@@ -786,6 +811,30 @@
             if (pal) pal.value = palette;
             if (rea) rea.checked = reactive;
             if (fon) fon.checked = showFretOnNote;
+            const fgsRock = document.getElementById('h3d-fret-ghost-scope-rocksmith');
+            const fgsAll = document.getElementById('h3d-fret-ghost-scope-all');
+            const fgsWrap = document.getElementById('h3d-fret-ghost-scope-wrap');
+            if (fretNumberGhostScope === 'all') { if (fgsAll) fgsAll.checked = true; }
+            else { if (fgsRock) fgsRock.checked = true; }
+            if (fgsWrap) fgsWrap.classList.toggle('hidden', !showFretOnNote);
+
+            function syncH3dFretGhostScopeUi() {
+                const c = document.getElementById('h3d-show-fret-on-note');
+                const w = document.getElementById('h3d-fret-ghost-scope-wrap');
+                if (w && c) w.classList.toggle('hidden', !c.checked);
+            }
+            if (fon) {
+                fon.addEventListener('change', function () {
+                    if (window.h3dBgSetShowFretOnNote) window.h3dBgSetShowFretOnNote(this.checked);
+                    syncH3dFretGhostScopeUi();
+                });
+            }
+            document.querySelectorAll('input[name="h3d-fret-ghost-scope"]').forEach(function (r) {
+                r.addEventListener('change', function () {
+                    if (this.checked && window.h3dBgSetFretNumberGhostScope)
+                        window.h3dBgSetFretNumberGhostScope(this.value);
+                });
+            });
             if (csli) csli.value = String(cameraSmoothing);
             if (clbl) clbl.textContent = cameraSmoothing.toFixed(2);
             if (zsli) zsli.value = String(zoomSmoothing);
