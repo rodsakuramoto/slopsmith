@@ -4451,8 +4451,12 @@
                         const gap = ch.t - prevAnyChordTime;
                         firstInShapeRun = (runSig !== runSigPrev) || gap > SHAPE_RUN_GAP_S;
                         runSigPrev = runSig;
+                        // Only valid chords update the run-gap clock — an entry
+                        // whose runSig is null (no notes / unusable chordId)
+                        // shouldn't make the next real chord look like a tiny
+                        // gap and silently fall into a "still in the run" state.
+                        prevAnyChordTime = ch.t;
                     }
-                    prevAnyChordTime = ch.t;
                     if (!ch.notes) continue;
                     // Filter chord notes to in-range strings once. All
                     // chord-level aggregations (maxSus, repeat-chord
