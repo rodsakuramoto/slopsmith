@@ -1778,7 +1778,21 @@
         }
 
         // Camera state
-        let tgtX = fretMid(CAM_LOCK_CENTER_FRET), curX = fretMid(CAM_LOCK_CENTER_FRET);
+        let _leftyCached = false;
+        const xFret = f => (_leftyCached ? -fretX(f) : fretX(f));
+        const xFretMid = f => (_leftyCached ? -fretMid(f) : fretMid(f));
+        const boardSpanX = () => {
+            const x0 = xFret(0);
+            const xN = xFret(NFRETS);
+            return {
+                min: Math.min(x0, xN),
+                max: Math.max(x0, xN),
+                center: (x0 + xN) / 2,
+                width: Math.abs(xN - x0),
+            };
+        };
+
+        let tgtX = xFretMid(CAM_LOCK_CENTER_FRET), curX = xFretMid(CAM_LOCK_CENTER_FRET);
         let tgtDist = CAM_DIST_BASE, curDist = CAM_DIST_BASE;
         // Last committed lowFretBonus contribution baked into tgtDist
         // (see candidateDist block — bonus is applied on top of the
@@ -1829,6 +1843,7 @@
         let _destroyed = false;
         let _invertedCached = false;
         let _invertedForBoard = false;
+        let _leftyForBoard = false;
         let _initToken = 0;
         let highwayCanvas = null;
 
@@ -3450,7 +3465,8 @@
             stringLines = [];
             stringLineGlows = [];
 
-            const bw = fretX(NFRETS) + 4 * K;
+            const board = boardSpanX();
+            const bw = board.width + 4 * K;
             const bl = TS * (AHEAD + BEHIND);
 
             // Fretboard plane
@@ -3458,7 +3474,7 @@
             const pm = new T.MeshLambertMaterial({ color: 0x08080e, transparent: true, opacity: 0.6 });
             const p = new T.Mesh(pg, pm);
             p.rotation.x = -Math.PI / 2;
-            p.position.set(bw / 2 - 2 * K, S_BASE - NH / 2 - 2 * K, -bl / 2 + TS * BEHIND);
+            p.position.set(board.center, S_BASE - NH / 2 - 2 * K, -bl / 2 + TS * BEHIND);
             fretG.add(p);
 
             // Thin Line strings (glow layer). Retained in stringLineGlows[]
@@ -3620,7 +3636,7 @@
             const yTop = Math.max(sY(0), sY(nStr - 1));
             const yBottom = Math.min(sY(0), sY(nStr - 1));
             for (let f = 0; f <= NFRETS; f++) {
-                const x = fretX(f);
+                const x = xFret(f);
                 const isMain = DOTS.includes(f);
                 const g = new T.BufferGeometry().setFromPoints([
                     new T.Vector3(x, yBottom - S_GAP * 0.3, 0),
@@ -3654,7 +3670,7 @@
                 fretG.add(d);
             };
             for (const f of DOTS) {
-                const cx = fretMid(f);
+                const cx = xFretMid(f);
                 if (DDOTS.has(f)) {
                     addDot(cx, my - S_GAP * 0.7);
                     addDot(cx, my + S_GAP * 0.7);
@@ -3682,7 +3698,7 @@
                 const lbl = new T.Sprite(mat);
                 const scale = 5.5 * (0.5 + textSize);
                 lbl.scale.set(scale * K, scale * K, 1);
-                lbl.position.set(fretMid(f), yTop - S_GAP * 0.4, -K);
+                lbl.position.set(xFretMid(f), yTop - S_GAP * 0.4, -K);
                 lbl.visible = inlayLabelsVisible;
                 fretG.add(lbl);
                 _inlayLabels.push(lbl);
@@ -3813,7 +3829,7 @@
                 // users see the same locked view as before this slider.
                 const lockZoomMul  = CAM_LOCK_ZOOM_MIN +
                     (CAM_LOCK_ZOOM_MAX - CAM_LOCK_ZOOM_MIN) * cameraLockZoom;
-                tgtX             = fretMid(CAM_LOCK_CENTER_FRET);
+                tgtX             = xFretMid(CAM_LOCK_CENTER_FRET);
                 tgtDist          = (lockedBaseU + lockedBonusU) * K * lockZoomMul;
                 prevLowFretBonus = lockedBonusU;
             } else if (distGot) {
@@ -4102,7 +4118,7 @@
                     _songKey = key;
                     _camSnapped = false;
                     _camPreScanned = false;
-                    tgtX = curX = fretMid(CAM_LOCK_CENTER_FRET);
+                    tgtX = curX = xFretMid(CAM_LOCK_CENTER_FRET);
                     tgtDist = curDist = CAM_DIST_BASE;
                     prevLowFretBonus = 0;
                     prevLockActive = false;
@@ -4179,7 +4195,7 @@
                             const nSusNow = n.f > 0 && n.t < camT0 && n.t + (n.sus || 0) >= now;
                             if (nInWin || nSusNow) {
                                 const w = Math.exp(-Math.abs(n.t - now) / camTau);
-                                preWX += fretMid(n.f) * w; preWSum += w;
+                                preWX += xFretMid(n.f) * w; preWSum += w;
                                 if (n.f < preDistMin) preDistMin = n.f;
                                 if (n.f > preDistMax) preDistMax = n.f;
                                 preDistGot = true;
@@ -4203,7 +4219,7 @@
                             for (const cn of chNotes) {
                                 const cnOk = chOnsetInWin || (chSusNow && ch.t + (cn.sus || 0) >= now);
                                 if (cn.f > 0 && cnOk) {
-                                    preWX += fretMid(cn.f) * chW; preWSum += chW;
+                                    preWX += xFretMid(cn.f) * chW; preWSum += chW;
                                     if (cn.f < preDistMin) preDistMin = cn.f;
                                     if (cn.f > preDistMax) preDistMax = cn.f;
                                     preDistGot = true;
@@ -4270,7 +4286,7 @@
                         // (consistent with "average a wider window").
                         // Weight is still 1 at onset.
                         const w = Math.exp(-Math.abs(n.t - now) / camTau);
-                        camWX   += fretMid(n.f) * w;
+                        camWX   += xFretMid(n.f) * w;
                         camWSum += w;
                         if (n.f < camDistMin) camDistMin = n.f;
                         if (n.f > camDistMax) camDistMax = n.f;
@@ -4334,12 +4350,12 @@
                     // Open-string X: chart <anchor> lane centre when present (not curX /
                     // fretted centroid), matching highway span.
                     let chordCX = curX;
-                    if (chAncB) chordCX = (fretX(chAncB.dMin) + fretX(chAncB.dMax)) / 2;
+                    if (chAncB) chordCX = (xFret(chAncB.dMin) + xFret(chAncB.dMax)) / 2;
                     else {
                         let cxL = Infinity, cxR = -Infinity, fretted = 0;
                         for (const cn of chordNotes) {
                             if (cn.f > 0) {
-                                const fx = fretMid(cn.f);
+                                const fx = xFretMid(cn.f);
                                 if (fx < cxL) cxL = fx;
                                 if (fx > cxR) cxR = fx;
                                 fretted++;
@@ -4415,7 +4431,7 @@
                         if (!LOOKAHEAD_PREVIEW_CAMERA) {
                         const cnSustainOk = chOnsetInWin || (chSusActive && ch.t + (cn.sus || 0) >= now);
                         if (cn.f > 0 && cnSustainOk) {
-                            camWX += fretMid(cn.f) * chW;
+                            camWX += xFretMid(cn.f) * chW;
                             camWSum += chW;
                             if (cn.f < camDistMin) camDistMin = cn.f;
                             if (cn.f > camDistMax) camDistMax = cn.f;
@@ -4555,7 +4571,7 @@
                                     }
 
                                     if (is3dBarre && chDt <= 0) {
-                                        const bx = fretMid(bFret);
+                                        const bx = xFretMid(bFret);
                                         const yTop = Math.max(sY(barreMinStr3d), sY(barreMaxStr3d));
                                         const yBot = Math.min(sY(barreMinStr3d), sY(barreMaxStr3d));
                                         const lineH = yTop - yBot;
@@ -4744,7 +4760,7 @@
                         ? (f >= anchorGold.f0 && f <= anchorGold.f1)
                         : activeFrets.has(f);
                     lb.material    = txtMat(f, isGold ? '#ffe84d' : '#9ab8cc', false, 'fretRow');
-                    lb.position.set(fretMid(f), yBottom - S_GAP * 1.4, 0.5 * K);
+                    lb.position.set(xFretMid(f), yBottom - S_GAP * 1.4, 0.5 * K);
                     const intensity = noteState.fretHeat[f];
                     lb.material.opacity = 0.35 + intensity * 0.65;
                     const scale = (3.5 + intensity * 2.2) * _textSizeMul;
@@ -4755,7 +4771,8 @@
 
             // ── Beat lines ────────────────────────────────────────────────
             if (beats) {
-                const bw2 = fretX(NFRETS) + 4 * K;
+                const board = boardSpanX();
+                const bw2 = board.width + 4 * K;
                 let lastM = -1;
                 for (const b of beats) {
                     const meas = b.measure !== lastM; lastM = b.measure;
@@ -4763,7 +4780,7 @@
                     const bl2 = pBeat.get();
                     bl2.material = meas ? mBeatM : mBeatQ;
                     bl2.scale.set(bw2, 1, 1);
-                    bl2.position.set(-2 * K, S_BASE - NH / 2 - 1.5 * K, dZ(b.time - now));
+                    bl2.position.set(board.min - 2 * K, S_BASE - NH / 2 - 1.5 * K, dZ(b.time - now));
                 }
             }
 
@@ -4779,7 +4796,7 @@
                     const sp = pSec.get();
                     sp.material = txtMat(s.name, '#00cccc', true, 'section');
                     sp.scale.set(20 * K * _textSizeMul, 5 * K * _textSizeMul, 1);
-                    sp.position.set(fretX(12), labelY, dZ(s.time - now));
+                    sp.position.set(xFret(12), labelY, dZ(s.time - now));
                 }
             }
 
@@ -4893,7 +4910,7 @@
                             sp.material.needsUpdate = true;
                         }
                         sp.material.opacity = 0.85;
-                        sp.position.set(fretMid(f), labelY, z);
+                        sp.position.set(xFretMid(f), labelY, z);
                         const sz = NH * 2.2 * _textSizeMul;
                         sp.scale.set(sz, sz, 1);
                     }
@@ -5154,7 +5171,7 @@
             const hitFade = sustained ? 0.7 : (hitDist < 0.15 ? 1 - hitDist / 0.15 : 0);
             const vibrato = sustained ? Math.sin(now * 30) * 0.3 * K : 0;
             const noteZ = sustained ? 0 : Math.min(0, dZ(dt));
-            const x = n.f === 0 ? (openX !== undefined ? openX : curX) : fretMid(n.f);
+            const x = n.f === 0 ? (openX !== undefined ? openX : curX) : xFretMid(n.f);
             const isHarm = n.hm || n.hp;
 
             // Open chord notes: wide default mesh is capped to chord frame width.
@@ -5508,7 +5525,8 @@
             curDist += (tgtDist - curDist) * lerp;
             const dist = curDist * aspectScale;
             const h = CAM_H_BASE * (dist / CAM_DIST_BASE);
-            cam.position.set(curX + 20 * K, h * 0.95, dist * 0.75);
+            const shoulderOffset = (_leftyCached ? -1 : 1) * 20 * K;
+            cam.position.set(curX + shoulderOffset, h * 0.95, dist * 0.75);
 
             // Self-correcting look-at Y: project the fretboard's near-edge centre
             // to NDC space. If it drifts toward the frame edge, nudge tgtLookY
@@ -5649,8 +5667,8 @@
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
             gNote = gSus = gBeat = gTechArrow = gTapChevron = null;
-            tgtX = curX = fretMid(CAM_LOCK_CENTER_FRET); tgtDist = curDist = CAM_DIST_BASE; tgtLookY = curLookY = 0; nStr = NSTR; _oobStringWarned = false;
-            _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
+            tgtX = curX = xFretMid(CAM_LOCK_CENTER_FRET); tgtDist = curDist = CAM_DIST_BASE; tgtLookY = curLookY = 0; nStr = NSTR; _oobStringWarned = false;
+            _lookaheadCamX = xFretMid(CAM_LOCK_CENTER_FRET);
             _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
             _lookaheadCamPrevNow = null;
             _lookaheadLowBonusU = 0;
@@ -5694,6 +5712,7 @@
                 const myToken = ++_initToken;
                 highwayCanvas = canvas;
                 _invertedCached = !!(bundle && bundle.inverted);
+                _leftyCached = !!(bundle && bundle.lefty);
                 _renderScale = (bundle && bundle.renderScale) || 1;
 
                 if (_ssActive()) {
@@ -5722,6 +5741,7 @@
                     try {
                         nStr = resolveStringCount(bundle);
                         _invertedForBoard = _invertedCached;
+                        _leftyForBoard = _leftyCached;
                         if (!initScene()) { _unsubscribeFocus(); _rejectReady(new Error('initScene failed')); return; }
                         const sz = canvasSize(highwayCanvas);
                         // Mark ready before RAF so any resize(w,h) calls that arrive
@@ -5762,13 +5782,20 @@
             draw(bundle) {
                 if (!_isReady) return;
                 _invertedCached = !!bundle.inverted;
+                _leftyCached = !!bundle.lefty;
                 const newNStr = resolveStringCount(bundle);
                 const newScale = bundle.renderScale || 1;
-                if (_invertedCached !== _invertedForBoard || newNStr !== nStr) {
+                const leftyChanged = _leftyCached !== _leftyForBoard;
+                if (_invertedCached !== _invertedForBoard || leftyChanged || newNStr !== nStr) {
                     if (newNStr !== nStr) _oobStringWarned = false;
+                    if (leftyChanged) {
+                        curX = -curX;
+                        tgtX = -tgtX;
+                    }
                     nStr = newNStr;
                     buildBoard();
                     _invertedForBoard = _invertedCached;
+                    _leftyForBoard = _leftyCached;
                 }
                 if (newScale !== _renderScale) {
                     _renderScale = newScale;
