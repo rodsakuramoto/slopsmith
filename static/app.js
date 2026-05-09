@@ -4740,11 +4740,85 @@ async function loadPlugins() {
 
         const settingsContainer = document.getElementById('plugin-settings');
 
-        // One-shot hydration guard: always clear plugin-owned containers first.
+        // Plugins whose screen.js has already been evaluated this session
+        // at the current version AND whose DOM is still in the document.
+        // Their listeners were bound to the existing settings / screen DOM,
+        // so we must preserve that DOM — the script load guard below skips
+        // re-evaluating screen.js, and a fresh empty DOM with no listeners
+        // would leave the plugin half-hydrated on subsequent loadPlugins()
+        // calls (e.g. _scheduleStartupRehydration).
+        //
+        // The DOM-existence check is the safety net for plugins that
+        // disappeared and reappeared between calls (uninstall + reinstall,
+        // or a backend snapshot churn that drops a plugin then restores
+        // it). In that case the loadedScripts key would still be set, but
+        // any listeners are bound to elements that have since been removed
+        // — drop the stale key so screen.js re-runs against the fresh DOM
+        // we're about to inject.
+        // Map<pluginId, version> — one entry per plugin. Storing only the
+        // currently-loaded version (rather than a Set of all (id, version)
+        // pairs ever loaded) means upgrade → downgrade → upgrade cycles
+        // within one session don't leave stale keys that could mistakenly
+        // mark an old version as already-hydrated. Coerce a legacy Set, if
+        // present, to an empty Map — the previous shape never shipped.
+        let loadedScripts = window.slopsmith._loadedPluginScripts;
+        if (!(loadedScripts instanceof Map)) {
+            loadedScripts = new Map();
+            window.slopsmith._loadedPluginScripts = loadedScripts;
+        }
+        const _removePluginScriptTags = (pluginId) => {
+            // Filter via dataset rather than a CSS attribute selector —
+            // CSS.escape is not universally available, and plugin IDs
+            // aren't constrained server-side.
+            document.querySelectorAll('script[data-plugin-id]').forEach((s) => {
+                if (s.dataset.pluginId === pluginId) s.remove();
+            });
+        };
+        const existingSettingsByPluginId = new Map();
+        if (settingsContainer) {
+            for (const child of settingsContainer.children) {
+                const pid = child.dataset ? child.dataset.pluginId : null;
+                if (pid) existingSettingsByPluginId.set(pid, child);
+            }
+        }
+        const alreadyHydrated = new Set();
+        for (const p of plugins) {
+            if (!p.has_script) continue;
+            // Version must match exactly — an upgrade / downgrade has to
+            // re-run the new script against fresh DOM.
+            if (loadedScripts.get(p.id) !== (p.version || '')) continue;
+            const screenOk = !p.has_screen || !!document.getElementById(`plugin-${p.id}`);
+            const settingsOk = !p.has_settings || existingSettingsByPluginId.has(p.id);
+            if (screenOk && settingsOk) {
+                alreadyHydrated.add(p.id);
+            } else {
+                // DOM was wiped externally (uninstall + reinstall, snapshot
+                // churn) — drop the entry and remove the orphaned <script>
+                // so screen.js re-runs against fresh DOM below.
+                loadedScripts.delete(p.id);
+                _removePluginScriptTags(p.id);
+            }
+        }
+
+        // Clear plugin-owned containers, but keep already-hydrated plugins'
+        // settings / screen DOM. Nav links carry no per-plugin script state,
+        // so always rebuild them.
         navContainer.innerHTML = '';
         mobileNavContainer.innerHTML = '<span class="text-xs text-gray-600 uppercase tracking-wider">Plugins</span>';
-        if (settingsContainer) settingsContainer.innerHTML = '';
-        document.querySelectorAll('.screen[id^="plugin-"]').forEach((el) => el.remove());
+        if (settingsContainer) {
+            [...settingsContainer.children].forEach((el) => {
+                const pid = el.dataset ? el.dataset.pluginId : null;
+                if (!pid || !alreadyHydrated.has(pid)) el.remove();
+            });
+        }
+        document.querySelectorAll('.screen[id^="plugin-"]').forEach((el) => {
+            // dataset.pluginId is the source of truth (set on injection);
+            // the id-prefix fallback covers screens injected before this
+            // change shipped — both forms strip a single leading "plugin-".
+            const pid = (el.dataset && el.dataset.pluginId)
+                || el.id.replace(/^plugin-/, '');
+            if (!alreadyHydrated.has(pid)) el.remove();
+        });
 
         // Plugin settings area hosts both "Plugin Updates" and per-plugin
         // collapsibles. Reveal it whenever any plugins are installed —
@@ -4796,11 +4870,17 @@ async function loadPlugins() {
             try {
             const screenId = `plugin-${plugin.id}`;
 
-            // Inject screen container
-            if (plugin.has_screen) {
+            // Inject screen container. Skip for already-hydrated plugins —
+            // their existing screen DOM still has the listeners that
+            // screen.js bound on first load (rebuilding here would orphan
+            // them, since the script load guard further down won't re-run
+            // screen.js to re-bind).
+            if (plugin.has_screen && !alreadyHydrated.has(plugin.id)) {
                 const screenDiv = document.createElement('div');
                 screenDiv.id = screenId;
                 screenDiv.className = 'screen';
+                screenDiv.dataset.pluginId = plugin.id;
+                screenDiv.dataset.pluginVersion = plugin.version || '';
                 // Insert before the player screen
                 const player = document.getElementById('player');
                 player.parentNode.insertBefore(screenDiv, player);
@@ -4812,9 +4892,14 @@ async function loadPlugins() {
             // Inject settings section — wrapped in a collapsible <details>
             // per plugin so the page stays scannable as plugins accumulate.
             // Collapsed by default; <details>/<summary> handles state natively.
-            if (plugin.has_settings && settingsContainer) {
+            // Skip for already-hydrated plugins — preserved details element
+            // still carries listeners wired by its inline settings script
+            // and by screen.js on first load.
+            if (plugin.has_settings && settingsContainer && !alreadyHydrated.has(plugin.id)) {
                 const details = document.createElement('details');
                 details.className = 'bg-dark-700/40 border border-gray-800 rounded-xl overflow-hidden group';
+                details.dataset.pluginId = plugin.id;
+                details.dataset.pluginVersion = plugin.version || '';
 
                 const summary = document.createElement('summary');
                 // .plugin-settings-summary class hides the browser's native
@@ -4930,13 +5015,27 @@ async function loadPlugins() {
 
             // Load plugin JS
             if (plugin.has_script) {
-                await new Promise((resolve, reject) => {
-                    const script = document.createElement('script');
-                    script.src = `/api/plugins/${plugin.id}/screen.js`;
-                    script.onload = resolve;
-                    script.onerror = reject;
-                    document.body.appendChild(script);
-                });
+                const wantedVersion = plugin.version || '';
+                if (loadedScripts.get(plugin.id) !== wantedVersion) {
+                    // A different version (or none) was loaded previously —
+                    // remove the prior <script> tag for this plugin id so we
+                    // don't accumulate stale versions on upgrade/downgrade.
+                    _removePluginScriptTags(plugin.id);
+                    await new Promise((resolve, reject) => {
+                        const script = document.createElement('script');
+                        // Include version in URL so a plugin upgrade within the
+                        // same browser session fetches the new screen.js instead
+                        // of a cached copy keyed only by path (matches the art
+                        // URL ?v=mtime convention elsewhere in this file).
+                        const v = encodeURIComponent(wantedVersion);
+                        script.src = `/api/plugins/${plugin.id}/screen.js${v ? `?v=${v}` : ''}`;
+                        script.dataset.pluginId = plugin.id;
+                        script.dataset.pluginVersion = wantedVersion;
+                        script.onload = () => { loadedScripts.set(plugin.id, wantedVersion); resolve(); };
+                        script.onerror = (err) => { loadedScripts.delete(plugin.id); reject(err); };
+                        document.body.appendChild(script);
+                    });
+                }
             }
             } catch (e) {
                 console.warn(`Plugin '${plugin.id}' failed to load, skipping:`, e);
