@@ -249,6 +249,19 @@
         return lo;
     }
 
+    // Last arrangement <anchor> at or before chart time `t` (sorted by .time).
+    // Mirrors static/highway.js getAnchorAt — until t reaches the first anchor’s
+    // time, the first anchor still defines fret/width.
+    function getChartAnchorAt(anchorArr, t) {
+        if (!anchorArr || !anchorArr.length) return null;
+        let a = anchorArr[0];
+        for (const anc of anchorArr) {
+            if (anc.time > t) break;
+            a = anc;
+        }
+        return a;
+    }
+
     const FRET_COOLDOWN = 0.5; // seconds a lane fret stays active after last note
 
     const DIAG_LINGER_S    = 0.55;
@@ -3597,6 +3610,7 @@
             const chords = bundle.chords;
             const beats = bundle.beats;
             const sections = bundle.sections;
+            const anchors = bundle.anchors;
 
             // ── Frame state ───────────────────────────────────────────────
             const noteState = {
@@ -4090,31 +4104,47 @@
 
             // ── Dynamic highway lane ──────────────────────────────────────
             if (activeFrets.size > 0) {
-                let minF = 99, maxF = 0;
-                activeFrets.forEach(f => { if (f > 0) { minF = Math.min(minF, f); maxF = Math.max(maxF, f); } });
-                let dMin = minF - 1, dMax = maxF;
-                // Highway lane always spans exactly 4 fret-index steps (dMax − dMin):
-                // grow small clusters outward, shrink wide ones with a centred window.
-                const HWY_LANE_SPAN = 4;
-                let span = dMax - dMin;
-                if (span > HWY_LANE_SPAN) {
-                    dMin = Math.round((dMin + dMax - HWY_LANE_SPAN) / 2);
-                    dMax = dMin + HWY_LANE_SPAN;
-                    if (dMax > NFRETS) {
-                        dMax = NFRETS;
-                        dMin = dMax - HWY_LANE_SPAN;
-                    }
-                    if (dMin < 0) {
-                        dMin = 0;
-                        dMax = HWY_LANE_SPAN;
-                    }
-                } else if (span < HWY_LANE_SPAN) {
-                    const need = HWY_LANE_SPAN - span;
-                    dMax = Math.min(NFRETS, dMax + need);
-                    if (dMax - dMin < HWY_LANE_SPAN) {
-                        dMin = Math.max(0, dMin - (HWY_LANE_SPAN - (dMax - dMin)));
+                let dMin, dMax;
+                const chartAnc = anchors && anchors.length ? getChartAnchorAt(anchors, now) : null;
+                if (chartAnc) {
+                    // Rocksmith XML: width is how many frets are visible starting at
+                    // `fret` (e.g. fret=2 width=4 → frets 2,3,4,5 — not thru 6).
+                    let fStart = Math.round(Number(chartAnc.fret));
+                    if (!Number.isFinite(fStart) || fStart < 0) fStart = 1;
+                    let w = Number(chartAnc.width);
+                    if (!Number.isFinite(w)) w = 4;
+                    w = Math.max(1, Math.round(w));
+                    const fLast = Math.min(NFRETS, fStart + w - 1);
+                    dMin = Math.max(0, fStart - 1);
+                    dMax = Math.min(NFRETS, fLast);
+                } else {
+                    let minF = 99, maxF = 0;
+                    activeFrets.forEach(f => { if (f > 0) { minF = Math.min(minF, f); maxF = Math.max(maxF, f); } });
+                    dMin = minF - 1;
+                    dMax = maxF;
+                    // No XML anchors: fixed 4-step window from active frets.
+                    const HWY_LANE_SPAN = 4;
+                    let span = dMax - dMin;
+                    if (span > HWY_LANE_SPAN) {
+                        dMin = Math.round((dMin + dMax - HWY_LANE_SPAN) / 2);
+                        dMax = dMin + HWY_LANE_SPAN;
+                        if (dMax > NFRETS) {
+                            dMax = NFRETS;
+                            dMin = dMax - HWY_LANE_SPAN;
+                        }
+                        if (dMin < 0) {
+                            dMin = 0;
+                            dMax = HWY_LANE_SPAN;
+                        }
+                    } else if (span < HWY_LANE_SPAN) {
+                        const need = HWY_LANE_SPAN - span;
+                        dMax = Math.min(NFRETS, dMax + need);
+                        if (dMax - dMin < HWY_LANE_SPAN) {
+                            dMin = Math.max(0, dMin - (HWY_LANE_SPAN - (dMax - dMin)));
+                        }
                     }
                 }
+                if (dMax < dMin) dMax = dMin;
                 hwyLaneFretClipMin = dMin;
                 hwyLaneFretClipMax = dMax;
                 const xL = fretX(dMin), xR = fretX(dMax);
