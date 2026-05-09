@@ -162,6 +162,8 @@
     const HWY_LANE_STRIPE_OP_BASE = 0.12;
     const HWY_LANE_STRIPE_OP_INT  = 0.24;
     const TS = 200 * K;
+    /** Match `nextNoteByString` onset to this note (float + chart rounding; avoids ghost / glow flicker). */
+    const NEXT_ON_STRING_T_EPS = 0.06;
 
     // Shorter, flatter notes (joel style)
     const NW = 5 * K, NH = 3 * K, ND = 0.5 * K;
@@ -1604,6 +1606,8 @@
         let _ghostLblBox = null;
         let _ghostLblMid = null;
         let _ghostLblTowardCam = null;
+        /** Snapshotted in update() for drawNote() ghost / glow (single source vs per-caller isNext). */
+        let _drawNextByString = null;
         let _laneTargetColor = null;
         let _renderScale = 1;
         let lyricsCanvas = null, lyricsCtx = null;
@@ -3190,6 +3194,7 @@
             pGhostFretLbl = pool(noteG, () => {
                 const m = new T.Mesh(gGhostFretPlane, mGhostFretLblPh);
                 m.renderOrder = 3;
+                m.frustumCulled = false;
                 return m;
             });
 
@@ -4394,6 +4399,8 @@
                 }
             }
 
+            _drawNextByString = nextNoteByString;
+
             // Ramp strGlow while the board ghost is visible so the flying note
             // core + rim read as one solid string-coloured shape with proj.
             const PROJ_WIN_MERGE = 0.6;
@@ -4403,8 +4410,7 @@
                     const dt = n.t - now;
                     if (dt <= 0 || dt >= PROJ_WIN_MERGE) continue;
                     const nn = nextNoteByString[n.s];
-                    if (!nn || Math.abs(nn.t - n.t) > 0.001) continue;
-                    if (dt < 0.15 && n.sus > 0) continue;
+                    if (!nn || Math.abs(nn.t - n.t) > NEXT_ON_STRING_T_EPS) continue;
                     const blend = 1 - dt / PROJ_WIN_MERGE;
                     noteState.strGlow[n.s] = Math.max(noteState.strGlow[n.s], 1.0 + blend * 1.2);
                 }
@@ -4418,8 +4424,7 @@
                         const dt = ch.t - now;
                         if (dt <= 0 || dt >= PROJ_WIN_MERGE) continue;
                         const nn = nextNoteByString[cn.s];
-                        if (!nn || Math.abs(nn.t - ch.t) > 0.001) continue;
-                        if (dt < 0.15 && (cn.sus || 0) > 0) continue;
+                        if (!nn || Math.abs(nn.t - ch.t) > NEXT_ON_STRING_T_EPS) continue;
                         const blend = 1 - dt / PROJ_WIN_MERGE;
                         noteState.strGlow[cn.s] = Math.max(noteState.strGlow[cn.s], 1.0 + blend * 1.2);
                     }
@@ -4628,7 +4633,8 @@
                     }
                     if (n.t + (n.sus || 0) < t0 || n.t > t1) continue;
                     if (!validString(n.s)) continue;
-                    const isNext = nextNoteByString[n.s] && Math.abs(nextNoteByString[n.s].t - n.t) < 0.001;
+                    const isNext = nextNoteByString[n.s] &&
+                        Math.abs(nextNoteByString[n.s].t - n.t) < NEXT_ON_STRING_T_EPS;
                     const skipLabel = lastFretForString[n.s] === n.f;
                     let singleOpenX;
                     if (n.f === 0) {
@@ -4803,7 +4809,8 @@
                     // share a strum time.
                     const chW          = chWindowed ? Math.exp(-Math.abs(ch.t - now) / camTau) : 0;
                     for (const cn of chordNotes) {
-                        const isNext = nextNoteByString[cn.s] && Math.abs(nextNoteByString[cn.s].t - ch.t) < 0.001;
+                        const isNext = nextNoteByString[cn.s] &&
+                            Math.abs(nextNoteByString[cn.s].t - ch.t) < NEXT_ON_STRING_T_EPS;
                         const skipLabel = !firstInShapeRun || lastFretForString[cn.s] === cn.f;
                         drawNote(
                             { ...cn, t: ch.t, sus: cn.sus || 0 },
@@ -5573,12 +5580,14 @@
         /* ── Note renderer ───────────────────────────────────────────────── */
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
-        function drawNote(n, now, openX, isNext, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false) {
+        function drawNote(n, now, openX, _isNextLegacy, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false) {
             const s = n.s;
             // Belt + suspenders: callers already gate via validString(),
             // but drawNote is also entered through { ...cn } chord-note
             // spreads, so re-check here before indexing material arrays.
             if (!validString(s)) return;
+            const nxFrame = _drawNextByString && _drawNextByString[s];
+            const isNextOnString = nxFrame != null && Math.abs(nxFrame.t - n.t) < NEXT_ON_STRING_T_EPS;
             const dt = n.t - now;
             const y = sY(s);
             const susEnd = n.t + (n.sus || 0);
@@ -5649,9 +5658,8 @@
                 }
                 const PROJ_WIN_G = 0.6;
                 const projFactorG = Math.max(0, Math.min(1, 1 - dt / PROJ_WIN_G));
-                const blockedGhost = dt < 0.15 && n.sus > 0;
-                const inGhostWin = n.f > 0 && isNext && dt > 0 && dt < PROJ_WIN_G &&
-                    projFactorG > 0.05 && !blockedGhost;
+                const inGhostWin = n.f > 0 && isNextOnString && dt > 0 && dt < PROJ_WIN_G &&
+                    projFactorG > 0.001;
 
                 const outline = pNote.get();
                 outline.material = _ndOutline;
@@ -5875,8 +5883,7 @@
             // ── Board ghost: filled rim at Z=0 (always drawn for isNext) ─
             const PROJ_WIN = 0.6;
             const projFactor = Math.max(0, Math.min(1, 1 - dt / PROJ_WIN));
-            const isBlocked = dt < 0.15 && n.sus > 0;
-            if (n.f > 0 && isNext && dt > 0 && dt < PROJ_WIN && projFactor > 0.05 && !isBlocked) {
+            if (n.f > 0 && isNextOnString && dt > 0 && dt < PROJ_WIN && projFactor > 0.001) {
                 // Ghost stays at final "on the board" orientation — not the
                 // incoming approachRot sweep — so it nests with the note at impact.
                 const projRim = isHarm ? Math.PI / 4 : 0;
@@ -6110,6 +6117,7 @@
             projMeshArr = null;
             _probe = null;
             _ghostLblBox = _ghostLblMid = _ghostLblTowardCam = null;
+            _drawNextByString = null;
             _laneTargetColor = null;
             _renderScale = 1;
             mBeatM = mBeatQ = null;
