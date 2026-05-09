@@ -2963,16 +2963,28 @@
             mBeatQ = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.07 });
 
             // ── Projection meshes — one per string, own material clone each ──
+            // Ghosts sit in the string plane (Z=0). Nudging Z forward to avoid
+            // z-fight used to skew screen-space Y vs the strings under the
+            // perspective camera; polygonOffset + depthWrite:false keeps ghosts legible.
+            const _projGhostMat = (base) => {
+                const mat = base.clone();
+                mat.polygonOffset = true;
+                mat.polygonOffsetFactor = -2;
+                mat.polygonOffsetUnits = -2;
+                mat.depthWrite = false;
+                return mat;
+            };
             projMeshArr = activePalette.map((_, s) => {
-                const m = new T.Mesh(gNote, mProj[s].clone());
+                const m = new T.Mesh(gNote, _projGhostMat(mProj[s]));
                 m.visible = false;
+                m.renderOrder = 2;
                 noteG.add(m);
                 return m;
             });
             projGlowArr = activePalette.map((_, s) => {
-                const m = new T.Mesh(gNote, mProjGlow[s].clone());
+                const m = new T.Mesh(gNote, _projGhostMat(mProjGlow[s]));
                 m.visible = false;
-                m.renderOrder = 1;
+                m.renderOrder = 3;
                 noteG.add(m);
                 return m;
             });
@@ -5752,7 +5764,7 @@
                 // affects the projection the same way it affects note bodies.
                 const projScale = _vibrancyProjOp / 0.15;
                 proj.material.opacity = projScale * ((skipBody ? 0.1 : 0.15) + projFactor * 0.6);
-                proj.position.set(x, y, 0.02);
+                proj.position.set(x, y, 0);
                 proj.scale.set(1, 1, 1);
                 proj.rotation.z = isHarm ? Math.PI / 4 : 0;
                 proj.visible = true;
@@ -5762,7 +5774,7 @@
                 // the pulsing halo. Multiply after the animating factor so the
                 // shape of the animation curve is preserved.
                 glow.material.opacity = (0.05 + projFactor * 0.25) * (0.9 + Math.sin(now * 10) * 0.1) * glowMul;
-                glow.position.set(x, y, 0.019);
+                glow.position.set(x, y, 0);
                 glow.scale.set(projFactor * 1.1, projFactor * 1.1, 1);
                 glow.rotation.z = isHarm ? Math.PI / 4 : 0;
                 glow.visible = true;
