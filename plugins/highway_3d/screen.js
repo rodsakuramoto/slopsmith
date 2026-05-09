@@ -148,6 +148,10 @@
 
     const AHEAD = 3.0;
     const BEHIND = 0.5;
+    // Sample [now, now+AHEAD] into this many strips; each strip’s <anchor>
+    // comes from the chart time at that depth so far-downstage lane can show
+    // the next window before the hit line crosses the anchor time.
+    const HWY_LANE_TIME_SLICES = 16;
     const TS = 200 * K;
 
     // Shorter, flatter notes (joel style)
@@ -260,6 +264,20 @@
             a = anc;
         }
         return a;
+    }
+
+    /** @returns {{ dMin: number, dMax: number } | null} */
+    function laneBoundsFromAnchor(anc) {
+        if (!anc) return null;
+        let fStart = Math.round(Number(anc.fret));
+        if (!Number.isFinite(fStart) || fStart < 0) fStart = 1;
+        let w = Number(anc.width);
+        if (!Number.isFinite(w)) w = 4;
+        w = Math.max(1, Math.round(w));
+        const fLast = Math.min(NFRETS, fStart + w - 1);
+        const dMin = Math.max(0, fStart - 1);
+        const dMax = Math.min(NFRETS, fLast);
+        return { dMin, dMax };
     }
 
     const FRET_COOLDOWN = 0.5; // seconds a lane fret stays active after last note
@@ -4104,25 +4122,71 @@
 
             // ── Dynamic highway lane ──────────────────────────────────────
             if (activeFrets.size > 0) {
-                let dMin, dMax;
-                const chartAnc = anchors && anchors.length ? getChartAnchorAt(anchors, now) : null;
-                if (chartAnc) {
-                    // Rocksmith XML: width is how many frets are visible starting at
-                    // `fret` (e.g. fret=2 width=4 → frets 2,3,4,5 — not thru 6).
-                    let fStart = Math.round(Number(chartAnc.fret));
-                    if (!Number.isFinite(fStart) || fStart < 0) fStart = 1;
-                    let w = Number(chartAnc.width);
-                    if (!Number.isFinite(w)) w = 4;
-                    w = Math.max(1, Math.round(w));
-                    const fLast = Math.min(NFRETS, fStart + w - 1);
-                    dMin = Math.max(0, fStart - 1);
-                    dMax = Math.min(NFRETS, fLast);
+                const margin = NW * 0.5;
+                const boardY = S_BASE - NH / 2 - 2 * K;
+
+                if (anchors && anchors.length) {
+                    const nearB = laneBoundsFromAnchor(getChartAnchorAt(anchors, now));
+                    if (nearB) {
+                        hwyLaneFretClipMin = nearB.dMin;
+                        hwyLaneFretClipMax = nearB.dMax;
+                    }
+
+                    const rawSeg = [];
+                    for (let k = 0; k < HWY_LANE_TIME_SLICES; k++) {
+                        const dt0 = (k / HWY_LANE_TIME_SLICES) * AHEAD;
+                        const dt1 = ((k + 1) / HWY_LANE_TIME_SLICES) * AHEAD;
+                        const b = laneBoundsFromAnchor(getChartAnchorAt(anchors, now + (dt0 + dt1) * 0.5));
+                        if (!b) continue;
+                        const z0 = dZ(dt0) + TS * BEHIND;
+                        const z1 = dZ(dt1) + TS * BEHIND;
+                        rawSeg.push({ b, z0, z1 });
+                    }
+                    const merged = [];
+                    for (const r of rawSeg) {
+                        const last = merged[merged.length - 1];
+                        if (last && last.b.dMin === r.b.dMin && last.b.dMax === r.b.dMax) {
+                            last.z1 = r.z1;
+                        } else {
+                            merged.push({ b: r.b, z0: r.z0, z1: r.z1 });
+                        }
+                    }
+                    for (const seg of merged) {
+                        const xLa = fretX(seg.b.dMin), xRa = fretX(seg.b.dMax);
+                        const laneW = (xRa - xLa) + margin * 2;
+                        const stripLen = Math.max(Math.abs(seg.z1 - seg.z0), 1e-6);
+                        const zc = (seg.z0 + seg.z1) * 0.5;
+                        const lane = pLane.get();
+                        lane.position.set((xLa + xRa) * 0.5, boardY + 0.02 * K, zc);
+                        lane.rotation.x = -Math.PI / 2;
+                        lane.scale.set(laneW, stripLen, 1);
+                        lane.material.opacity = 0.04 + highwayIntensity * 0.13;
+                        lane.material.color.set(0x112233).lerp(_laneTargetColor, highwayIntensity);
+                        lane.renderOrder = 1;
+                    }
+
+                    if (highwayIntensity > 0.05) {
+                        const yPos = boardY + 0.03 * K;
+                        for (const seg of merged) {
+                            const dz = Math.max(Math.abs(seg.z1 - seg.z0), 1e-6);
+                            const zMid = (seg.z0 + seg.z1) * 0.5;
+                            for (let f = Math.floor(seg.b.dMin); f <= Math.ceil(seg.b.dMax); f++) {
+                                const div = pLaneDivider.get();
+                                div.position.set(fretX(f), yPos, zMid);
+                                div.scale.set(1, 1, dz);
+                                div.material.opacity = 0.02 + highwayIntensity * 0.1;
+                                div.renderOrder = 2;
+                            }
+                        }
+                    }
                 } else {
+                    let dMin, dMax;
+                    let xL, xR;
+                    let divMin, divMax;
                     let minF = 99, maxF = 0;
                     activeFrets.forEach(f => { if (f > 0) { minF = Math.min(minF, f); maxF = Math.max(maxF, f); } });
                     dMin = minF - 1;
                     dMax = maxF;
-                    // No XML anchors: fixed 4-step window from active frets.
                     const HWY_LANE_SPAN = 4;
                     let span = dMax - dMin;
                     if (span > HWY_LANE_SPAN) {
@@ -4143,33 +4207,34 @@
                             dMin = Math.max(0, dMin - (HWY_LANE_SPAN - (dMax - dMin)));
                         }
                     }
-                }
-                if (dMax < dMin) dMax = dMin;
-                hwyLaneFretClipMin = dMin;
-                hwyLaneFretClipMax = dMax;
-                const xL = fretX(dMin), xR = fretX(dMax);
-                const margin = NW * 0.5;
-                const laneW = (xR - xL) + margin * 2;
-                const laneLen = TS * AHEAD;
-                const boardY = S_BASE - NH / 2 - 2 * K;
-                const lane = pLane.get();
-                lane.position.set((xL + xR) / 2, boardY + 0.02 * K, -laneLen / 2 + TS * BEHIND);
-                lane.rotation.x = -Math.PI / 2;
-                lane.scale.set(laneW, laneLen, 1);
-                lane.material.opacity = 0.04 + highwayIntensity * 0.13;
-                lane.material.color.set(0x112233).lerp(_laneTargetColor, highwayIntensity);
-                lane.renderOrder = 1;
+                    if (dMax < dMin) dMax = dMin;
+                    hwyLaneFretClipMin = dMin;
+                    hwyLaneFretClipMax = dMax;
+                    xL = fretX(dMin);
+                    xR = fretX(dMax);
+                    divMin = dMin;
+                    divMax = dMax;
 
-                // Lane dividers (fret wires inside active range)
-                if (highwayIntensity > 0.05) {
-                    const divLen = TS * (AHEAD + BEHIND) * 0.6;
-                    const yPos = boardY + 0.03 * K;
-                    for (let f = Math.floor(dMin); f <= Math.ceil(dMax); f++) {
-                        const div = pLaneDivider.get();
-                        div.position.set(fretX(f), yPos, dZ(0) - divLen * 0.5 + TS * BEHIND);
-                        div.scale.set(1, 1, divLen);
-                        div.material.opacity = 0.02 + highwayIntensity * 0.1;
-                        div.renderOrder = 2;
+                    const laneW = (xR - xL) + margin * 2;
+                    const laneLen = TS * AHEAD;
+                    const lane = pLane.get();
+                    lane.position.set((xL + xR) / 2, boardY + 0.02 * K, -laneLen / 2 + TS * BEHIND);
+                    lane.rotation.x = -Math.PI / 2;
+                    lane.scale.set(laneW, laneLen, 1);
+                    lane.material.opacity = 0.04 + highwayIntensity * 0.13;
+                    lane.material.color.set(0x112233).lerp(_laneTargetColor, highwayIntensity);
+                    lane.renderOrder = 1;
+
+                    if (highwayIntensity > 0.05) {
+                        const divLen = TS * (AHEAD + BEHIND) * 0.6;
+                        const yPos = boardY + 0.03 * K;
+                        for (let f = Math.floor(divMin); f <= Math.ceil(divMax); f++) {
+                            const div = pLaneDivider.get();
+                            div.position.set(fretX(f), yPos, dZ(0) - divLen * 0.5 + TS * BEHIND);
+                            div.scale.set(1, 1, divLen);
+                            div.material.opacity = 0.02 + highwayIntensity * 0.1;
+                            div.renderOrder = 2;
+                        }
                     }
                 }
             }
