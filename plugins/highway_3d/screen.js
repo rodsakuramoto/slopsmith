@@ -248,6 +248,14 @@
     const CAM_LOCK_ZOOM_MAX = 1.45;  // slider=1 — furthest
     const CAM_LOCK_CENTER_FRET = 6;  // default camera X center (first-position midpoint)
 
+    // ── 3D preview: lookahead fret bounds + smoothed focal X / span ─────────
+    /** When false, camera uses recency-weighted centroid + hysteresis instead. */
+    const LOOKAHEAD_PREVIEW_CAMERA = true;
+    const CAM_LOOKAHEAD_SEC = 3.0;
+    const CAM_FOCUS_BLEND_RATE = 0.7;
+    const CAM_FRET_EDGE_BLEND = 0.1;
+    const DEFAULT_LOOKAHEAD_FRET_SPAN = 4;
+
     // Note: we deliberately do NOT scale the camUpdate lerp speed with
     // cameraSmoothing. Smoothing widens the hysteresis dead zones so the
     // camera stays put through small/repetitive shifts; but when a shift
@@ -342,8 +350,8 @@
     const dZ = dt => -dt * TS;
 
     /**
-     * Pitched slide uses `sl`, unpitched uses `slu` (Charter: slideTo +
-     * unpitchedSlide). Prefer `sl` when both are present — matches RS wire.
+     * Pitched slide uses `sl`, unpitched uses `slu` (slide-to vs unpitched slide fields).
+     * Prefer `sl` when both are present — matches RS wire.
      * @returns {{ endFret: number, unpitched: boolean } | null}
      */
     function slideTrailEnd(n) {
@@ -360,7 +368,7 @@
 
     /**
      * Lateral slide offset along the fretboard during sustain — easing
-     * matches Charter's Preview3DGuitarSoundsDrawer#getNoteSlideOffsetAtTime.
+     * mirrors the pitched/unpitched slide offset convention above.
      * @param {{ endFret: number, unpitched: boolean } | null} [st_] from slideTrailEnd
      */
     function slideOffsetWorldX(n, chartTime, st_) {
@@ -1731,6 +1739,10 @@
         let _camSnapped = false;
         let _camPreScanned = false;
         let _songKey = null;
+        // Smooth lookahead camera: fused world-X and displayed fret-span.
+        let _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
+        let _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
+        let _lookaheadCamPrevNow = null;
 
         // Lifecycle flags
         let _isReady = false;
@@ -3568,6 +3580,72 @@
             }
         }
 
+        /* ── Lookahead fret bounds + smooth camera ───────────────────────── */
+        function lookaheadComputeFretBounds(now, anchors, notes, chords) {
+            const tEnd = now + CAM_LOOKAHEAD_SEC;
+            let minF = 99;
+            let maxF = 0;
+            let any = false;
+            if (anchors && anchors.length) {
+                for (let tt = now; tt <= tEnd + 1e-9; tt += 0.125) {
+                    const a = getChartAnchorAt(anchors, tt);
+                    if (!a) continue;
+                    let fStart = Math.round(Number(a.fret));
+                    if (!Number.isFinite(fStart) || fStart < 1) fStart = 1;
+                    let w = Number(a.width);
+                    if (!Number.isFinite(w)) w = 4;
+                    w = Math.max(1, Math.round(w));
+                    const fHi = Math.min(NFRETS, fStart + w - 1);
+                    minF = Math.min(minF, fStart);
+                    maxF = Math.max(maxF, fHi);
+                    any = true;
+                }
+            }
+            const consider = f => {
+                if (!(f > 0)) return;
+                minF = Math.min(minF, f);
+                maxF = Math.max(maxF, f);
+                any = true;
+            };
+            if (notes) {
+                let i = lowerBoundT(notes, now);
+                for (; i < notes.length; i++) {
+                    const n = notes[i];
+                    if (n.t > tEnd) break;
+                    if (!validString(n.s)) continue;
+                    consider(n.f);
+                }
+            }
+            if (chords) {
+                let i = lowerBoundT(chords, now);
+                for (; i < chords.length; i++) {
+                    const ch = chords[i];
+                    if (ch.t > tEnd) break;
+                    if (!ch.notes) continue;
+                    for (const cn of ch.notes) {
+                        if (!validString(cn.s)) continue;
+                        consider(cn.f);
+                    }
+                }
+            }
+            if (!any || minF > maxF) return null;
+            return { minF, maxF };
+        }
+
+        function lookaheadTargetWorldX(minF, maxF) {
+            const wb = CAM_FRET_EDGE_BLEND;
+            const middle = (fretMid(minF) + fretMid(maxF)) * 0.5;
+            const weighted = 0.6 * fretX(0) + 0.4 * fretX(NFRETS);
+            return middle * (1 - wb) + weighted * wb;
+        }
+
+        function lookaheadSmoothCamStep(dtSec, tgtXWorld, tgtSpanInt) {
+            const d = Math.min(0.2, Math.max(1e-4, dtSec));
+            const fs = 1 - Math.pow(1 - CAM_FOCUS_BLEND_RATE, d);
+            _lookaheadCamX = tgtXWorld * fs + _lookaheadCamX * (1 - fs);
+            _lookaheadFretSpan = tgtSpanInt * fs + _lookaheadFretSpan * (1 - fs);
+        }
+
         /* ── Camera target helper ────────────────────────────────────────── */
         // Compute and apply tgtX + tgtDist from note-window-accumulated data.
         // Used by BOTH the snap pre-pass (before drawNote() calls, skipDistHyst=true)
@@ -3715,6 +3793,9 @@
             const beats = bundle.beats;
             const sections = bundle.sections;
             const anchors = bundle.anchors;
+            const lookaheadBoundsNow = LOOKAHEAD_PREVIEW_CAMERA
+                ? lookaheadComputeFretBounds(now, anchors, notes, chords)
+                : null;
 
             // ── Frame state ───────────────────────────────────────────────
             const noteState = {
@@ -3810,24 +3891,29 @@
                 if (now - fretLastActiveTime[f] < FRET_COOLDOWN) activeFrets.add(f);
             }
 
-            // Camera targeting (issue #34 + follow-up). Both tgtX and
-            // tgtDist now derive from the narrowed [camT0, camT1] window
-            // — tgtX as a recency-weighted centroid, tgtDist from the
-            // fret span — so distant outliers can't yank either axis.
-            // Hysteresis dead-zone widths key off cameraSmoothing; the
-            // camUpdate() lerp itself stays BPM-driven only, so the gate
-            // controls whether the camera moves and the BPM lerp controls
-            // how fast it slides once a move is committed.
-            const cs        = cameraSmoothing;
-            const camAhead  = CAM_TGT_AHEAD_T + (CAM_TGT_AHEAD_C - CAM_TGT_AHEAD_T) * cs;
-            const camTau    = CAM_TGT_TAU_T   + (CAM_TGT_TAU_C   - CAM_TGT_TAU_T)   * cs;
-            const camHystF  = CAM_TGT_HYST_T  + (CAM_TGT_HYST_C  - CAM_TGT_HYST_T)  * cs;
-            const camT0     = now - CAM_TGT_BEHIND;
-            const camT1     = now + camAhead;
+            // Camera targeting — classic (#34): recency-weighted centroid +
+            // hysteresis over [camT0, camT1]. With LOOKAHEAD_PREVIEW_CAMERA,
+            // see lookaheadBoundsNow + lookaheadSmoothCamStep().
+            let cs = 0;
+            let camAhead = CAM_TGT_AHEAD_C;
+            let camTau = CAM_TGT_TAU_C;
+            let camHystF = CAM_TGT_HYST_C;
+            let camT0 = now - CAM_TGT_BEHIND;
+            let camT1 = now + camAhead;
             let camWX = 0, camWSum = 0;
-            // tgtDist hysteresis (issue #34 follow-up): track fret span over
-            // the SAME narrowed window as X targeting, so a single high-fret
-            // note 2.5 s away no longer pulls the zoom out and back.
+            let camDistMin = 99, camDistMax = 0, camDistGot = false;
+            const camDistHystF = CAM_DIST_HYST_T + (CAM_DIST_HYST_C - CAM_DIST_HYST_T) * zoomSmoothing;
+            if (!LOOKAHEAD_PREVIEW_CAMERA) {
+                cs = cameraSmoothing;
+                camAhead = CAM_TGT_AHEAD_T + (CAM_TGT_AHEAD_C - CAM_TGT_AHEAD_T) * cs;
+                camTau = CAM_TGT_TAU_T + (CAM_TGT_TAU_C - CAM_TGT_TAU_T) * cs;
+                camHystF = CAM_TGT_HYST_T + (CAM_TGT_HYST_C - CAM_TGT_HYST_T) * cs;
+                camT0 = now - CAM_TGT_BEHIND;
+                camT1 = now + camAhead;
+            }
+
+            // Classic path (#34): tgtDist hysteresis tracks fret span over the
+            // narrowed [camT0, camT1]; lookahead mode uses lookaheadBoundsNow + span smoothing.
             //
             // Sustain extension: the outer loop keeps notes/chords
             // whose sustain still rings into the visible window —
@@ -3843,11 +3929,6 @@
             // pullback was added to keep on screen. The future side
             // (camT1) is left alone so the #34 invariant (distant
             // high-fret onsets don't pre-pull the camera) still holds.
-            let camDistMin = 99, camDistMax = 0, camDistGot = false;
-            // Zoom hysteresis is now driven by its own slider (zoomSmoothing)
-            // instead of cameraSmoothing, so the user can dial X-pan and
-            // zoom calmness independently.
-            const camDistHystF = CAM_DIST_HYST_T + (CAM_DIST_HYST_C - CAM_DIST_HYST_T) * zoomSmoothing;
 
             // ── Song-change detection ─────────────────────────────────────────
             // reconnect() (used for arrangement switches and splitscreen song
@@ -3872,6 +3953,9 @@
                     tgtDist = curDist = CAM_DIST_BASE;
                     prevLowFretBonus = 0;
                     prevLockActive = false;
+                    _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
+                    _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
+                    _lookaheadCamPrevNow = null;
                 }
             }
 
@@ -3899,6 +3983,33 @@
                     if (!hasFrettedNote && !hasFrettedChord) _camSnapped = true;
                 }
                 if (!_camSnapped) {
+                    if (LOOKAHEAD_PREVIEW_CAMERA) {
+                        const bd = lookaheadBoundsNow;
+                        if (bd) {
+                            _lookaheadCamX = lookaheadTargetWorldX(bd.minF, bd.maxF);
+                            _lookaheadFretSpan = Math.max(1, bd.maxF - bd.minF + 1);
+                            const lockSnapEl = cameraLockLow && bd.maxF <= 12;
+                            if (lockSnapEl) {
+                                const lockedBaseU = camBaseDistU(12);
+                                const lockedBonusU = camLowFretPullbackU(1);
+                                const lockZoomMul = CAM_LOCK_ZOOM_MIN +
+                                    (CAM_LOCK_ZOOM_MAX - CAM_LOCK_ZOOM_MIN) * cameraLockZoom;
+                                tgtX = fretMid(CAM_LOCK_CENTER_FRET);
+                                tgtDist = (lockedBaseU + lockedBonusU) * K * lockZoomMul;
+                                prevLowFretBonus = lockedBonusU;
+                            } else {
+                                const baseDU = camBaseDistU(_lookaheadFretSpan);
+                                const lowBU = camLowFretPullbackU(bd.minF);
+                                tgtDist = (baseDU + lowBU) * K;
+                                prevLowFretBonus = lowBU;
+                                tgtX = _lookaheadCamX;
+                            }
+                            curX = tgtX;
+                            curDist = tgtDist;
+                            _camSnapped = true;
+                            _lookaheadCamPrevNow = now;
+                        }
+                    } else {
                     let preWX = 0, preWSum = 0, preDistMin = 99, preDistMax = 0, preDistGot = false;
                     if (notes) {
                         for (const n of notes) {
@@ -3950,6 +4061,7 @@
                         curDist = tgtDist;
                         _camSnapped = true;
                     }
+                    } // end classic pre-pass branch
                 } // end !_camSnapped (post-prescan guard)
             }
 
@@ -3978,6 +4090,7 @@
                     // against the current frame time so camera framing
                     // releases as soon as the sustain is no longer
                     // rendered on screen.
+                    if (!LOOKAHEAD_PREVIEW_CAMERA) {
                     const nInWin = n.t >= camT0 && n.t <= camT1;
                     const nSusActive = n.t < camT0 && n.t + (n.sus || 0) >= now;
                     if (n.f > 0 && (nInWin || nSusActive)) {
@@ -4004,6 +4117,7 @@
                         if (n.f < camDistMin) camDistMin = n.f;
                         if (n.f > camDistMax) camDistMax = n.f;
                         camDistGot = true;
+                    }
                     }
                 }
             }
@@ -4120,6 +4234,7 @@
                         // camera frame wider than the notes actually
                         // still on screen (chord-wide maxSus would
                         // over-pullback for mixed-sustain chords).
+                        if (!LOOKAHEAD_PREVIEW_CAMERA) {
                         const cnSustainOk = chOnsetInWin || (chSusActive && ch.t + (cn.sus || 0) >= now);
                         if (cn.f > 0 && cnSustainOk) {
                             camWX += fretMid(cn.f) * chW;
@@ -4127,6 +4242,7 @@
                             if (cn.f < camDistMin) camDistMin = cn.f;
                             if (cn.f > camDistMax) camDistMax = cn.f;
                             camDistGot = true;
+                        }
                         }
                     }
 
@@ -4543,30 +4659,55 @@
             }
 
             // ── Camera target ─────────────────────────────────────────────
-            // tgtX, tgtDist both driven from the narrowed [camT0, camT1]
-            // window, with hysteresis dead zones scaled by cameraSmoothing
-            // so small candidate shifts inside a cluster don't trigger
-            // visible motion. Distant outliers in the full visible window
-            // no longer pull either axis.
-            // ── Camera lock at frets 1-12 ───────────────────────────────────
-            // When enabled, pin tgtX and tgtDist to a fixed wide view of
-            // frets 1-12 as long as no upcoming note exceeds fret 12. As
-            // soon as a higher note enters the lookahead window the lock
-            // disengages and the dynamic candidate logic below takes over,
-            // letting the camera widen to include the high note. When the
-            // high note ages out, the lock re-engages on the next frame.
-            // camDistGot is only set when a fretted (f > 0) note enters the
-            // window, so requiring it would disengage the lock during all-
-            // open-string passages — even though they're well within the
-            // 1-12 range. Treat "no fretted notes seen" as a lockable state
-            // (camDistMax stays at 0, ≤ 12 is trivially true).
-            // All lock/dist/X logic lives in _applyNoteCamTargets() so the
-            // snap pre-pass (above) and this steady-state path share exactly
-            // one implementation.
-            const lockActive = _applyNoteCamTargets(
-                camWX, camWSum, camDistMin, camDistMax, camDistGot,
-                camHystF, camDistHystF, /* skipDistHyst= */ false);
-            prevLockActive = lockActive;
+            let lockActive;
+            if (!LOOKAHEAD_PREVIEW_CAMERA) {
+                lockActive = _applyNoteCamTargets(
+                    camWX, camWSum, camDistMin, camDistMax, camDistGot,
+                    camHystF, camDistHystF, /* skipDistHyst= */ false);
+                prevLockActive = lockActive;
+            } else {
+                const lookaheadMaxF = lookaheadBoundsNow ? lookaheadBoundsNow.maxF : 0;
+                const lookaheadHasBounds = lookaheadBoundsNow != null;
+                const lookaheadLockLowEligible = cameraLockLow && (!lookaheadHasBounds || lookaheadMaxF <= 12);
+
+                let dtSec = 1 / 120;
+                if (_lookaheadCamPrevNow !== null) {
+                    const rawDt = bundle.currentTime - _lookaheadCamPrevNow;
+                    if (rawDt > -1 && rawDt < 2) dtSec = Math.min(0.2, Math.max(1 / 960, rawDt));
+                }
+                _lookaheadCamPrevNow = bundle.currentTime;
+
+                if (lookaheadLockLowEligible) {
+                    const lockedBaseU = camBaseDistU(12);
+                    const lockedBonusU = camLowFretPullbackU(1);
+                    const lockZoomMul = CAM_LOCK_ZOOM_MIN +
+                        (CAM_LOCK_ZOOM_MAX - CAM_LOCK_ZOOM_MIN) * cameraLockZoom;
+                    tgtX = fretMid(CAM_LOCK_CENTER_FRET);
+                    tgtDist = (lockedBaseU + lockedBonusU) * K * lockZoomMul;
+                    prevLowFretBonus = lockedBonusU;
+                    lookaheadSmoothCamStep(dtSec, fretMid(CAM_LOCK_CENTER_FRET), 12);
+                    lockActive = true;
+                } else {
+                    if (lookaheadBoundsNow) {
+                        const tgtWX = lookaheadTargetWorldX(
+                            lookaheadBoundsNow.minF, lookaheadBoundsNow.maxF);
+                        const tgtSpanInt = Math.max(
+                            1, lookaheadBoundsNow.maxF - lookaheadBoundsNow.minF + 1);
+                        lookaheadSmoothCamStep(dtSec, tgtWX, tgtSpanInt);
+                        const lowBU = camLowFretPullbackU(lookaheadBoundsNow.minF);
+                        tgtDist = (camBaseDistU(_lookaheadFretSpan) + lowBU) * K;
+                        prevLowFretBonus = lowBU;
+                    } else {
+                        lookaheadSmoothCamStep(dtSec, _lookaheadCamX, _lookaheadFretSpan);
+                        const lowBU = camLowFretPullbackU(CAM_LOCK_CENTER_FRET);
+                        tgtDist = (camBaseDistU(_lookaheadFretSpan) + lowBU) * K;
+                        prevLowFretBonus = lowBU;
+                    }
+                    tgtX = _lookaheadCamX;
+                    lockActive = false;
+                }
+                prevLockActive = lockActive;
+            }
 
             // ── Chord diagram: track chord, drive entrance + crossfade animations ─
             {
@@ -5103,8 +5244,9 @@
         function camUpdate(bundle) {
             const bpm = computeBPM(bundle.beats, bundle.currentTime);
             const lerp = CAM_LERP_BASE * Math.max(bpm, 60) / 120;
-            curX += (tgtX - curX) * lerp;
-            curDist += (tgtDist - curDist) * lerp;
+            const panLerp = LOOKAHEAD_PREVIEW_CAMERA ? 1 : lerp;
+            curX += (tgtX - curX) * panLerp;
+            curDist += (tgtDist - curDist) * panLerp;
             const dist = curDist * aspectScale;
             const h = CAM_H_BASE * (dist / CAM_DIST_BASE);
             cam.position.set(curX + 20 * K, h * 0.95, dist * 0.75);
@@ -5248,6 +5390,9 @@
             _fretMarkerWaveCache.clear();
             gNote = gSus = gBeat = gTechArrow = gTapChevron = null;
             tgtX = curX = fretMid(CAM_LOCK_CENTER_FRET); tgtDist = curDist = CAM_DIST_BASE; tgtLookY = curLookY = 0; nStr = NSTR; _oobStringWarned = false;
+            _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
+            _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
+            _lookaheadCamPrevNow = null;
             prevLowFretBonus = 0;
             prevLockActive = false;
             _camSnapped = false;
