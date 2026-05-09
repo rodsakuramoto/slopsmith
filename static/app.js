@@ -2639,14 +2639,17 @@ let _resetJuceAudioShimChain = function () {};
         const gen = _juceShimGen;
         const p = chain.then(async () => {
             if (gen !== _juceShimGen) return;
-            return fn();
+            return fn(gen);
         });
         chain = p.catch((e) => {
             console.warn('[juce-audio-shim]', e);
         });
         return p;
     }
-    function flushJuceShimBatchNow() {
+    // forUpcomingPlay: caller will enqueue a play() right after, so don't
+    // emit pause-state side effects for a wantsPause batch — play() will
+    // overwrite them anyway.
+    function flushJuceShimBatchNow({ forUpcomingPlay = false } = {}) {
         _juceShimBatchFlushScheduled = false;
         const batch = _juceShimBatch;
         _juceShimBatch = null;
@@ -2654,15 +2657,28 @@ let _resetJuceAudioShimChain = function () {};
         const wantsPause = !!batch.wantsPause;
         const seekTime = batch.seekTime;
         if (wantsPause && seekTime !== undefined) {
-            enqueue(async () => {
+            enqueue(async (gen) => {
                 await jucePlayer.seek(seekTime);
+                if (gen !== _juceShimGen) return;
+                if (!forUpcomingPlay) {
+                    await jucePlayer.pause();
+                    if (gen !== _juceShimGen) return;
+                    isPlaying = false;
+                    document.getElementById('btn-play').textContent = '▶ Play';
+                    const sm = window.slopsmith;
+                    if (sm) {
+                        sm.isPlaying = false;
+                        sm.emit('song:pause', { time: jucePlayer.currentTime });
+                    }
+                }
                 audio.dispatchEvent(new Event('seeked'));
             });
             return;
         }
         if (wantsPause) {
-            enqueue(async () => {
+            enqueue(async (gen) => {
                 await jucePlayer.pause();
+                if (gen !== _juceShimGen) return;
                 isPlaying = false;
                 document.getElementById('btn-play').textContent = '▶ Play';
                 const sm = window.slopsmith;
@@ -2674,8 +2690,9 @@ let _resetJuceAudioShimChain = function () {};
             return;
         }
         if (seekTime !== undefined) {
-            enqueue(async () => {
+            enqueue(async (gen) => {
                 await jucePlayer.seek(seekTime);
+                if (gen !== _juceShimGen) return;
                 audio.dispatchEvent(new Event('seeked'));
             });
         }
@@ -2737,17 +2754,16 @@ let _resetJuceAudioShimChain = function () {};
 
     audio.play = function () {
         if (window._juceMode) {
-            if (_juceShimBatch != null) flushJuceShimBatchNow();
-            const p = enqueue(async () => {
+            if (_juceShimBatch != null) flushJuceShimBatchNow({ forUpcomingPlay: true });
+            const p = enqueue(async (gen) => {
                 const started = await jucePlayer.play();
-                if (started) {
-                    isPlaying = true;
-                    document.getElementById('btn-play').textContent = '⏸ Pause';
-                    const sm = window.slopsmith;
-                    if (sm) {
-                        sm.isPlaying = true;
-                        sm.emit('song:play', { time: jucePlayer.currentTime });
-                    }
+                if (gen !== _juceShimGen || !started) return;
+                isPlaying = true;
+                document.getElementById('btn-play').textContent = '⏸ Pause';
+                const sm = window.slopsmith;
+                if (sm) {
+                    sm.isPlaying = true;
+                    sm.emit('song:play', { time: jucePlayer.currentTime });
                 }
             });
             return p.then(() => undefined);
@@ -2866,12 +2882,16 @@ async function playSong(filename, arrangement) {
     artAbortController = null;
 
     highway.stop();
+    // Reset the JUCE shim BEFORE awaiting jucePlayer.stop() so any in-flight
+    // shim closures see a stale generation after their await and bail out
+    // before mutating isPlaying / button label / song:* events for the
+    // outgoing song.
+    _resetJuceAudioShimChain();
     if (window._juceMode) {
         await jucePlayer.stop().catch(() => {});
         window._juceMode = false;
         window._juceAudioUrl = null;
     }
-    _resetJuceAudioShimChain();
     audio.pause();
     audio.src = '';
     isPlaying = false;
