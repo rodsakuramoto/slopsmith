@@ -315,6 +315,41 @@
     const fretMid = f => (f <= 0 ? -2 * K : (fretX(f - 1) + fretX(f)) / 2);
     const dZ = dt => -dt * TS;
 
+    /**
+     * Pitched slide uses `sl`, unpitched uses `slu` (Charter: slideTo +
+     * unpitchedSlide). Prefer `sl` when both are present — matches RS wire.
+     * @returns {{ endFret: number, unpitched: boolean } | null}
+     */
+    function slideTrailEnd(n) {
+        const sl = n.sl;
+        const slu = n.slu;
+        if (Number.isFinite(sl) && sl >= 0) {
+            return { endFret: sl | 0, unpitched: false };
+        }
+        if (Number.isFinite(slu) && slu >= 0) {
+            return { endFret: slu | 0, unpitched: true };
+        }
+        return null;
+    }
+
+    /**
+     * Lateral slide offset along the fretboard during sustain — easing
+     * matches Charter's Preview3DGuitarSoundsDrawer#getNoteSlideOffsetAtTime.
+     * @param {{ endFret: number, unpitched: boolean } | null} [st_] from slideTrailEnd
+     */
+    function slideOffsetWorldX(n, chartTime, st_) {
+        const st = st_ || slideTrailEnd(n);
+        if (!st || n.f <= 0 || !(n.sus > 0)) return 0;
+        const denom = Math.max(n.sus, 1e-6);
+        const p = Math.max(0, Math.min(1, (chartTime - n.t) / denom));
+        const startX = fretMid(n.f);
+        const endX = fretMid(st.endFret);
+        const w = st.unpitched
+            ? 1 - Math.sin((1 - p) * Math.PI / 2)
+            : Math.pow(Math.sin(p * Math.PI / 2), 3);
+        return (endX - startX) * w;
+    }
+
     // Camera tgtDist building blocks. Both the dynamic (camera-follow)
     // and locked (frets 1-12) branches compose tgtDist from these, so
     // any future tuning of the base zoom curve or low-fret pullback
@@ -4762,8 +4797,7 @@
                     const susStart = Math.max(n.t, now);
                     const remSus = susEnd - susStart;
                     if (remSus > 0.01) {
-                        const len = Math.min(remSus, AHEAD) * TS;
-                        const zPos = dZ(susStart - now) - len / 2;
+                        const sliceDur = Math.min(remSus, AHEAD);
                         const tw = NW * 0.85 * (n.f === 0 ? openWScale : 1);
                         const th = NH * 0.12 * (n.f === 0 ? openWScale : 1);
                         // Open strings get two parallel trails offset along
@@ -4786,15 +4820,44 @@
                         } else {
                             offsets = SINGLE_SUS_OFFSETS;
                         }
-                        for (let i = 0; i < offsets.length; i++) {
-                            const xOff = x + offsets[i];
-                            const trOut = pSusOutline.get();
-                            trOut.position.set(xOff, y, zPos);
-                            trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, len);
-                            const tr = pSus.get();
-                            tr.material = mSus[s];
-                            tr.position.set(xOff, y, zPos);
-                            tr.scale.set(tw, th, len);
+                        const slideSt = slideTrailEnd(n);
+                        const slideSegTrail = !!(slideSt && n.f > 0 && (n.sus || 0) > 1e-4);
+                        const emitSusStrip = (xCenter, segLen, zCenter) => {
+                            for (let i = 0; i < offsets.length; i++) {
+                                const xOff = xCenter + offsets[i];
+                                const trOut = pSusOutline.get();
+                                trOut.position.set(xOff, y, zCenter);
+                                trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
+                                const tr = pSus.get();
+                                tr.material = mSus[s];
+                                tr.position.set(xOff, y, zCenter);
+                                tr.scale.set(tw, th, segLen);
+                            }
+                        };
+                        if (!slideSegTrail) {
+                            const len = sliceDur * TS;
+                            const zPos = dZ(susStart - now) - len / 2;
+                            emitSusStrip(x, len, zPos);
+                        } else {
+                            // Charter-style diagonal sustain: lateral X eased over
+                            // chart time via slideOffsetWorldX; small Z slices trace
+                            // a smooth shear along the neck.
+                            const N = Math.max(
+                                12,
+                                Math.min(48, Math.ceil(sliceDur / (1 / 60))),
+                            );
+                            for (let j = 0; j < N; j++) {
+                                const T0 = susStart + (j / N) * sliceDur;
+                                const T1 = susStart + ((j + 1) / N) * sliceDur;
+                                const z0 = dZ(T0 - now);
+                                const z1 = dZ(T1 - now);
+                                const segLen = Math.abs(z0 - z1);
+                                if (segLen < 1e-9) continue;
+                                const zC = (z0 + z1) * 0.5;
+                                const tMid = (T0 + T1) * 0.5;
+                                const xc = x + slideOffsetWorldX(n, tMid, slideSt);
+                                emitSusStrip(xc, segLen, zC);
+                            }
                         }
                     }
                 }
@@ -4841,9 +4904,10 @@
                     l.material = txtMat('↑' + bendText(n.bn), '#fff', true, 'technique');
                     l.scale.set(NH * 3.6 * sLbl, NH * 1.5 * sLbl, 1); l.position.set(x, yo, noteZ); yo += NH * 1.2 * sLbl;
                 }
-                if (n.sl && n.sl !== -1) {
+                const slideLbl = slideTrailEnd(n);
+                if (slideLbl) {
                     const l = pLbl.get();
-                    l.material = txtMat(n.sl > n.f ? '↗' : '↘', '#fff', false, 'technique');
+                    l.material = txtMat(slideLbl.endFret > n.f ? '↗' : '↘', '#fff', false, 'technique');
                     l.scale.set(NH * 1.6 * sLbl, NH * 1.6 * sLbl, 1); l.position.set(x + NW * 0.6 * sLbl, yo, noteZ);
                 }
                 if (n.ho || n.po || n.tp) {
