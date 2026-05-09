@@ -1580,7 +1580,7 @@
         let ambLight = null, dirLight = null;
         let fretG = null, tuningLblG = null, noteG = null, beatG = null, lblG = null;
         let gNote = null, gSus = null, gBeat = null, gTechArrow = null, gTapChevron = null;
-        let mStr = [], mGlow = [], mSus = [], mProj = [], mProjGlow = [];
+        let mStr = [], mGlow = [], mSus = [], mProj = [], mProjGlow = [], mStrHitOutline = [];
         let mWhiteOutline = null, mSusOutline = null;
         // Shared materials for the legato technique meshes — one per geometry
         // type, reused across every pooled mesh instance to avoid per-mesh
@@ -3045,6 +3045,9 @@
                 color: c, transparent: true, opacity: 0.35,
             }));
             mWhiteOutline = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.6 });
+            mStrHitOutline = activePalette.map(c => new T.MeshLambertMaterial({
+                color: c, emissive: c, emissiveIntensity: 1.0,
+            }));
             // Notedetect feedback (issue #9): bright green / red outline
             // tints. Note rendering swaps its outline.material between
             // mWhiteOutline / mHitOutline / mMissOutline based on
@@ -3604,6 +3607,10 @@
                 if (mSus[s]) mSus[s].color.setHex(c);
                 if (mProj[s]) { mProj[s].color.setHex(c); mProj[s].emissive.setHex(c); }
                 if (mProjGlow[s]) mProjGlow[s].emissive.setHex(c);
+                if (mStrHitOutline[s]) {
+                    mStrHitOutline[s].color.setHex(c);
+                    mStrHitOutline[s].emissive.setHex(c);
+                }
                 const pm = projMeshArr && projMeshArr[s];
                 if (pm && pm.material) {
                     pm.material.color.setHex(c);
@@ -3674,6 +3681,7 @@
                 // see Phase 4 comment block.
                 const pm = projMeshArr && projMeshArr[s];
                 if (pm && pm.material) pm.material.emissiveIntensity = 0.002 * g;
+                if (mStrHitOutline[s]) mStrHitOutline[s].emissiveIntensity = 1.0 * g;
             }
             if (mWhiteOutline) mWhiteOutline.emissiveIntensity = 0.6 * g;
             if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.0 * g;
@@ -4364,12 +4372,6 @@
                 }
             }
 
-            updateStringHighlights(noteState);
-            // Hit-note emissive is per-frame from noteState.strGlow[s]; the
-            // glow slider scales it at the assignment site since this
-            // write would stomp anything _applyGlow() set statically.
-            for (let s = 0; s < nStr; s++) mGlow[s].emissiveIntensity = noteState.strGlow[s] * glowMul;
-
             // ── Next-note-by-string lookahead (for anticipation projection) ──
             const nextNoteByString = new Array(nStr).fill(null);
             if (notes) {
@@ -4391,6 +4393,44 @@
                     }
                 }
             }
+
+            // Ramp strGlow while the board ghost is visible so the flying note
+            // core + rim read as one solid string-coloured shape with proj.
+            const PROJ_WIN_MERGE = 0.6;
+            if (notes) {
+                for (const n of notes) {
+                    if (!validString(n.s) || n.f <= 0) continue;
+                    const dt = n.t - now;
+                    if (dt <= 0 || dt >= PROJ_WIN_MERGE) continue;
+                    const nn = nextNoteByString[n.s];
+                    if (!nn || Math.abs(nn.t - n.t) > 0.001) continue;
+                    if (dt < 0.15 && n.sus > 0) continue;
+                    const blend = 1 - dt / PROJ_WIN_MERGE;
+                    noteState.strGlow[n.s] = Math.max(noteState.strGlow[n.s], 1.0 + blend * 1.2);
+                }
+            }
+            if (chords) {
+                for (const ch of chords) {
+                    if (!ch.notes || ch.t <= now) continue;
+                    const chordNotes = filterValidNotes(ch.notes);
+                    for (const cn of chordNotes) {
+                        if (cn.f <= 0) continue;
+                        const dt = ch.t - now;
+                        if (dt <= 0 || dt >= PROJ_WIN_MERGE) continue;
+                        const nn = nextNoteByString[cn.s];
+                        if (!nn || Math.abs(nn.t - ch.t) > 0.001) continue;
+                        if (dt < 0.15 && (cn.sus || 0) > 0) continue;
+                        const blend = 1 - dt / PROJ_WIN_MERGE;
+                        noteState.strGlow[cn.s] = Math.max(noteState.strGlow[cn.s], 1.0 + blend * 1.2);
+                    }
+                }
+            }
+
+            updateStringHighlights(noteState);
+            // Hit-note emissive is per-frame from noteState.strGlow[s]; the
+            // glow slider scales it at the assignment site since this
+            // write would stomp anything _applyGlow() set statically.
+            for (let s = 0; s < nStr; s++) mGlow[s].emissiveIntensity = noteState.strGlow[s] * glowMul;
 
             // Active frets (notes in cooldown window) + highway intensity
             const activeFrets = new Set();
@@ -5574,7 +5614,7 @@
                 // listener. Hit takes precedence over miss so the user
                 // sees the more positive feedback if both happen
                 // (shouldn't, but cheap guard).
-                let _ndOutline = mWhiteOutline;
+                let _ndOutline = (n.f > 0 && mStrHitOutline[s]) ? mStrHitOutline[s] : mWhiteOutline;
                 // update() prunes expired marks once per frame and
                 // caches performance.now() in _ndFrameNowMs so the hot
                 // path here just does the bounded match — no extra
@@ -5582,19 +5622,20 @@
                 // every entry in the arrays has expiresAt > _ndFrameNowMs,
                 // so we don't re-validate inside the loop.
                 let _ndMatchedMark = null;
-                if (_ndHitMarks.length || _ndMissMarks.length) {
+                let _ndHadHitMark = false;
+                if (_ndHitMarks.length) {
                     for (let i = 0; i < _ndHitMarks.length; i++) {
                         const m = _ndHitMarks[i];
                         if (m.s === n.s && m.f === n.f && Math.abs(m.noteTime - n.t) < _ND_TIME_EPS) {
-                            _ndOutline = mHitOutline; _ndMatchedMark = m; break;
+                            _ndOutline = mHitOutline; _ndMatchedMark = m; _ndHadHitMark = true; break;
                         }
                     }
-                    if (_ndOutline === mWhiteOutline) {
-                        for (let i = 0; i < _ndMissMarks.length; i++) {
-                            const m = _ndMissMarks[i];
-                            if (m.s === n.s && m.f === n.f && Math.abs(m.noteTime - n.t) < _ND_TIME_EPS) {
-                                _ndOutline = mMissOutline; _ndMatchedMark = m; break;
-                            }
+                }
+                if (!_ndHadHitMark && _ndMissMarks.length) {
+                    for (let i = 0; i < _ndMissMarks.length; i++) {
+                        const m = _ndMissMarks[i];
+                        if (m.s === n.s && m.f === n.f && Math.abs(m.noteTime - n.t) < _ND_TIME_EPS) {
+                            _ndOutline = mMissOutline; _ndMatchedMark = m; break;
                         }
                     }
                 }
@@ -5606,6 +5647,12 @@
                         labels: _ndMatchedMark.labels,
                     });
                 }
+                const PROJ_WIN_G = 0.6;
+                const projFactorG = Math.max(0, Math.min(1, 1 - dt / PROJ_WIN_G));
+                const blockedGhost = dt < 0.15 && n.sus > 0;
+                const inGhostWin = n.f > 0 && isNext && dt > 0 && dt < PROJ_WIN_G &&
+                    projFactorG > 0.05 && !blockedGhost;
+
                 const outline = pNote.get();
                 outline.material = _ndOutline;
                 outline.position.set(x, y + vibrato, noteZ);
@@ -5618,7 +5665,7 @@
 
                 // ── Core (filled note body) ───────────────────────────────
                 const core = pNote.get();
-                core.material = hit ? mGlow[s] : mStr[s];
+                core.material = (hit || (n.f > 0 && inGhostWin)) ? mGlow[s] : mStr[s];
                 core.position.set(x, y + vibrato, noteZ + 0.001);
                 core.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
@@ -5839,8 +5886,11 @@
                 // scale the whole opacity by (_vibrancyProjOp / 0.15) so the slider
                 // affects the projection the same way it affects note bodies.
                 const projScale = _vibrancyProjOp / 0.15;
-                proj.material.opacity = projScale * ((skipBody ? 0.1 : 0.15) + projFactor * 0.65) *
-                    (0.35 + 0.65 * glowMul);
+                const bodyDim = skipBody ? 0.38 : 1;
+                const rimSolid = 0.42 + projFactor * 0.52;
+                proj.material.opacity = Math.min(0.96,
+                    projScale * rimSolid * (0.5 + 0.5 * glowMul) * bodyDim);
+                proj.material.emissiveIntensity = (0.07 + projFactor * 0.48) * glowMul * bodyDim;
                 proj.position.set(x, y, 0);
                 proj.scale.set(1, 1, 1);
                 proj.rotation.z = projRim;
@@ -6010,6 +6060,7 @@
             for (const m of mSus) m?.dispose?.();
             for (const m of mProj) m?.dispose?.();
             for (const m of mProjGlow) m?.dispose?.();
+            for (const m of mStrHitOutline) m?.dispose?.();
             mBeatM?.dispose?.(); mBeatQ?.dispose?.();
             // Notedetect outline materials (#9). May not be reachable
             // via scene.traverse if no event ever fired (never attached
@@ -6039,7 +6090,7 @@
             if (ren) { ren.dispose(); ren = null; }
             scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
             ambLight = dirLight = null;
-            mStr = []; mGlow = []; mSus = []; mProj = []; mProjGlow = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = null; stringLines = []; stringLineGlows = [];
+            mStr = []; mGlow = []; mSus = []; mProj = []; mProjGlow = []; mStrHitOutline = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = null; stringLines = []; stringLineGlows = [];
             for (const m of _inlayMats) m?.dispose?.(); _inlayMats = []; _inlayLabels = [];
             // mTechArrow / mTapChevron are owned by pooled meshes attached
             // to noteG; the scene.traverse() dispose pass above already
