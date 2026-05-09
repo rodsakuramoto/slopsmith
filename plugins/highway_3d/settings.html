@@ -142,6 +142,20 @@
         playing — no reload required.
     </p>
 
+    <div class="mt-3">
+        <label for="h3d-camera-mode" class="text-xs font-medium text-gray-400 mb-1 block">Camera view</label>
+        <select id="h3d-camera-mode"
+            onchange="window.h3dBgSetCameraMode && window.h3dBgSetCameraMode(this.value)"
+            class="w-full bg-dark-700 border border-gray-800 rounded-lg px-3 py-2 text-xs text-gray-300 outline-none">
+            <option value="lookahead">Wide ahead (default)</option>
+            <option value="steady">Steady &amp; close-in</option>
+        </select>
+        <p class="text-[10px] text-gray-500 mt-1">
+            <em>Wide ahead</em> shows more of the neck coming up and eases the framing forward.
+            <em>Steady &amp; close-in</em> keeps a calmer view centred on the notes right in front of you.
+        </p>
+    </div>
+
     <details class="mt-4 rounded-lg border border-gray-800 bg-dark-700/40">
         <summary class="cursor-pointer select-none px-3 py-2 text-xs font-medium text-gray-400 hover:text-gray-200">
             Advanced camera settings
@@ -479,9 +493,10 @@
          no-selection / NaN state. -->
     <script>
         (function () {
-            const DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
+            const DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
             const VALID_STYLES = new Set(['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video']);
             const VALID_PALETTES = new Set(['default', 'neon', 'pastel']);
+            const VALID_CAMERA_MODES = new Set(['steady', 'lookahead']);
             const VALID_CHORD_DIAG_POSITIONS = new Set(['tl', 'tr', 'bl', 'br']);
             // Section HUD shares the same four-corner anchor set as the
             // chord diagram (the renderer enforces the same id list via
@@ -539,6 +554,10 @@
 
             function coerceStyle(v) { return VALID_STYLES.has(v) ? v : DEFAULTS.style; }
             function coercePalette(v) { return VALID_PALETTES.has(v) ? v : DEFAULTS.palette; }
+            function coerceCameraMode(v) {
+                if (v === 'classic') v = 'steady';
+                return VALID_CAMERA_MODES.has(v) ? v : DEFAULTS.cameraMode;
+            }
             function coerceIntensity(v) {
                 const n = parseFloat(v);
                 if (!Number.isFinite(n)) return DEFAULTS.intensity;
@@ -568,6 +587,7 @@
 
             let storedStyle = null, storedI = null, storedR = null, storedPalette = null, storedFretOnNote = null;
             let storedCameraSmoothing = null;
+            let storedCameraMode = null;
             let storedCustomImageDataUrl = null, storedCustomImageName = null;
             let storedCustomVideoName = null;
             let storedZoomSmoothing = null;
@@ -592,6 +612,7 @@
                 storedPalette = localStorage.getItem('h3d_bg_palette');
                 storedFretOnNote = localStorage.getItem('h3d_bg_showFretOnNote');
                 storedCameraSmoothing = localStorage.getItem('h3d_bg_cameraSmoothing');
+                storedCameraMode = localStorage.getItem('h3d_bg_cameraMode');
                 storedZoomSmoothing = localStorage.getItem('h3d_bg_zoomSmoothing');
                 storedTiltSmoothing = localStorage.getItem('h3d_bg_tiltSmoothing');
                 storedCameraLockLow = localStorage.getItem('h3d_bg_cameraLockLow');
@@ -632,6 +653,7 @@
             const cameraLockZoom = (storedCameraLockZoom == null)
                 ? DEFAULTS.cameraLockZoom
                 : coerceUnitInterval(storedCameraLockZoom, DEFAULTS.cameraLockZoom);
+            const cameraMode = coerceCameraMode(storedCameraMode);
             const textSize = (storedTextSize == null)
                 ? DEFAULTS.textSize
                 : coerceUnitInterval(storedTextSize, DEFAULTS.textSize);
@@ -676,6 +698,7 @@
             const tsli = document.getElementById('h3d-tilt-smoothing');
             const tlbl = document.getElementById('h3d-tilt-smoothing-label');
             const cll  = document.getElementById('h3d-camera-lock-low');
+            const cmod = document.getElementById('h3d-camera-mode');
             const lzli = document.getElementById('h3d-camera-lock-zoom');
             const lzlbl = document.getElementById('h3d-camera-lock-zoom-label');
             const tsi  = document.getElementById('h3d-text-size');
@@ -714,6 +737,7 @@
             if (tsli) tsli.value = String(tiltSmoothing);
             if (tlbl) tlbl.textContent = tiltSmoothing.toFixed(2);
             if (cll)  cll.checked  = cameraLockLow;
+            if (cmod) cmod.value   = cameraMode;
             if (lzli) lzli.value = String(cameraLockZoom);
             if (lzlbl) lzlbl.textContent = cameraLockZoom.toFixed(2);
             if (tsi)  tsi.value  = String(textSize);

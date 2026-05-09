@@ -260,8 +260,8 @@
     const CAM_LOCK_CENTER_FRET = 6;  // default camera X center (first-position midpoint)
 
     // ── 3D preview: lookahead fret bounds + smoothed focal X / span ─────────
-    /** When false, camera uses recency-weighted centroid + hysteresis instead. */
-    const LOOKAHEAD_PREVIEW_CAMERA = true;
+    /** User-selectable via `cameraMode`. Legacy `classic` in storage maps to `steady`. */
+    const CAMERA_MODE_IDS = ['steady', 'lookahead'];
     const CAM_LOOKAHEAD_SEC = 3.0;
     const CAM_FOCUS_BLEND_RATE = 0.7;
     const CAM_FRET_EDGE_BLEND = 0.1;
@@ -654,7 +654,7 @@
         return _bgBandsCache;
     }
 
-    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
+    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
     const BG_STYLE_IDS = ['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video'];
 
     function _bgPanelKey(canvas) {
@@ -715,6 +715,10 @@
             return CHORD_DIAG_POSITION_IDS.includes(val) ? val : BG_DEFAULTS.chordDiagramPosition;
         if (key === 'sectionHudPosition')
             return CHORD_DIAG_POSITION_IDS.includes(val) ? val : BG_DEFAULTS.sectionHudPosition;
+        if (key === 'cameraMode') {
+            if (val === 'classic') val = 'steady';
+            return CAMERA_MODE_IDS.includes(val) ? val : BG_DEFAULTS.cameraMode;
+        }
         if (key === 'fretColumnMarkerCadence') {
             const n = parseInt(val, 10);
             if (!Number.isFinite(n)) return BG_DEFAULTS.fretColumnMarkerCadence;
@@ -774,6 +778,11 @@
     window.h3dBgSetTiltSmoothing = (v) => _bgWriteGlobal('tiltSmoothing', v);
     window.h3dBgSetCameraLockLow = (v) => _bgWriteGlobal('cameraLockLow', !!v);
     window.h3dBgSetCameraLockZoom = (v) => _bgWriteGlobal('cameraLockZoom', v);
+    window.h3dBgSetCameraMode = (v) => {
+        let s = String(v);
+        if (s === 'classic') s = 'steady';
+        _bgWriteGlobal('cameraMode', s);
+    };
     window.h3dBgSetTextSize = (v) => _bgWriteGlobal('textSize', v);
     window.h3dBgSetVibrancy = (v) => _bgWriteGlobal('vibrancy', v);
     window.h3dBgSetGlow     = (v) => _bgWriteGlobal('glow', v);
@@ -1647,6 +1656,8 @@
         // fretboard), 0.5 → 1.0× (the default locked view), 1 → CAM_LOCK_ZOOM_MAX
         // (furthest). Inactive when the lock isn't engaged.
         let cameraLockZoom = 0.5;
+        /** 'steady' = recency-weighted centroid + hysteresis (#34); 'lookahead' = wide preview window + smooth focal. */
+        let cameraMode = BG_DEFAULTS.cameraMode;
         // Global text-size multiplier for in-scene text sprites (chord
         // names, fret labels, section banners, technique markers, etc.).
         // Slider is 0..1; mapped to a 0.5..1.5× multiplier with 0.5 = 1.0×
@@ -3149,7 +3160,8 @@
                 if (changedKey === 'reactive' || changedKey === 'showFretOnNote' ||
                     changedKey === 'cameraSmoothing' || changedKey === 'zoomSmoothing' ||
                     changedKey === 'tiltSmoothing' || changedKey === 'cameraLockLow' ||
-                    changedKey === 'cameraLockZoom' || changedKey === 'textSize' ||
+                    changedKey === 'cameraLockZoom' || changedKey === 'cameraMode' ||
+                    changedKey === 'textSize' ||
                     changedKey === 'chordDiagramSize' || changedKey === 'chordDiagramPosition' ||
                     changedKey === 'fretColumnMarkerCadence' ||
                     changedKey === 'sectionLabelsOnHighway' ||
@@ -3343,6 +3355,7 @@
                 : cameraSmoothing;
             cameraLockLow = _bgReadSetting(panelKey, 'cameraLockLow');
             cameraLockZoom = _bgReadSetting(panelKey, 'cameraLockZoom');
+            cameraMode = _bgReadSetting(panelKey, 'cameraMode');
             textSize             = _bgReadSetting(panelKey, 'textSize');
             vibrancy             = _bgReadSetting(panelKey, 'vibrancy');
             glowMul              = _bgReadSetting(panelKey, 'glow');
@@ -4093,7 +4106,7 @@
             const beats = bundle.beats;
             const sections = bundle.sections;
             const anchors = bundle.anchors;
-            const lookaheadBoundsNow = LOOKAHEAD_PREVIEW_CAMERA
+            const lookaheadBoundsNow = (cameraMode === 'lookahead')
                 ? lookaheadComputeFretBounds(now, anchors, notes, chords)
                 : null;
 
@@ -4210,9 +4223,9 @@
                 if (now - fretLastActiveTime[f] < FRET_COOLDOWN) activeFrets.add(f);
             }
 
-            // Camera targeting — classic (#34): recency-weighted centroid +
-            // hysteresis over [camT0, camT1]. With LOOKAHEAD_PREVIEW_CAMERA,
-            // see lookaheadBoundsNow + lookaheadSmoothCamStep().
+            // Camera targeting — steady mode (#34): recency-weighted centroid +
+            // hysteresis over [camT0, camT1]. In lookahead mode, see
+            // lookaheadBoundsNow + lookaheadSmoothCamStep().
             let cs = 0;
             let camAhead = CAM_TGT_AHEAD_C;
             let camTau = CAM_TGT_TAU_C;
@@ -4222,7 +4235,7 @@
             let camWX = 0, camWSum = 0;
             let camDistMin = 99, camDistMax = 0, camDistGot = false;
             const camDistHystF = CAM_DIST_HYST_T + (CAM_DIST_HYST_C - CAM_DIST_HYST_T) * zoomSmoothing;
-            if (!LOOKAHEAD_PREVIEW_CAMERA) {
+            if (!(cameraMode === 'lookahead')) {
                 cs = cameraSmoothing;
                 camAhead = CAM_TGT_AHEAD_T + (CAM_TGT_AHEAD_C - CAM_TGT_AHEAD_T) * cs;
                 camTau = CAM_TGT_TAU_T + (CAM_TGT_TAU_C - CAM_TGT_TAU_T) * cs;
@@ -4304,7 +4317,7 @@
                     if (!hasFrettedNote && !hasFrettedChord) _camSnapped = true;
                 }
                 if (!_camSnapped) {
-                    if (LOOKAHEAD_PREVIEW_CAMERA) {
+                    if (cameraMode === 'lookahead') {
                         const bd = lookaheadBoundsNow;
                         if (bd) {
                             _lookaheadCamX = lookaheadTargetWorldX(bd.minF, bd.maxF);
@@ -4384,7 +4397,7 @@
                         curDist = tgtDist;
                         _camSnapped = true;
                     }
-                    } // end classic pre-pass branch
+                    } // end steady-mode pre-pass branch
                 } // end !_camSnapped (post-prescan guard)
             }
 
@@ -4414,7 +4427,7 @@
                     // against the current frame time so camera framing
                     // releases as soon as the sustain is no longer
                     // rendered on screen.
-                    if (!LOOKAHEAD_PREVIEW_CAMERA) {
+                    if (!(cameraMode === 'lookahead')) {
                     const nInWin = n.t >= camT0 && n.t <= camT1;
                     const nSusActive = n.t < camT0 && n.t + (n.sus || 0) >= now;
                     if (n.f > 0 && (nInWin || nSusActive)) {
@@ -4594,7 +4607,7 @@
                         // camera frame wider than the notes actually
                         // still on screen (chord-wide maxSus would
                         // over-pullback for mixed-sustain chords).
-                        if (!LOOKAHEAD_PREVIEW_CAMERA) {
+                        if (!(cameraMode === 'lookahead')) {
                         const cnSustainOk = chOnsetInWin || (chSusActive && ch.t + (cn.sus || 0) >= now);
                         if (cn.f > 0 && cnSustainOk) {
                             camWX += xFretMid(cn.f) * chW;
@@ -5102,7 +5115,7 @@
 
             // ── Camera target ─────────────────────────────────────────────
             let lockActive;
-            if (!LOOKAHEAD_PREVIEW_CAMERA) {
+            if (!(cameraMode === 'lookahead')) {
                 lockActive = _applyNoteCamTargets(
                     camWX, camWSum, camDistMin, camDistMax, camDistGot,
                     camHystF, camDistHystF, /* skipDistHyst= */ false);
