@@ -197,6 +197,11 @@
         }
         return idx;
     })();
+    // Three r170's setIndex() only wraps plain Arrays into Uint16BufferAttribute;
+    // typed-array input gets assigned raw onto .index, which trips WebGL's
+    // byteLength check. Convert once at module init so each pooled geometry
+    // reuses the same Array reference instead of allocating per mesh.
+    const SLIDE_RIBBON_INDICES_ARR = Array.from(SLIDE_RIBBON_INDICES);
     const N_RAD = 1.5 * K;
     const SW = 2 * K, SH = 1.5 * K;
 
@@ -325,14 +330,18 @@
     // Last arrangement <anchor> at or before chart time `t` (sorted by .time).
     // Mirrors static/highway.js getAnchorAt — until t reaches the first anchor’s
     // time, the first anchor still defines fret/width.
+    // Binary search: this is called inside per-frame loops (lane slicing,
+    // lookahead sampling, marker spawning), so the linear scan was O(samples *
+    // numAnchors) on dense charts.
     function getChartAnchorAt(anchorArr, t) {
         if (!anchorArr || !anchorArr.length) return null;
-        let a = anchorArr[0];
-        for (const anc of anchorArr) {
-            if (anc.time > t) break;
-            a = anc;
+        let lo = 0, hi = anchorArr.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (anchorArr[mid].time <= t) lo = mid + 1;
+            else hi = mid;
         }
-        return a;
+        return lo === 0 ? anchorArr[0] : anchorArr[lo - 1];
     }
 
     /** @returns {{ dMin: number, dMax: number } | null} */
@@ -641,7 +650,7 @@
         return _bgBandsCache;
     }
 
-    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 4, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
+    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
     const BG_STYLE_IDS = ['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video'];
 
     function _bgPanelKey(canvas) {
@@ -1968,8 +1977,13 @@
         }
 
         function _disposeOpenStringPitchSprites() {
+            // Tuning-label materials are clones of cached txtMat() entries, so
+            // they share the .map (CanvasTexture) with the canonical txtCache
+            // material. Disposing the map here would invalidate every other
+            // material that references the same cached glyph; teardown()'s
+            // txtCache loop is the single owner of those textures.
             for (const m of _tuningLabelMats) {
-                try { m.map?.dispose(); m.dispose(); } catch (_) { /* idempotent */ }
+                try { m.dispose(); } catch (_) { /* idempotent */ }
             }
             _tuningLabelMats = [];
             _tuningLabelSprites = [];
@@ -2839,9 +2853,26 @@
                 const nVert = 4 * (SLIDE_RIBBON_SAMPLES + 1);
                 const g = new T.BufferGeometry();
                 g.setAttribute('position', new T.Float32BufferAttribute(new Float32Array(nVert * 3), 3));
-                // Three r170 only wraps plain Arrays in Uint16BufferAttribute; passing a
-                // TypedArray assigns it raw onto .index — WebGL expects .index.array.byteLength.
-                g.setIndex(Array.from(SLIDE_RIBBON_INDICES));
+                // SLIDE_RIBBON_INDICES_ARR is the plain-Array form (see module-init
+                // comment) shared across pool meshes; setIndex() rewraps it into a
+                // fresh Uint16BufferAttribute per geometry, so the share is safe.
+                g.setIndex(SLIDE_RIBBON_INDICES_ARR);
+                // Static cross-section normals: each ring is an axis-aligned quad,
+                // so vertex normals point radially in the XY plane regardless of
+                // the slide's Z-direction curvature. Pre-fill once and skip the
+                // per-frame computeVertexNormals() pass that previously ran on
+                // every sustained-slide update (Copilot perf finding on PR #215).
+                const SQRT_HALF = Math.SQRT1_2;
+                const normals = new Float32Array(nVert * 3);
+                for (let k = 0; k <= SLIDE_RIBBON_SAMPLES; k++) {
+                    const o = k * 12;
+                    // v0 (-X,-Y), v1 (+X,-Y), v2 (+X,+Y), v3 (-X,+Y)
+                    normals[o]     = -SQRT_HALF; normals[o + 1]  = -SQRT_HALF; normals[o + 2]  = 0;
+                    normals[o + 3] =  SQRT_HALF; normals[o + 4]  = -SQRT_HALF; normals[o + 5]  = 0;
+                    normals[o + 6] =  SQRT_HALF; normals[o + 7]  =  SQRT_HALF; normals[o + 8]  = 0;
+                    normals[o + 9] = -SQRT_HALF; normals[o + 10] =  SQRT_HALF; normals[o + 11] = 0;
+                }
+                g.setAttribute('normal', new T.Float32BufferAttribute(normals, 3));
                 return g;
             };
             pSusRibbon = pool(noteG, () => new T.Mesh(mkSlideRibbonGeo(), mSus[0]));
@@ -4814,7 +4845,7 @@
             // back and ~3 forward in that list, e.g. anchor 7 → 3,5,7,9,12,15).
             // Without anchors, all DOTS positions are candidates; octave + lane
             // clipping apply. With <anchor>, the cadence row ignores both so
-            // trastes before/after the lane still show as reference. Light grey
+            // frets before/after the lane still show as reference. Light grey
             // when that fret is in the active set, dark grey otherwise.
             //
             // Per-wave gate cache: hasLow/hasHigh/fretList snapshotted at first
@@ -5153,7 +5184,8 @@
                 pa[v++] = xc - tw * 0.5; pa[v++] = y + th * 0.5; pa[v++] = zk;
             }
             geom.attributes.position.needsUpdate = true;
-            geom.computeVertexNormals();
+            // Normals are pre-baked at geometry creation (see mkSlideRibbonGeo);
+            // axis-aligned cross-section means they don't need per-frame recompute.
         }
 
         /* ── Note renderer ───────────────────────────────────────────────── */
