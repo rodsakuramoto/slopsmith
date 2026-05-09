@@ -148,9 +148,12 @@
 
     const AHEAD = 3.0;
     const BEHIND = 0.5;
-    // Sample [now, now+AHEAD] into this many strips; each strip’s <anchor>
-    // comes from the chart time at that depth so far-downstage lane can show
-    // the next window before the hit line crosses the anchor time.
+    // Sample approach offsets dt in [0, AHEAD] into strips. Lane quads use
+    // z = dZ(dt) + TS*BEHIND = TS*(BEHIND - dt), while notes use z = dZ(n.t-now).
+    // So note hit line (z=0) aligns with dt=BEHIND, not dt=0. Chart time at
+    // lane parameter dt is now + dt - BEHIND (same z as a note at that time).
+    // Each strip’s <anchor> uses that chart time so the blue lane doesn’t
+    // switch ~BEHIND seconds before the XML <anchor time="…"/>.
     const HWY_LANE_TIME_SLICES = 96;
     const TS = 200 * K;
 
@@ -4191,7 +4194,7 @@
                     for (let k = 0; k < HWY_LANE_TIME_SLICES; k++) {
                         const dt0 = k * sliceDt;
                         const dt1 = (k + 1) * sliceDt;
-                        const tC = now + (dt0 + dt1) * 0.5;
+                        const tC = now + (dt0 + dt1) * 0.5 - BEHIND;
                         const b = laneBoundsFromAnchor(getChartAnchorAt(anchors, tC));
                         if (!b) continue;
                         const z0 = dZ(dt0) + TS * BEHIND;
