@@ -443,11 +443,12 @@
             class="w-24 bg-dark-700 border border-gray-800 rounded-lg px-3 py-2 text-xs text-gray-300 outline-none">
         <p class="text-[10px] text-gray-500 mt-1">
             How often a row of fret-number reference markers slides down
-            the highway floor as a visual cue mapping each X position to
-            its fret number. Frets 3, 5, 7, 9, 12 are shown when your
-            playing region is below the octave; 12 and odd frets above
-            are shown when above. Light grey when an upcoming note is in
-            that fret column, dark grey otherwise. Set to 0 to disable.
+            the highway floor. With a chart &lt;anchor&gt;, the row uses the
+            inlay cadence (3,5,7,9,12,15,…) around the anchor fret—about
+            two marker steps back and three forward (e.g. anchor 7 shows
+            3,5,7,9,12,15). Without anchors, every cadence fret is eligible.
+            Light grey when an upcoming note uses that fret column, dark
+            grey otherwise. Set to 0 to disable.
         </p>
     </div>
 

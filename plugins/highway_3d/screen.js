@@ -275,11 +275,34 @@
     const INLAY_LABEL_FRETS = [3, 5, 7, 9, 12, 15, 17, 19, 22, 24]; // 22 not 21: intentional display choice
 
     // Fret-column reference markers: floor-aligned fret-number sprites
-    // that scroll toward the hit line every Nth measure as a visual
-    // cue mapping X position to fret number. Frets 3/5/7/9/12 below
-    // the octave, then odd frets above. 12 is rendered if either side
-    // of the active range is populated.
-    const FRET_COLUMN_MARKER_FRETS = [3, 5, 7, 9, 12, 13, 15, 17, 19, 21, 23];
+    // that scroll toward the hit line every Nth measure. When the chart
+    // has <anchor>, the row uses the inlay cadence (DOTS) around the
+    // anchor fret: two marker positions before and three after the
+    // snapped cadence cell (e.g. anchor fret 7 → 3,5,7,9,12,15).
+    const FRET_COL_MARKER_ANCHOR_BACK = 2;
+    const FRET_COL_MARKER_ANCHOR_FWD = 3;
+
+    /**
+     * @param {number[]} cadence Ascending frets (e.g. DOTS).
+     * @param {number} anchorFret Chart anchor `.fret` (world start fret).
+     * @returns {number[]}
+     */
+    function fretColumnMarkersForAnchor(anchorFret, cadence = DOTS) {
+        const f0 = Math.round(Number(anchorFret));
+        if (!Number.isFinite(f0) || cadence.length === 0) return cadence.slice();
+        let iBest = 0;
+        let dBest = Infinity;
+        for (let i = 0; i < cadence.length; i++) {
+            const d = Math.abs(cadence[i] - f0);
+            if (d < dBest || (d === dBest && cadence[i] < cadence[iBest])) {
+                dBest = d;
+                iBest = i;
+            }
+        }
+        const i0 = Math.max(0, iBest - FRET_COL_MARKER_ANCHOR_BACK);
+        const i1 = Math.min(cadence.length, iBest + FRET_COL_MARKER_ANCHOR_FWD + 1);
+        return cadence.slice(i0, i1);
+    }
 
     // Binary lower-bound: returns the first index i in arr where arr[i].t >= t.
     // Assumes arr is sorted ascending by .t (bundle.notes / bundle.chords always are).
@@ -1522,8 +1545,8 @@
         let _diagEntranceT        = 1.0;
         let _diagLastKey          = null;  // chord identity: name + '|' + frets.join(',')
         // Per-wave cache for fret-column reference markers. Keyed by the
-        // wave's beat timestamp. We snapshot { hasLow, hasHigh } at first
-        // sight of a wave so its render gate stays consistent through the
+        // wave's beat timestamp. We snapshot { hasLow, hasHigh, fretList,
+        // anchorKeyed } at first sight of a wave so its render gate stays consistent through the
         // wave's flight even as activeFrets shifts mid-song. Entries are
         // pruned each frame once their wave has passed `now`.
         let _fretMarkerWaveCache = new Map();
@@ -4702,12 +4725,15 @@
             // ── Fret-column reference markers ─────────────────────────────
             // Every Nth measure, spawn a row of fret-number sprites on the
             // board floor that scroll toward the hit line and vanish at Z=0.
-            // Visual cue mapping X-position on the highway to fret number,
-            // gated by the active-fret range so unused frets don't clutter
-            // the view. Light grey when that fret is currently in the
-            // active set (upcoming notes / cooldown), dark grey otherwise.
+            // With a chart <anchor>, which frets appear follows the inlay
+            // cadence (DOTS) centred on the snapped anchor fret (~2 positions
+            // back and ~3 forward in that list, e.g. anchor 7 → 3,5,7,9,12,15).
+            // Without anchors, all DOTS positions are candidates; octave + lane
+            // clipping apply. With <anchor>, the cadence row ignores both so
+            // trastes before/after the lane still show as reference. Light grey
+            // when that fret is in the active set, dark grey otherwise.
             //
-            // Per-wave gate cache: hasLow/hasHigh is snapshotted at first
+            // Per-wave gate cache: hasLow/hasHigh/fretList snapshotted at first
             // sight of a wave so the render decision stays stable through
             // the wave's full flight. Without this, activeFrets shifting
             // mid-song would drop markers mid-flight (user-reported bug:
@@ -4766,10 +4792,16 @@
                                 }
                             }
                         }
-                        cached = { hasLow, hasHigh };
+                        const anc = anchors && anchors.length ? getChartAnchorAt(anchors, b.time) : null;
+                        const anchorFret = anc != null ? Number(anc.fret) : NaN;
+                        const anchorKeyed = Number.isFinite(anchorFret) && anchorFret >= 0;
+                        const fretList = anchorKeyed
+                            ? fretColumnMarkersForAnchor(anchorFret, DOTS)
+                            : DOTS.slice();
+                        cached = { hasLow, hasHigh, fretList, anchorKeyed };
                         _fretMarkerWaveCache.set(b.time, cached);
                     }
-                    if (!cached.hasLow && !cached.hasHigh) continue;
+                    if (!cached.hasLow && !cached.hasHigh && !cached.anchorKeyed) continue;
 
                     const dt = b.time - now;
                     const z = dZ(dt);
@@ -4778,13 +4810,19 @@
                     // same size at a given Z — no extra world-scale boost.
                     const clipMin = hwyLaneFretClipMin;
                     const clipMax = hwyLaneFretClipMax;
-                    for (const f of FRET_COLUMN_MARKER_FRETS) {
+                    const fretList = cached.fretList || DOTS;
+                    const anchorKeyedRow = !!cached.anchorKeyed;
+                    for (const f of fretList) {
                         let show;
-                        if (f === 12) show = cached.hasLow || cached.hasHigh;
-                        else if (f < 12) show = cached.hasLow;
-                        else show = cached.hasHigh;
+                        if (anchorKeyedRow) {
+                            show = true;
+                        } else {
+                            if (f === 12) show = cached.hasLow || cached.hasHigh;
+                            else if (f < 12) show = cached.hasLow;
+                            else show = cached.hasHigh;
+                        }
                         if (!show) continue;
-                        if (clipMin != null && (f <= clipMin || f > clipMax)) continue;
+                        if (!anchorKeyedRow && clipMin != null && (f <= clipMin || f > clipMax)) continue;
                         const lit = activeFrets.has(f);
                         const color = lit ? '#bbbbbb' : '#666666';
                         const sp = pFretColMarker.get();
