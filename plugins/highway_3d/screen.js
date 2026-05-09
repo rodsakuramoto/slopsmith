@@ -654,7 +654,7 @@
         return _bgBandsCache;
     }
 
-    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
+    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
     const BG_STYLE_IDS = ['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video'];
 
     function _bgPanelKey(canvas) {
@@ -692,7 +692,7 @@
     // means (fall back to default rather than silently flipping to
     // false). Add new boolean keys to BG_DEFAULTS and they pick this
     // up via the dispatch below.
-    const _BG_BOOL_KEYS = new Set(['reactive', 'showFretOnNote', 'cameraLockLow', 'inlayLabelsVisible', 'sectionLabelsOnHighway', 'sectionHudVisible']);
+    const _BG_BOOL_KEYS = new Set(['reactive', 'showFretOnNote', 'cameraLockLow', 'inlayLabelsVisible', 'sectionLabelsOnHighway', 'sectionHudVisible', 'nutHeadstockVisible', 'tuningLabelsVisible']);
     function _bgCoerceBool(val, fallback) {
         if (val === 'true' || val === '1') return true;
         if (val === 'false' || val === '0') return false;
@@ -718,6 +718,12 @@
         if (key === 'cameraMode') {
             if (val === 'classic') val = 'steady';
             return CAMERA_MODE_IDS.includes(val) ? val : BG_DEFAULTS.cameraMode;
+        }
+        if (key === 'nutColor' || key === 'headstockColor') {
+            if (typeof val !== 'string') return BG_DEFAULTS[key];
+            const t = val.trim();
+            if (/^#[0-9a-fA-F]{6}$/.test(t)) return t.toLowerCase();
+            return BG_DEFAULTS[key];
         }
         if (key === 'fretColumnMarkerCadence') {
             const n = parseInt(val, 10);
@@ -783,6 +789,10 @@
         if (s === 'classic') s = 'steady';
         _bgWriteGlobal('cameraMode', s);
     };
+    window.h3dBgSetNutHeadstockVisible = (v) => _bgWriteGlobal('nutHeadstockVisible', !!v);
+    window.h3dBgSetTuningLabelsVisible = (v) => _bgWriteGlobal('tuningLabelsVisible', !!v);
+    window.h3dBgSetNutColor = (v) => _bgWriteGlobal('nutColor', v);
+    window.h3dBgSetHeadstockColor = (v) => _bgWriteGlobal('headstockColor', v);
     window.h3dBgSetTextSize = (v) => _bgWriteGlobal('textSize', v);
     window.h3dBgSetVibrancy = (v) => _bgWriteGlobal('vibrancy', v);
     window.h3dBgSetGlow     = (v) => _bgWriteGlobal('glow', v);
@@ -1685,6 +1695,10 @@
         let sectionHudVisible      = BG_DEFAULTS.sectionHudVisible;
         let sectionHudPosition     = BG_DEFAULTS.sectionHudPosition;
         let sectionHudSize         = BG_DEFAULTS.sectionHudSize;
+        let nutHeadstockVisible    = BG_DEFAULTS.nutHeadstockVisible;
+        let tuningLabelsVisible   = BG_DEFAULTS.tuningLabelsVisible;
+        let nutColor               = BG_DEFAULTS.nutColor;
+        let headstockColor         = BG_DEFAULTS.headstockColor;
         let _vibrancyIdleOp = 0.4  + 0.6  * BG_DEFAULTS.vibrancy;
         let _vibrancyProjOp = 0.15 + 0.35 * BG_DEFAULTS.vibrancy;
         // Custom image asset (issue #19). Data URL is the bytes that
@@ -1754,6 +1768,8 @@
         // place — without this the layer stays at its built-in opacity
         // until the next palette change rebuilds buildBoard().
         let stringLineGlows = [];
+        /** Nut + headstock 3D subtree; visibility toggled from settings without rebuild. */
+        let nutHeadstockGroup = null;
         /** Left edge X of drawable string meshes; updated in buildBoard() at nut / fret junction. */
         let boardStringStartX = fretX(0);
         /** Open-string label column X — over headstock, left of nut (set in buildBoard()). */
@@ -2067,6 +2083,13 @@
 
         function _syncOpenStringPitchLabels(bundle) {
             if (!tuningLblG || !T || !bundle) return;
+            if (!tuningLabelsVisible) {
+                tuningLblG.visible = false;
+                if (_tuningLabelSprites.length) _disposeOpenStringPitchSprites();
+                _lastOpenStringLblSig = '';
+                return;
+            }
+            tuningLblG.visible = true;
             // Cheap-key fast path: compare the inputs that drive the label content
             // against last frame. The signature string + labels array build are
             // both per-frame allocators, so skipping them when nothing changed
@@ -3118,6 +3141,7 @@
             // cached texture map.
             pFretColMarker = pool(lblG, () => new T.Sprite(txtMat('0', '#666666', false, 'noteFret').clone()));
 
+            _bgLoadSettings();
             buildBoard();
 
             // Background animations (#13). Read settings keyed by this
@@ -3125,7 +3149,6 @@
             // in-app settings changes (settings.html via window.h3dBgSet*)
             // so they propagate without a reload. Manual localStorage
             // edits don't fire the pub-sub and require a reload.
-            _bgLoadSettings();
             // Push the freshly-loaded vibrancy/glow values into the
             // materials. _bgLoadSettings only triggers a palette re-apply
             // when the palette ID actually changed, so a fresh-init user
@@ -3134,10 +3157,7 @@
             // slider.
             _applyVibrancy();
             _applyGlow();
-            // buildBoard() ran above with the default inlayLabelsVisible,
-            // before _bgLoadSettings populated the user-stored value.
-            // Sync now so first-frame state matches the stored setting.
-            for (const lbl of _inlayLabels) lbl.visible = inlayLabelsVisible;
+            // inlayLabelsVisible was applied before buildBoard() via _bgLoadSettings.
             bgGroup = new T.Group();
             // Note: renderOrder on a Group is a no-op (Three.js Groups
             // are transforms, not rendered objects, so renderOrder only
@@ -3154,6 +3174,23 @@
                     // Flip visibility on the already-built sprites; no
                     // need to rebuild the board (cheaper, preserves the
                     // shared materials and avoids palette re-apply churn).
+                    for (const lbl of _inlayLabels) lbl.visible = inlayLabelsVisible;
+                    return;
+                }
+                if (changedKey === 'nutHeadstockVisible') {
+                    _bgLoadSettings();
+                    if (nutHeadstockGroup) nutHeadstockGroup.visible = nutHeadstockVisible;
+                    return;
+                }
+                if (changedKey === 'tuningLabelsVisible') {
+                    _bgLoadSettings();
+                    _lastOpenStringLblSig = '';
+                    if (_tuningLabelSprites.length) _disposeOpenStringPitchSprites();
+                    return;
+                }
+                if (changedKey === 'nutColor' || changedKey === 'headstockColor') {
+                    _bgLoadSettings();
+                    if (fretG) buildBoard();
                     for (const lbl of _inlayLabels) lbl.visible = inlayLabelsVisible;
                     return;
                 }
@@ -3367,6 +3404,10 @@
             sectionHudVisible      = _bgReadSetting(panelKey, 'sectionHudVisible');
             sectionHudPosition     = _bgReadSetting(panelKey, 'sectionHudPosition');
             sectionHudSize         = _bgReadSetting(panelKey, 'sectionHudSize');
+            nutHeadstockVisible    = _bgReadSetting(panelKey, 'nutHeadstockVisible');
+            tuningLabelsVisible    = _bgReadSetting(panelKey, 'tuningLabelsVisible');
+            nutColor               = _bgReadSetting(panelKey, 'nutColor');
+            headstockColor         = _bgReadSetting(panelKey, 'headstockColor');
             _vibrancyIdleOp = 0.4  + 0.6  * vibrancy;
             _vibrancyProjOp = 0.15 + 0.35 * vibrancy;
             // Custom image asset is a single GLOBAL slot — bytes are
@@ -3606,15 +3647,26 @@
         }
 
         /* ── Fretboard (static geometry) ────────────────────────────────── */
+        function _h3dHexOrDefault(hexStr, defHex) {
+            const d = defHex || BG_DEFAULTS.nutColor;
+            const s = (typeof hexStr === 'string' && /^#[0-9a-fA-F]{6}$/.test(hexStr.trim()))
+                ? hexStr.trim().toLowerCase()
+                : d;
+            return parseInt(s.slice(1), 16);
+        }
         function buildBoard() {
-            // Dispose before clearing
+            // Dispose before clearing (traverse: nut/headstock may live in a Group).
             while (fretG.children.length) {
                 const child = fretG.children[0];
-                if (child.material && !Array.isArray(child.material) &&
-                    !(child instanceof T.Sprite)) {
-                    child.geometry?.dispose?.();
-                    child.material.dispose?.();
-                }
+                child.traverse((o) => {
+                    if (o instanceof T.Sprite) return;
+                    o.geometry?.dispose?.();
+                    const mat = o.material;
+                    if (mat) {
+                        const mats = Array.isArray(mat) ? mat : [mat];
+                        for (const m of mats) m?.dispose?.();
+                    }
+                });
                 fretG.remove(child);
             }
             stringLines = [];
@@ -3675,10 +3727,9 @@
                 stringLines.push(mesh);
             }
 
-            // Guitar nut + headstock — fresh layout from reference: light maple block
-            // with a smooth convex ramp toward the nut joint; thin off-white nut;
-            // six top notches. All Z < 0 so string plane z=0 stays in front.
+            // Guitar nut + headstock — grouped so visibility + colors are user-tunable.
             {
+                nutHeadstockGroup = new T.Group();
                 const yTopN = Math.max(sY(0), sY(nStr - 1));
                 const yBottomN = Math.min(sY(0), sY(nStr - 1));
                 const yMidN = (yTopN + yBottomN) / 2;
@@ -3692,11 +3743,19 @@
                 const zBack = -1.38 * K;
                 const zJoint = -0.58 * K;
 
+                const nutInt = _h3dHexOrDefault(nutColor, BG_DEFAULTS.nutColor);
+                const hsInt = _h3dHexOrDefault(headstockColor, BG_DEFAULTS.headstockColor);
+                const nutBase = new T.Color(nutInt);
+                const nutHi = nutBase.clone().lerp(new T.Color(0xffffff), 0.14);
+                const nutGro = nutBase.clone().multiplyScalar(0.72);
+                const hsBase = new T.Color(hsInt);
+                const hsDarkC = hsBase.clone().multiplyScalar(0.76);
+
                 const mapleMat = new T.MeshStandardMaterial({
-                    color: 0xd4b48a, roughness: 0.55, metalness: 0.02,
+                    color: hsBase, roughness: 0.55, metalness: 0.02,
                 });
                 const mapleDark = new T.MeshStandardMaterial({
-                    color: 0xa08058, roughness: 0.62, metalness: 0.02,
+                    color: hsDarkC, roughness: 0.62, metalness: 0.02,
                 });
 
                 const coreLen = Math.max(Math.abs(nutRearX - xHeadLeft), 2 * K);
@@ -3707,7 +3766,7 @@
                     mapleDark,
                 );
                 headCore.position.set(coreCX, yMidN, zBack - headCoreD * 0.35);
-                fretG.add(headCore);
+                nutHeadstockGroup.add(headCore);
 
                 const xs = 14;
                 const ys = 12;
@@ -3732,11 +3791,6 @@
                         posR[ri++] = wz;
                     }
                 }
-                // Row stride matches the vertex layout: posR is filled as
-                // (xs+1) i-columns per j-row, so adjacent quads must step by
-                // (xs+1) in j and by 1 in i. The previous (i*row + j) index
-                // pattern stitched non-adjacent vertices and produced a
-                // scrambled headstock ramp surface.
                 const row = xs + 1;
                 for (let j = 0; j < ys; j++) {
                     for (let i = 0; i < xs; i++) {
@@ -3749,16 +3803,16 @@
                 rampGeo.setAttribute('position', new T.BufferAttribute(posR, 3));
                 rampGeo.setIndex(idxR);
                 rampGeo.computeVertexNormals();
-                fretG.add(new T.Mesh(rampGeo, mapleMat));
+                nutHeadstockGroup.add(new T.Mesh(rampGeo, mapleMat));
 
                 const boneMat = new T.MeshStandardMaterial({
-                    color: 0xf5f3f0, roughness: 0.38, metalness: 0.02,
+                    color: nutBase, roughness: 0.38, metalness: 0.02,
                 });
                 const boneTop = new T.MeshStandardMaterial({
-                    color: 0xfaf8f5, roughness: 0.32, metalness: 0.02,
+                    color: nutHi, roughness: 0.32, metalness: 0.02,
                 });
                 const grooveMat = new T.MeshStandardMaterial({
-                    color: 0xbcbab6, roughness: 0.85, metalness: 0,
+                    color: nutGro, roughness: 0.85, metalness: 0,
                 });
 
                 const nutBody = new T.Mesh(
@@ -3766,7 +3820,7 @@
                     boneMat,
                 );
                 nutBody.position.set(nutXC, yMidN, nutZc);
-                fretG.add(nutBody);
+                nutHeadstockGroup.add(nutBody);
 
                 const crownR = nutLenX * 0.52;
                 const crownSeg = new T.CylinderGeometry(
@@ -3780,7 +3834,7 @@
                     yMidN + nutHalfH - 0.02 * K,
                     nutZc + nutD * 0.22,
                 );
-                fretG.add(crown);
+                nutHeadstockGroup.add(crown);
 
                 const slotDrop = 0.11 * K;
                 const slotHalfW = STR_THICK * 1.15;
@@ -3791,8 +3845,10 @@
                         grooveMat,
                     );
                     gr.position.set(nutXC, sY(st), slotZ);
-                    fretG.add(gr);
+                    nutHeadstockGroup.add(gr);
                 }
+                nutHeadstockGroup.visible = nutHeadstockVisible;
+                fretG.add(nutHeadstockGroup);
             }
 
             // Fret wires

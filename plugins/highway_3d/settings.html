@@ -156,6 +156,40 @@
         </p>
     </div>
 
+    <div role="group" aria-labelledby="h3d-fret-look-heading" class="mt-5">
+        <h3 id="h3d-fret-look-heading" class="text-sm font-medium text-gray-400 mb-2">3D Highway — Nut &amp; headstock</h3>
+        <p class="text-xs text-gray-500 mb-3">
+            The 3D neck shows a nut, headstock, and a pitch label per string (from the chart tuning).
+            Turn pieces off or pick colors to match your taste.
+        </p>
+        <div class="flex flex-col gap-3 mt-2">
+            <label class="flex items-start gap-2 text-sm text-gray-300 cursor-pointer">
+                <input type="checkbox" id="h3d-nut-headstock-visible" checked class="mt-1 accent-accent"
+                    onchange="window.h3dBgSetNutHeadstockVisible && window.h3dBgSetNutHeadstockVisible(this.checked)">
+                <span>Show nut &amp; headstock</span>
+            </label>
+            <label class="flex items-start gap-2 text-sm text-gray-300 cursor-pointer">
+                <input type="checkbox" id="h3d-tuning-labels-visible" checked class="mt-1 accent-accent"
+                    onchange="window.h3dBgSetTuningLabelsVisible && window.h3dBgSetTuningLabelsVisible(this.checked)">
+                <span>Show open-string note name per string</span>
+            </label>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-1">
+                <div>
+                    <label for="h3d-nut-color" class="text-xs font-medium text-gray-400 mb-1 block">Nut color</label>
+                    <input type="color" id="h3d-nut-color" value="#f5f3f0"
+                        onchange="window.h3dBgSetNutColor && window.h3dBgSetNutColor(this.value)"
+                        class="h-9 w-full max-w-[12rem] cursor-pointer rounded border border-gray-800 bg-dark-700 p-0.5">
+                </div>
+                <div>
+                    <label for="h3d-headstock-color" class="text-xs font-medium text-gray-400 mb-1 block">Headstock color</label>
+                    <input type="color" id="h3d-headstock-color" value="#d4b48a"
+                        onchange="window.h3dBgSetHeadstockColor && window.h3dBgSetHeadstockColor(this.value)"
+                        class="h-9 w-full max-w-[12rem] cursor-pointer rounded border border-gray-800 bg-dark-700 p-0.5">
+                </div>
+            </div>
+        </div>
+    </div>
+
     <details class="mt-4 rounded-lg border border-gray-800 bg-dark-700/40">
         <summary class="cursor-pointer select-none px-3 py-2 text-xs font-medium text-gray-400 hover:text-gray-200">
             Advanced camera settings
@@ -493,7 +527,7 @@
          no-selection / NaN state. -->
     <script>
         (function () {
-            const DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
+            const DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: false, cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 2, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
             const VALID_STYLES = new Set(['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video']);
             const VALID_PALETTES = new Set(['default', 'neon', 'pastel']);
             const VALID_CAMERA_MODES = new Set(['steady', 'lookahead']);
@@ -584,6 +618,12 @@
                 if (!Number.isFinite(n)) return DEFAULTS.fretColumnMarkerCadence;
                 return Math.max(0, Math.min(16, n));
             }
+            function coerceHex6(v, fallback) {
+                if (typeof v !== 'string') return fallback;
+                const t = v.trim();
+                if (/^#[0-9a-fA-F]{6}$/.test(t)) return t.toLowerCase();
+                return fallback;
+            }
 
             let storedStyle = null, storedI = null, storedR = null, storedPalette = null, storedFretOnNote = null;
             let storedCameraSmoothing = null;
@@ -605,6 +645,10 @@
             let storedSectionHudVisible = null;
             let storedSectionHudPosition = null;
             let storedSectionHudSize = null;
+            let storedNutHeadstockVisible = null;
+            let storedTuningLabelsVisible = null;
+            let storedNutColor = null;
+            let storedHeadstockColor = null;
             try {
                 storedStyle = localStorage.getItem('h3d_bg_style');
                 storedI = localStorage.getItem('h3d_bg_intensity');
@@ -628,6 +672,10 @@
                 storedSectionHudVisible = localStorage.getItem('h3d_bg_sectionHudVisible');
                 storedSectionHudPosition = localStorage.getItem('h3d_bg_sectionHudPosition');
                 storedSectionHudSize = localStorage.getItem('h3d_bg_sectionHudSize');
+                storedNutHeadstockVisible = localStorage.getItem('h3d_bg_nutHeadstockVisible');
+                storedTuningLabelsVisible = localStorage.getItem('h3d_bg_tuningLabelsVisible');
+                storedNutColor = localStorage.getItem('h3d_bg_nutColor');
+                storedHeadstockColor = localStorage.getItem('h3d_bg_headstockColor');
                 storedCustomImageDataUrl = localStorage.getItem('h3d_bg_customImageDataUrl');
                 storedCustomImageName = localStorage.getItem('h3d_bg_customImageName');
                 storedCustomVideoName = localStorage.getItem('h3d_bg_customVideoName');
@@ -681,6 +729,10 @@
             const sectionHudSize = (storedSectionHudSize == null)
                 ? DEFAULTS.sectionHudSize
                 : coerceUnitInterval(storedSectionHudSize, DEFAULTS.sectionHudSize);
+            const nutHeadstockVisible = coerceBool(storedNutHeadstockVisible, DEFAULTS.nutHeadstockVisible);
+            const tuningLabelsVisible = coerceBool(storedTuningLabelsVisible, DEFAULTS.tuningLabelsVisible);
+            const nutColor = coerceHex6(storedNutColor, DEFAULTS.nutColor);
+            const headstockColor = coerceHex6(storedHeadstockColor, DEFAULTS.headstockColor);
             const customImageDataUrl = (typeof storedCustomImageDataUrl === 'string') ? storedCustomImageDataUrl : DEFAULTS.customImageDataUrl;
             const customImageName    = (typeof storedCustomImageName === 'string')    ? storedCustomImageName    : DEFAULTS.customImageName;
             const customVideoName    = (typeof storedCustomVideoName === 'string')    ? storedCustomVideoName    : DEFAULTS.customVideoName;
@@ -717,6 +769,10 @@
             const shpos = document.getElementById('h3d-section-hud-position');
             const shsi  = document.getElementById('h3d-section-hud-size');
             const shslbl= document.getElementById('h3d-section-hud-size-label');
+            const nhv   = document.getElementById('h3d-nut-headstock-visible');
+            const tlv   = document.getElementById('h3d-tuning-labels-visible');
+            const nco   = document.getElementById('h3d-nut-color');
+            const hco   = document.getElementById('h3d-headstock-color');
             const fileInput = document.getElementById('h3d-bg-custom-image-file');
             const clearBtn  = document.getElementById('h3d-bg-custom-image-clear');
             const nameP     = document.getElementById('h3d-bg-custom-image-name');
@@ -738,6 +794,10 @@
             if (tlbl) tlbl.textContent = tiltSmoothing.toFixed(2);
             if (cll)  cll.checked  = cameraLockLow;
             if (cmod) cmod.value   = cameraMode;
+            if (nhv)  nhv.checked  = nutHeadstockVisible;
+            if (tlv)  tlv.checked  = tuningLabelsVisible;
+            if (nco)  nco.value    = nutColor;
+            if (hco)  hco.value    = headstockColor;
             if (lzli) lzli.value = String(cameraLockZoom);
             if (lzlbl) lzlbl.textContent = cameraLockZoom.toFixed(2);
             if (tsi)  tsi.value  = String(textSize);
