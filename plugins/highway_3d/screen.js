@@ -1732,6 +1732,18 @@
         // Open-string tuning labels beside the headstock (issue: per-song tuning).
         let _tuningLabelSprites = [], _tuningLabelMats = [];
         let _lastOpenStringLblSig = '';
+        // Cheap-key cache for _syncOpenStringPitchLabels: skip the expensive
+        // labels-array + signature-string build when the inputs that actually
+        // change the labels haven't changed reference/value since last frame.
+        let _lastSyncTuningRef = undefined;
+        let _lastSyncBundleTuningRef = undefined;
+        let _lastSyncCapo = NaN;
+        let _lastSyncArrIdx = undefined;
+        let _lastSyncPaletteRef = null;
+        let _lastSyncNStr = -1;
+        let _lastSyncTextSizeMul = NaN;
+        let _lastSyncStartX = NaN;
+        let _lastSyncLabelX = NaN;
         // Scratch Color used by _applyVibrancy() to avoid allocating a
         // fresh THREE.Color each time the user drags a slider.
         // Allocated lazily once Three.js is loaded inside initScene().
@@ -2020,8 +2032,44 @@
 
         function _syncOpenStringPitchLabels(bundle) {
             if (!tuningLblG || !T || !bundle) return;
-            const labels = _openStringPitchLabelsForTuning(bundle, bundle.songInfo, nStr);
+            // Cheap-key fast path: compare the inputs that drive the label content
+            // against last frame. The signature string + labels array build are
+            // both per-frame allocators, so skipping them when nothing changed
+            // saves a chunk of GC pressure in the hot render loop.
+            const si = bundle.songInfo;
+            const tunRef = (si && Array.isArray(si.tuning)) ? si.tuning : null;
+            const bundleTunRef = Array.isArray(bundle.tuning) ? bundle.tuning : null;
+            const capo =
+                si && Number.isFinite(si.capo) ? si.capo
+                    : (Number.isFinite(bundle.capo) ? bundle.capo : NaN);
+            const arrIdx = si && si.arrangement_index != null ? si.arrangement_index : undefined;
+            if (
+                _tuningLabelSprites.length === nStr &&
+                _lastSyncTuningRef === tunRef &&
+                _lastSyncBundleTuningRef === bundleTunRef &&
+                Object.is(_lastSyncCapo, capo) &&
+                _lastSyncArrIdx === arrIdx &&
+                _lastSyncPaletteRef === activePalette &&
+                _lastSyncNStr === nStr &&
+                _lastSyncTextSizeMul === _textSizeMul &&
+                _lastSyncStartX === boardStringStartX &&
+                _lastSyncLabelX === boardTuningLabelX
+            ) return;
+            // One of the inputs changed — fall through to the canonical signature
+            // check (catches value-equal-but-different-ref tuning arrays).
+            const labels = _openStringPitchLabelsForTuning(bundle, si, nStr);
             const sig = _openStringLabelSignature(bundle, labels);
+            // Refresh cheap-key cache regardless of signature outcome so future
+            // frames can fast-path even when the sig matched.
+            _lastSyncTuningRef = tunRef;
+            _lastSyncBundleTuningRef = bundleTunRef;
+            _lastSyncCapo = capo;
+            _lastSyncArrIdx = arrIdx;
+            _lastSyncPaletteRef = activePalette;
+            _lastSyncNStr = nStr;
+            _lastSyncTextSizeMul = _textSizeMul;
+            _lastSyncStartX = boardStringStartX;
+            _lastSyncLabelX = boardTuningLabelX;
             if (sig === _lastOpenStringLblSig && _tuningLabelSprites.length === nStr) return;
             _disposeOpenStringPitchSprites();
             _lastOpenStringLblSig = sig;
