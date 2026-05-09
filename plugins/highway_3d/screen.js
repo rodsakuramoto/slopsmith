@@ -1597,6 +1597,13 @@
         // by the scene.traverse-based dispose. Track them here so
         // teardown can dispose them explicitly.
         const _ownedClonedMats = [];
+        // Shared (non-clone) materials and geometries that pool factories
+        // reference but that aren't guaranteed to be reachable via
+        // scene.traverse() — e.g. mLaneEven is only reached if at least one
+        // even-numbered fret stripe ever spawns. Track them here so teardown
+        // disposes the GPU resource regardless.
+        const _ownedSharedMats = [];
+        const _ownedSharedGeos = [];
 
         // Background animation state (issue #13). bgGroup is the parent
         // container for all bg meshes so teardown is one remove + dispose
@@ -1705,6 +1712,9 @@
         // Object pools
         let pNote, pSus, pLbl, pBeat, pSec;
         let pFretLbl, pLane, pLaneDivider;
+        // Shared materials/geometry for the lane stripes — see initScene().
+        // Hoisted so draw() can reference them when assigning per-stripe.
+        let mLaneOdd = null, mLaneEven = null, gLanePlane = null;
         let pChordBox, pChordFrameFill, pChordLbl, pBarreLine;
         let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron;
         let pSusRibbon = null, pSusRibbonOl = null;
@@ -2981,11 +2991,25 @@
             // Dynamic fret number labels (heat-coloured, updated each frame)
             pFretLbl = pool(lblG, () => new T.Sprite(txtMat('0', '#888', false, 'fretRow')));
 
-            // Highlight lane plane over active fret range
-            pLane = pool(noteG, () => new T.Mesh(
-                new T.PlaneGeometry(1, 1),
-                new T.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false }),
-            ));
+            // Highlight lane plane over active fret range. With the anchor-driven
+            // segmented lanes we render up to fret-count × HWY_LANE_TIME_SLICES (96)
+            // pLane meshes per frame, so:
+            //   - geometry is a shared PlaneGeometry(1,1) (was per-mesh, never differed)
+            //   - 2 shared MeshBasicMaterials (odd / even stripe colour) replace the
+            //     per-mesh material clones; the per-frame opacity still travels via
+            //     the materials but is set once outside the inner loop, not per-mesh.
+            gLanePlane = new T.PlaneGeometry(1, 1);
+            mLaneOdd = new T.MeshBasicMaterial({
+                color: HWY_LANE_STRIPE_ODD_HEX, transparent: true, opacity: 0, depthWrite: false,
+            });
+            mLaneEven = new T.MeshBasicMaterial({
+                color: HWY_LANE_STRIPE_EVEN_HEX, transparent: true, opacity: 0, depthWrite: false,
+            });
+            // Tracked for explicit disposal in teardown — these materials may
+            // not be reachable via scene.traverse() if no lane was ever rendered.
+            _ownedSharedMats.push(mLaneOdd, mLaneEven);
+            _ownedSharedGeos.push(gLanePlane);
+            pLane = pool(noteG, () => new T.Mesh(gLanePlane, mLaneOdd));
 
             // Vertical fret dividers within active lane
             const gLaneDivider = new T.BoxGeometry(0.15 * K, 0.15 * K, 1);
@@ -4406,7 +4430,14 @@
                 // each frame, even though the render loop already iterates the
                 // full array. We compute runSig inline once per chord and reuse
                 // it for both first-in-run detection and isRepeat below.
+                // SHAPE_RUN_GAP_S also resets the run when the time gap from
+                // the previous chord exceeds the same 0.5 s window used for
+                // isRepeat — a chord shape that re-appears after a real
+                // musical gap should re-show its label, not be treated as a
+                // continuing run from many bars ago.
+                const SHAPE_RUN_GAP_S = 0.5;
                 let runSigPrev = null;
+                let prevAnyChordTime = -Infinity;
                 let prevChordSig = null;
                 let prevChordTime = -1;
 
@@ -4417,9 +4448,11 @@
                     if (runSig === null) {
                         firstInShapeRun = true;
                     } else {
-                        firstInShapeRun = runSig !== runSigPrev;
+                        const gap = ch.t - prevAnyChordTime;
+                        firstInShapeRun = (runSig !== runSigPrev) || gap > SHAPE_RUN_GAP_S;
                         runSigPrev = runSig;
                     }
+                    prevAnyChordTime = ch.t;
                     if (!ch.notes) continue;
                     // Filter chord notes to in-range strings once. All
                     // chord-level aggregations (maxSus, repeat-chord
@@ -4737,24 +4770,28 @@
                             merged.push({ b: r.b, z0: r.z0, z1: r.z1 });
                         }
                     }
-                    for (const seg of merged) {
-                        const stripLen = Math.max(Math.abs(seg.z1 - seg.z0), 1e-6);
-                        const zc = (seg.z0 + seg.z1) * 0.5;
-                        const fLow = seg.b.dMin + 1;
-                        const fHi = seg.b.dMax;
+                    {
                         const laneOp = HWY_LANE_STRIPE_OP_BASE + highwayIntensity * HWY_LANE_STRIPE_OP_INT;
-                        for (let f = fLow; f <= fHi; f++) {
-                            const xl = xFret(f - 1), xr = xFret(f);
-                            const laneW = Math.abs(xr - xl);
-                            const lane = pLane.get();
-                            lane.position.set((xl + xr) * 0.5, boardY + 0.02 * K, zc);
-                            lane.rotation.x = -Math.PI / 2;
-                            lane.scale.set(laneW, stripLen, 1);
-                            lane.material.opacity = laneOp;
-                            const odd = ((f - fLow) & 1) === 0;
-                            lane.material.color.setHex(
-                                odd ? HWY_LANE_STRIPE_ODD_HEX : HWY_LANE_STRIPE_EVEN_HEX);
-                            lane.renderOrder = 1;
+                        // 2 shared materials (odd/even); opacity travels via the
+                        // material so set it once per frame, not per mesh.
+                        mLaneOdd.opacity = laneOp;
+                        mLaneEven.opacity = laneOp;
+                        for (const seg of merged) {
+                            const stripLen = Math.max(Math.abs(seg.z1 - seg.z0), 1e-6);
+                            const zc = (seg.z0 + seg.z1) * 0.5;
+                            const fLow = seg.b.dMin + 1;
+                            const fHi = seg.b.dMax;
+                            for (let f = fLow; f <= fHi; f++) {
+                                const xl = xFret(f - 1), xr = xFret(f);
+                                const laneW = Math.abs(xr - xl);
+                                const lane = pLane.get();
+                                lane.position.set((xl + xr) * 0.5, boardY + 0.02 * K, zc);
+                                lane.rotation.x = -Math.PI / 2;
+                                lane.scale.set(laneW, stripLen, 1);
+                                const odd = ((f - fLow) & 1) === 0;
+                                lane.material = odd ? mLaneOdd : mLaneEven;
+                                lane.renderOrder = 1;
+                            }
                         }
                     }
 
@@ -4809,6 +4846,8 @@
                     const laneLen = TS * AHEAD;
                     const zLane = -laneLen / 2 + TS * BEHIND;
                     const laneOp = HWY_LANE_STRIPE_OP_BASE + highwayIntensity * HWY_LANE_STRIPE_OP_INT;
+                    mLaneOdd.opacity = laneOp;
+                    mLaneEven.opacity = laneOp;
                     const fLow = dMin + 1;
                     const fHi = dMax;
                     for (let f = fLow; f <= fHi; f++) {
@@ -4818,10 +4857,8 @@
                         lane.position.set((xl + xr) / 2, boardY + 0.02 * K, zLane);
                         lane.rotation.x = -Math.PI / 2;
                         lane.scale.set(laneWStrip, laneLen, 1);
-                        lane.material.opacity = laneOp;
                         const odd = ((f - fLow) & 1) === 0;
-                        lane.material.color.setHex(
-                            odd ? HWY_LANE_STRIPE_ODD_HEX : HWY_LANE_STRIPE_EVEN_HEX);
+                        lane.material = odd ? mLaneOdd : mLaneEven;
                         lane.renderOrder = 1;
                     }
 
@@ -5752,6 +5789,13 @@
             // them at allocation time.
             for (const m of _ownedClonedMats) m?.dispose?.();
             _ownedClonedMats.length = 0;
+            // Shared pool-factory materials/geometries (mLaneOdd/Even, etc.) —
+            // see _ownedSharedMats comment near the declaration. Dispose is
+            // idempotent so the scene.traverse() pass above won't double-free.
+            for (const m of _ownedSharedMats) m?.dispose?.();
+            _ownedSharedMats.length = 0;
+            for (const g of _ownedSharedGeos) g?.dispose?.();
+            _ownedSharedGeos.length = 0;
             txtCache = {};
             if (ren) { ren.dispose(); ren = null; }
             scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
@@ -5780,6 +5824,7 @@
             mBeatM = mBeatQ = null;
             pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
             pFretLbl = pLane = pLaneDivider = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = null;
+            mLaneOdd = mLaneEven = gLanePlane = null;
             chordFrameGradTex = null;
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
