@@ -4560,7 +4560,10 @@
             // require nearby notes (activeFrets) or camera-driven activity.
             const hasChartAnchors = anchors && anchors.length;
             if (hasChartAnchors || activeFrets.size > 0) {
-                const margin = NW * 0.5;
+                // Horizontal padding for the highway lane quad. Charts with
+                // <anchor> intentionally use zero: the tint must span exactly
+                // dMin→dMax (playing frets) without bleeding past fret wires.
+                const margin = hasChartAnchors ? 0 : NW * 0.5;
                 const boardY = S_BASE - NH / 2 - 2 * K;
 
                 if (hasChartAnchors) {
