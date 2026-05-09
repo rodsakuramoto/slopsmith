@@ -1608,6 +1608,8 @@
         let _ghostLblTowardCam = null;
         /** Snapshotted in update() for drawNote() ghost / glow (single source vs per-caller isNext). */
         let _drawNextByString = null;
+        /** Snapshotted in update() — drawNote() is a sibling of update(), not nested in its closure. */
+        let _drawChordTemplates = null;
         let _laneTargetColor = null;
         let _renderScale = 1;
         let lyricsCanvas = null, lyricsCtx = null;
@@ -4400,6 +4402,7 @@
             }
 
             _drawNextByString = nextNoteByString;
+            _drawChordTemplates = bundle.chordTemplates ?? null;
 
             // Ramp strGlow while the board ghost is visible so the flying note
             // core + rim read as one solid string-coloured shape with proj.
@@ -4642,7 +4645,7 @@
                         if (ab) singleOpenX = (xFret(ab.dMin) + xFret(ab.dMax)) / 2;
                     }
                     const singleOpenLaneW = n.f === 0 ? openNoteLaneBoxW(n.t) : undefined;
-                    drawNote(n, now, singleOpenX, isNext, skipLabel, false, 0.05, singleOpenLaneW, false);
+                    drawNote(n, now, singleOpenX, isNext, skipLabel, false, 0.05, singleOpenLaneW, false, undefined);
                     lastFretForString[n.s] = n.f;
                     // Onset in window OR started before the window but
                     // still sustaining right now. Gate sustain carry-over
@@ -4822,6 +4825,7 @@
                             DIAG_LINGER_S,
                             cn.f === 0 ? laneWForOpenStrings : undefined,
                             true,
+                            ch.id,
                         );
                         lastFretForString[cn.s] = cn.f;
                         // gate by THIS note's own sustain against the
@@ -5578,9 +5582,20 @@
         }
 
         /* ── Note renderer ───────────────────────────────────────────────── */
+        // Rocksmith <chordTemplates> frets: -1 = unused, 0 = open, n>0 = fret.
+        // Ghost digit for chord notes uses the template row when present so it
+        // matches the XML diagram, not a divergent chordNote.f if any.
+        function _templateFretForChordGhost(chordId, stringIdx, noteFret) {
+            if (chordId == null || !Number.isFinite(chordId)) return noteFret;
+            const fr = _drawChordTemplates?.[chordId]?.frets;
+            if (!Array.isArray(fr) || stringIdx < 0 || stringIdx >= fr.length) return noteFret;
+            const tf = fr[stringIdx];
+            if (typeof tf !== 'number' || tf < 0) return noteFret;
+            return tf;
+        }
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
-        function drawNote(n, now, openX, _isNextLegacy, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false) {
+        function drawNote(n, now, openX, _isNextLegacy, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false, chordId) {
             const s = n.s;
             // Belt + suspenders: callers already gate via validString(),
             // but drawNote is also entered through { ...cn } chord-note
@@ -5911,7 +5926,10 @@
                     // Flat Mesh in the board XY plane (same as proj), not a Sprite billboard,
                     // so perspective + projRim match the 3D ghost frame.
                     const lb = pGhostFretLbl.get();
-                    const sprMat = txtMat(n.f, '#ffffff', false, 'noteFret');
+                    const ghostFretDisplay = fromChord
+                        ? _templateFretForChordGhost(chordId, n.s, n.f)
+                        : n.f;
+                    const sprMat = txtMat(ghostFretDisplay, '#ffffff', false, 'noteFret');
                     lb.material = _meshMatForGhostFretDigit(sprMat);
                     const ghostOuterL = Math.max(NW * 1.1, NH * 1.1);
                     const ghostLblS = 0.7 * ghostOuterL * _textSizeMul;
@@ -6118,6 +6136,7 @@
             _probe = null;
             _ghostLblBox = _ghostLblMid = _ghostLblTowardCam = null;
             _drawNextByString = null;
+            _drawChordTemplates = null;
             _laneTargetColor = null;
             _renderScale = 1;
             mBeatM = mBeatQ = null;
