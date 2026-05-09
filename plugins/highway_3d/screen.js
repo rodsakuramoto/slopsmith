@@ -3980,6 +3980,32 @@
                         if (fretted > 0) chordCX = (cxL + cxR) / 2;
                     }
 
+                    // Horizontals for chord frame + max width for open-string meshes
+                    // (same outer width as pChordBox, including padX).
+                    let chordFrameXL = null, chordFrameXR = null, chordOpenBoxW = null;
+                    if (chordNotes.length > 1) {
+                        if (chAncB) {
+                            chordFrameXL = fretX(chAncB.dMin);
+                            chordFrameXR = fretX(chAncB.dMax);
+                        } else {
+                            let fMinCh = 99, fMaxCh = 0;
+                            for (const cn of chordNotes) {
+                                if (cn.f > 0) {
+                                    fMinCh = Math.min(fMinCh, cn.f);
+                                    fMaxCh = Math.max(fMaxCh, cn.f);
+                                }
+                            }
+                            if (fMinCh < 99) {
+                                chordFrameXL = fretX(fMinCh - 1);
+                                chordFrameXR = fretX(Math.max(fMaxCh, fMinCh + 2));
+                            }
+                        }
+                        if (chordFrameXL != null && chordFrameXR != null && chordFrameXR > chordFrameXL) {
+                            const padX = NW * 0.4;
+                            chordOpenBoxW = (chordFrameXR - chordFrameXL) + padX * 2;
+                        }
+                    }
+
                     // Onset in window OR chord started before the window
                     // but is still sustaining right now. Gate sustain
                     // carry-over against the current frame time so camera
@@ -3996,7 +4022,16 @@
                     for (const cn of chordNotes) {
                         const isNext = nextNoteByString[cn.s] && Math.abs(nextNoteByString[cn.s].t - ch.t) < 0.001;
                         const skipLabel = lastFretForString[cn.s] === cn.f;
-                        drawNote({ ...cn, t: ch.t, sus: cn.sus || 0 }, now, cn.f === 0 ? chordCX : undefined, isNext, skipLabel, isRepeat, DIAG_LINGER_S);
+                        drawNote(
+                            { ...cn, t: ch.t, sus: cn.sus || 0 },
+                            now,
+                            cn.f === 0 ? chordCX : undefined,
+                            isNext,
+                            skipLabel,
+                            isRepeat,
+                            DIAG_LINGER_S,
+                            cn.f === 0 ? chordOpenBoxW : undefined,
+                        );
                         lastFretForString[cn.s] = cn.f;
                         // gate by THIS note's own sustain against the
                         // current render time — drawNote has already
@@ -4015,33 +4050,14 @@
                         }
                     }
 
-                    // Chord frame-box — width/position from <anchor> when available
-                    // (same as dynamic highway), else from fretted span.
+                    // Chord frame-box — same chordFrameXL/XR/chordOpenBoxW as open-string cap.
                     const chDt = ch.t - now;
-                    if (chordNotes.length > 1 && chDt > -DIAG_LINGER_S && chDt < AHEAD) {
+                    if (chordNotes.length > 1 && chDt > -DIAG_LINGER_S && chDt < AHEAD && chordOpenBoxW != null) {
                         const z = Math.min(0, dZ(chDt));
-                        let xLeft, xRight;
-                        if (chAncB) {
-                            xLeft = fretX(chAncB.dMin);
-                            xRight = fretX(chAncB.dMax);
-                        } else {
-                            let fMinCh = 99, fMaxCh = 0;
-                            for (const cn of chordNotes) {
-                                if (cn.f > 0) {
-                                    fMinCh = Math.min(fMinCh, cn.f);
-                                    fMaxCh = Math.max(fMaxCh, cn.f);
-                                }
-                            }
-                            if (fMinCh >= 99) xLeft = xRight = 0; // sentinel, skipped below
-                            else {
-                                xLeft = fretX(fMinCh - 1);
-                                xRight = fretX(Math.max(fMaxCh, fMinCh + 2));
-                            }
-                        }
-                        if (xLeft !== undefined && xRight !== undefined && xRight > xLeft) {
-                            const padX = NW * 0.4;
-                            const width = (xRight - xLeft) + padX * 2;
-                            const cx = xLeft + width / 2 - padX;
+                        const width = chordOpenBoxW;
+                        const xLeft = chordFrameXL;
+                        const xRight = chordFrameXR;
+                        const cx = (xLeft + xRight) * 0.5;
                             const yA = sY(0), yB = sY(nStr - 1);
                             const yMinF = Math.min(yA, yB) - S_GAP * 0.8;
                             const yMaxF = Math.max(yA, yB) + S_GAP * 0.8;
@@ -4145,7 +4161,6 @@
                                     }
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -4620,7 +4635,7 @@
         /* ── Note renderer ───────────────────────────────────────────────── */
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
-        function drawNote(n, now, openX, isNext, skipLabel, skipBody, linger = 0.05) {
+        function drawNote(n, now, openX, isNext, skipLabel, skipBody, linger = 0.05, openChordBoxWidth) {
             const s = n.s;
             // Belt + suspenders: callers already gate via validString(),
             // but drawNote is also entered through { ...cn } chord-note
@@ -4640,6 +4655,13 @@
             const noteZ = sustained ? 0 : Math.min(0, dZ(dt));
             const x = n.f === 0 ? (openX !== undefined ? openX : curX) : fretMid(n.f);
             const isHarm = n.hm || n.hp;
+
+            // Open chord notes: wide default mesh is capped to chord frame width.
+            const OPEN_NOTE_WORLD_W = 40 * K;
+            let openWScale = 1;
+            if (n.f === 0 && openChordBoxWidth != null && openChordBoxWidth > 1e-8) {
+                openWScale = Math.min(1, (openChordBoxWidth * 0.96) / OPEN_NOTE_WORLD_W);
+            }
 
             if (!skipBody) {
                 // Rotate from vertical (π/2) when entering to horizontal (0) at the hit line; skip for open strings
@@ -4690,7 +4712,7 @@
                 outline.position.set(x, y + vibrato, noteZ);
                 outline.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
-                    outline.scale.set((35 * K / NW) * 1.1, 0.1 * 1.1, 0.6 * 1.1);
+                    outline.scale.set((35 * K / NW) * 1.1 * openWScale, 0.1 * 1.1, 0.6 * 1.1);
                 } else {
                     outline.scale.set(1.1, 1.1, 2.8);
                 }
@@ -4701,7 +4723,7 @@
                 core.position.set(x, y + vibrato, noteZ + 0.001);
                 core.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
-                    core.scale.set(40 * K / NW, 0.1, 0.6);
+                    core.scale.set((40 * K / NW) * openWScale, 0.1, 0.6);
                 } else {
                     core.scale.set(1, 1, 2.5);
                 }
@@ -4709,7 +4731,7 @@
                     // "0" label on open string
                     const lb = pLbl.get();
                     lb.material = txtMat(0, hit ? '#fff' : '#ddd', false, 'open');
-                    lb.scale.set(NW * 0.7 * _textSizeMul, NH * 0.8 * _textSizeMul, 1);
+                    lb.scale.set(NW * 0.7 * _textSizeMul * openWScale, NH * 0.8 * _textSizeMul * openWScale, 1);
                     lb.position.set(x, y + vibrato, noteZ + 0.01 * K);
                 } else if (showFretOnNote && n.f > 0) {
                     // Embedded fret number on the note body (issue #12).
@@ -4739,14 +4761,28 @@
                     if (remSus > 0.01) {
                         const len = Math.min(remSus, AHEAD) * TS;
                         const zPos = dZ(susStart - now) - len / 2;
-                        const tw = NW * 0.85, th = NH * 0.12;
+                        const tw = NW * 0.85 * (n.f === 0 ? openWScale : 1);
+                        const th = NH * 0.12 * (n.f === 0 ? openWScale : 1);
                         // Open strings get two parallel trails offset along
                         // X — visually echoes the wide flat open-note body.
                         // Fretted notes keep the single-trail path. Offsets
                         // arrays are module-scoped (see OPEN_SUS_OFFSETS /
                         // SINGLE_SUS_OFFSETS) so this hot path doesn't
                         // allocate per call.
-                        const offsets = n.f === 0 ? OPEN_SUS_OFFSETS : SINGLE_SUS_OFFSETS;
+                        let offsets;
+                        if (n.f === 0) {
+                            if (openChordBoxWidth != null && openChordBoxWidth > 1e-8) {
+                                const boxHalf = openChordBoxWidth * 0.48;
+                                const baseOff = NW * 3 * openWScale;
+                                const maxOff = Math.max(0, boxHalf - tw * 0.5 - 0.25 * K);
+                                const xOffMag = Math.min(baseOff, maxOff);
+                                offsets = xOffMag > 0.12 * K ? [-xOffMag, xOffMag] : [0];
+                            } else {
+                                offsets = OPEN_SUS_OFFSETS;
+                            }
+                        } else {
+                            offsets = SINGLE_SUS_OFFSETS;
+                        }
                         for (let i = 0; i < offsets.length; i++) {
                             const xOff = x + offsets[i];
                             const trOut = pSusOutline.get();
