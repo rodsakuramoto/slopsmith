@@ -1699,6 +1699,14 @@
             return notes;
         }
 
+        /** Normalized fingering signature for chord repeat-run detection, or null. */
+        function chordShapeSignature(ch) {
+            if (!ch?.notes) return null;
+            const chordNotes = filterValidNotes(ch.notes);
+            if (chordNotes.length === 0) return null;
+            return chordNotes.slice().sort((a, b) => a.s - b.s).map(n => `${n.s}:${n.f}`).join('|');
+        }
+
         // Camera state
         let tgtX = fretMid(CAM_LOCK_CENTER_FRET), curX = fretMid(CAM_LOCK_CENTER_FRET);
         let tgtDist = CAM_DIST_BASE, curDist = CAM_DIST_BASE;
@@ -4124,10 +4132,26 @@
 
             // ── Chords ────────────────────────────────────────────────────
             if (chords) {
+                const chordFirstInShapeRun = new Array(chords.length);
+                {
+                    let prevRunSig = null;
+                    for (let ciPre = 0; ciPre < chords.length; ciPre++) {
+                        const runSig = chordShapeSignature(chords[ciPre]);
+                        if (runSig === null) {
+                            chordFirstInShapeRun[ciPre] = true;
+                            continue;
+                        }
+                        chordFirstInShapeRun[ciPre] = runSig !== prevRunSig;
+                        prevRunSig = runSig;
+                    }
+                }
+
                 let prevChordSig = null;
                 let prevChordTime = -1;
 
-                for (const ch of chords) {
+                for (let ci = 0; ci < chords.length; ci++) {
+                    const ch = chords[ci];
+                    const firstInShapeRun = chordFirstInShapeRun[ci];
                     if (!ch.notes) continue;
                     // Filter chord notes to in-range strings once. All
                     // chord-level aggregations (maxSus, repeat-chord
@@ -4150,9 +4174,9 @@
                     for (const n of chordNotes) if ((n.sus || 0) > maxSus) maxSus = n.sus;
                     if (ch.t + maxSus < t0 || ch.t > t1) continue;
 
-                    // Repeat-chord detection (consecutive same shape)
-                    const currentSig = chordNotes.slice().sort((a, b) => a.s - b.s).map(n => `${n.s}:${n.f}`).join('|');
-                    const isRepeat = prevChordSig === currentSig && Math.abs(ch.t - prevChordTime) < 0.5;
+                    // Repeat-chord detection (consecutive same shape, short gap)
+                    const currentSig = chordShapeSignature(ch);
+                    const isRepeat = currentSig != null && prevChordSig === currentSig && Math.abs(ch.t - prevChordTime) < 0.5;
                     prevChordSig = currentSig;
                     prevChordTime = ch.t;
 
@@ -4215,7 +4239,7 @@
                     const chW          = chWindowed ? Math.exp(-Math.abs(ch.t - now) / camTau) : 0;
                     for (const cn of chordNotes) {
                         const isNext = nextNoteByString[cn.s] && Math.abs(nextNoteByString[cn.s].t - ch.t) < 0.001;
-                        const skipLabel = lastFretForString[cn.s] === cn.f;
+                        const skipLabel = !firstInShapeRun || lastFretForString[cn.s] === cn.f;
                         drawNote(
                             { ...cn, t: ch.t, sus: cn.sus || 0 },
                             now,
@@ -4276,23 +4300,25 @@
 
                             const chordName = bundle.chordTemplates?.[ch.id]?.name;
                             if (chordName) {
-                                const postFade = chDt < 0 ? Math.max(0, 1 + chDt / DIAG_LINGER_S) : 1;
-                                const lblW = 28 * K, lblH = 9 * K;
-                                const lbl = pChordLbl.get();
-                                const mat = txtMat(chordName, '#e8d080', true, 'chord');
-                                if (lbl.material.map !== mat.map) { lbl.material.map = mat.map; lbl.material.needsUpdate = true; }
-                                lbl.material.opacity = Math.min(1, 0.3 + fade * 0.7) * postFade;
-                                // Use the post-scale half-extents so the label's
-                                // left edge stays anchored to the chord-frame's
-                                // left edge and its bottom edge stays anchored
-                                // to the frame's top edge at any _textSizeMul.
-                                // Sprites scale around their centre, so positions
-                                // computed from unscaled extents drift left/down
-                                // as textSize grows.
-                                const lblWS = lblW * _textSizeMul;
-                                const lblHS = lblH * _textSizeMul;
-                                lbl.position.set((cx - width / 2) + lblWS / 2, yMaxF + lblHS / 2, z);
-                                lbl.scale.set(lblWS, lblHS, 1);
+                                if (firstInShapeRun) {
+                                    const postFade = chDt < 0 ? Math.max(0, 1 + chDt / DIAG_LINGER_S) : 1;
+                                    const lblW = 28 * K, lblH = 9 * K;
+                                    const lbl = pChordLbl.get();
+                                    const mat = txtMat(chordName, '#e8d080', true, 'chord');
+                                    if (lbl.material.map !== mat.map) { lbl.material.map = mat.map; lbl.material.needsUpdate = true; }
+                                    lbl.material.opacity = Math.min(1, 0.3 + fade * 0.7) * postFade;
+                                    // Use the post-scale half-extents so the label's
+                                    // left edge stays anchored to the chord-frame's
+                                    // left edge and its bottom edge stays anchored
+                                    // to the frame's top edge at any _textSizeMul.
+                                    // Sprites scale around their centre, so positions
+                                    // computed from unscaled extents drift left/down
+                                    // as textSize grows.
+                                    const lblWS = lblW * _textSizeMul;
+                                    const lblHS = lblH * _textSizeMul;
+                                    lbl.position.set((cx - width / 2) + lblWS / 2, yMaxF + lblHS / 2, z);
+                                    lbl.scale.set(lblWS, lblHS, 1);
+                                }
 
                                 // Shape-based barre detection for the 3D indicator.
                                 // Matches drawChordDiagram PATH A + PATH B so the highway
