@@ -4121,11 +4121,14 @@
             let hwyLaneFretClipMin = null, hwyLaneFretClipMax = null;
 
             // ── Dynamic highway lane ──────────────────────────────────────
-            if (activeFrets.size > 0) {
+            // Chart <anchor> tags drive the lane whenever they exist — do not
+            // require nearby notes (activeFrets) or camera-driven activity.
+            const hasChartAnchors = anchors && anchors.length;
+            if (hasChartAnchors || activeFrets.size > 0) {
                 const margin = NW * 0.5;
                 const boardY = S_BASE - NH / 2 - 2 * K;
 
-                if (anchors && anchors.length) {
+                if (hasChartAnchors) {
                     const nearB = laneBoundsFromAnchor(getChartAnchorAt(anchors, now));
                     if (nearB) {
                         hwyLaneFretClipMin = nearB.dMin;
@@ -4163,12 +4166,13 @@
                         lane.rotation.x = -Math.PI / 2;
                         lane.scale.set(laneW, stripLen, 1);
                         lane.material.opacity = 0.04 + highwayIntensity * 0.13;
-                        lane.material.color.set(0x112233).lerp(_laneTargetColor, highwayIntensity);
+                        if (_laneTargetColor) lane.material.color.copy(_laneTargetColor);
                         lane.renderOrder = 1;
                     }
 
-                    if (highwayIntensity > 0.05) {
+                    {
                         const yPos = boardY + 0.03 * K;
+                        const divOp = 0.02 + highwayIntensity * 0.1;
                         for (const seg of merged) {
                             const dz = Math.max(Math.abs(seg.z1 - seg.z0), 1e-6);
                             const zMid = (seg.z0 + seg.z1) * 0.5;
@@ -4176,7 +4180,7 @@
                                 const div = pLaneDivider.get();
                                 div.position.set(fretX(f), yPos, zMid);
                                 div.scale.set(1, 1, dz);
-                                div.material.opacity = 0.02 + highwayIntensity * 0.1;
+                                div.material.opacity = divOp;
                                 div.renderOrder = 2;
                             }
                         }
@@ -4224,7 +4228,7 @@
                     lane.rotation.x = -Math.PI / 2;
                     lane.scale.set(laneW, laneLen, 1);
                     lane.material.opacity = 0.04 + highwayIntensity * 0.13;
-                    lane.material.color.set(0x112233).lerp(_laneTargetColor, highwayIntensity);
+                    if (_laneTargetColor) lane.material.color.copy(_laneTargetColor);
                     lane.renderOrder = 1;
 
                     if (highwayIntensity > 0.05) {
