@@ -2634,55 +2634,69 @@ let _resetJuceAudioShimChain = function () {};
     /** Same-tick pause + seek (Section Map): coalesce to one seek — no stopBacking before seek. */
     let _juceShimBatch = null;
     let _juceShimBatchFlushScheduled = false;
+    let _juceShimGen = 0;
     function enqueue(fn) {
-        const p = chain.then(fn);
+        const gen = _juceShimGen;
+        const p = chain.then(async () => {
+            if (gen !== _juceShimGen) return;
+            return fn();
+        });
         chain = p.catch((e) => {
             console.warn('[juce-audio-shim]', e);
         });
         return p;
     }
+    function flushJuceShimBatchNow() {
+        _juceShimBatchFlushScheduled = false;
+        const batch = _juceShimBatch;
+        _juceShimBatch = null;
+        if (!batch || !window._juceMode) return;
+        const wantsPause = !!batch.wantsPause;
+        const seekTime = batch.seekTime;
+        if (wantsPause && seekTime !== undefined) {
+            enqueue(async () => {
+                await jucePlayer.seek(seekTime);
+                audio.dispatchEvent(new Event('seeked'));
+            });
+            return;
+        }
+        if (wantsPause) {
+            enqueue(async () => {
+                await jucePlayer.pause();
+                isPlaying = false;
+                document.getElementById('btn-play').textContent = '▶ Play';
+                const sm = window.slopsmith;
+                if (sm) {
+                    sm.isPlaying = false;
+                    sm.emit('song:pause', { time: jucePlayer.currentTime });
+                }
+            });
+            return;
+        }
+        if (seekTime !== undefined) {
+            enqueue(async () => {
+                await jucePlayer.seek(seekTime);
+                audio.dispatchEvent(new Event('seeked'));
+            });
+        }
+    }
     function scheduleJuceShimBatchFlush() {
         if (_juceShimBatchFlushScheduled) return;
         _juceShimBatchFlushScheduled = true;
+        const flushGen = _juceShimGen;
         queueMicrotask(() => {
-            _juceShimBatchFlushScheduled = false;
-            const batch = _juceShimBatch;
-            _juceShimBatch = null;
-            if (!batch || !window._juceMode) return;
-            const wantsPause = !!batch.wantsPause;
-            const seekTime = batch.seekTime;
-            if (wantsPause && seekTime !== undefined) {
-                enqueue(async () => {
-                    await jucePlayer.seek(seekTime);
-                    audio.dispatchEvent(new Event('seeked'));
-                });
+            if (flushGen !== _juceShimGen) {
+                _juceShimBatchFlushScheduled = false;
                 return;
             }
-            if (wantsPause) {
-                enqueue(async () => {
-                    await jucePlayer.pause();
-                    isPlaying = false;
-                    document.getElementById('btn-play').textContent = '▶ Play';
-                    const sm = window.slopsmith;
-                    if (sm) {
-                        sm.isPlaying = false;
-                        sm.emit('song:pause', { time: jucePlayer.currentTime });
-                    }
-                });
-                return;
-            }
-            if (seekTime !== undefined) {
-                enqueue(async () => {
-                    await jucePlayer.seek(seekTime);
-                    audio.dispatchEvent(new Event('seeked'));
-                });
-            }
+            flushJuceShimBatchNow();
         });
     }
     _resetJuceAudioShimChain = function () {
         chain = Promise.resolve();
         _juceShimBatch = null;
         _juceShimBatchFlushScheduled = false;
+        _juceShimGen++;
     };
 
     Object.defineProperty(audio, 'currentTime', {
@@ -2723,6 +2737,7 @@ let _resetJuceAudioShimChain = function () {};
 
     audio.play = function () {
         if (window._juceMode) {
+            if (_juceShimBatch != null) flushJuceShimBatchNow();
             const p = enqueue(async () => {
                 const started = await jucePlayer.play();
                 if (started) {
