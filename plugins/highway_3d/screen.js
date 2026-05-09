@@ -349,6 +349,28 @@
         return laneBoundsFromAnchor(getChartAnchorAt(anchorArr, t));
     }
 
+    /**
+     * Inclusive chart-fret indices for the playing window (anchor `fret` + `width`),
+     * e.g. fret=5 width=4 → 5..8. Unlike {@link laneBoundsFromAnchor}'s `dMin`/`dMax`
+     * (diagram wire span), these are the labels shown on gems / row numbers.
+     * @returns {{ f0: number, f1: number } | null}
+     */
+    function anchorPlayedFretInclusiveSpan(anc) {
+        if (!anc) return null;
+        let f0 = Math.round(Number(anc.fret));
+        if (!Number.isFinite(f0) || f0 < 1) f0 = 1;
+        let w = Number(anc.width);
+        if (!Number.isFinite(w)) w = 4;
+        w = Math.max(1, Math.round(w));
+        const f1 = Math.min(NFRETS, f0 + w - 1);
+        return { f0, f1 };
+    }
+
+    function anchorPlayedFretSpanAt(anchorArr, t) {
+        if (!anchorArr || !anchorArr.length) return null;
+        return anchorPlayedFretInclusiveSpan(getChartAnchorAt(anchorArr, t));
+    }
+
     const FRET_COOLDOWN = 0.5; // seconds a lane fret stays active after last note
 
     const DIAG_LINGER_S    = 0.55;
@@ -4679,10 +4701,13 @@
             //     happening on the playing strings just above them.
             {
                 const yBottom = Math.min(sY(0), sY(nStr - 1));
+                const anchorGold = anchorPlayedFretSpanAt(anchors, now);
                 for (let f = 1; f <= NFRETS; f++) {
                     const lb = pFretLbl.get();
-                    const isActive = activeFrets.has(f);
-                    lb.material    = txtMat(f, isActive ? '#ffe84d' : '#9ab8cc', false, 'fretRow');
+                    const isGold = anchorGold
+                        ? (f >= anchorGold.f0 && f <= anchorGold.f1)
+                        : activeFrets.has(f);
+                    lb.material    = txtMat(f, isGold ? '#ffe84d' : '#9ab8cc', false, 'fretRow');
                     lb.position.set(fretMid(f), yBottom - S_GAP * 1.4, 0.5 * K);
                     const intensity = noteState.fretHeat[f];
                     lb.material.opacity = 0.35 + intensity * 0.65;
