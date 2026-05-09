@@ -348,7 +348,11 @@
     function laneBoundsFromAnchor(anc) {
         if (!anc) return null;
         let fStart = Math.round(Number(anc.fret));
-        if (!Number.isFinite(fStart) || fStart < 0) fStart = 1;
+        // Match anchorPlayedFretInclusiveSpan(): fret 0 (and below) clamps
+        // to 1, otherwise the lane span ends up one fret narrower than the
+        // played-fret span / label highlighting on charts that emit
+        // <anchor fret="0" width="N">.
+        if (!Number.isFinite(fStart) || fStart < 1) fStart = 1;
         let w = Number(anc.width);
         if (!Number.isFinite(w)) w = 4;
         w = Math.max(1, Math.round(w));
@@ -3044,6 +3048,10 @@
             chordFrameGradTex.minFilter = T.LinearFilter;
             chordFrameGradTex.wrapS = T.ClampToEdgeWrapping;
             chordFrameGradTex.wrapT = T.ClampToEdgeWrapping;
+            // DataTexture defaults to linear color space; flag this gradient
+            // as sRGB so the Charter chord-box hex values land at the same
+            // perceived colour as the rest of the renderer's color textures.
+            chordFrameGradTex.colorSpace = T.SRGBColorSpace;
             chordFrameGradTex.needsUpdate = true;
 
             pChordFrameFill = pool(noteG, () => new T.Mesh(
