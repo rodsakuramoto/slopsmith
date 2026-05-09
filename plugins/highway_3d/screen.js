@@ -3701,10 +3701,15 @@
                         posR[ri++] = wz;
                     }
                 }
-                const row = ys + 1;
-                for (let i = 0; i < xs; i++) {
-                    for (let j = 0; j < ys; j++) {
-                        const a = i * row + j;
+                // Row stride matches the vertex layout: posR is filled as
+                // (xs+1) i-columns per j-row, so adjacent quads must step by
+                // (xs+1) in j and by 1 in i. The previous (i*row + j) index
+                // pattern stitched non-adjacent vertices and produced a
+                // scrambled headstock ramp surface.
+                const row = xs + 1;
+                for (let j = 0; j < ys; j++) {
+                    for (let i = 0; i < xs; i++) {
+                        const a = j * row + i;
                         const b = a + row;
                         idxR.push(a, b, a + 1, b, b + 1, a + 1);
                     }
