@@ -1809,7 +1809,7 @@
                 wideFont: 'bold 64px sans-serif',
                 srcH: 128, stroke: '#0a1018', strokeW: 6, shadow: null,
             },
-            // Technique markers (PH, PM, AC, H/P/T, slide arrows, etc.).
+            // Technique markers (PH, PM, AC, H/P/T, etc.).
             technique: {
                 font:     'bold 80px sans-serif',
                 wideFont: 'bold 64px sans-serif',
@@ -4961,20 +4961,14 @@
                 const LBL_MULT = 1.6;
                 const distFactor = 1 + Math.max(0, Math.min(1, dt / AHEAD)) * 1.5;
                 // Fold the user's text-size multiplier into sLbl so technique
-                // labels (bend, slide, H/P/T arrows, accent, tremolo, palm
-                // mute, pinch harmonic) all scale alongside the rest.
+                // labels (bend, H/P/T arrows, accent, tremolo, palm mute,
+                // pinch harmonic) all scale alongside the rest.
                 const sLbl = LBL_MULT * distFactor * _textSizeMul;
                 let yo = y + NH * 0.8 * sLbl;
                 if (n.bn > 0) {
                     const l = pLbl.get();
                     l.material = txtMat('↑' + bendText(n.bn), '#fff', true, 'technique');
                     l.scale.set(NH * 3.6 * sLbl, NH * 1.5 * sLbl, 1); l.position.set(x, yo, noteZ); yo += NH * 1.2 * sLbl;
-                }
-                const slideLbl = slideTrailEnd(n);
-                if (slideLbl) {
-                    const l = pLbl.get();
-                    l.material = txtMat(slideLbl.endFret > n.f ? '↗' : '↘', '#fff', false, 'technique');
-                    l.scale.set(NH * 1.6 * sLbl, NH * 1.6 * sLbl, 1); l.position.set(x + NW * 0.6 * sLbl, yo, noteZ);
                 }
                 if (n.ho || n.po || n.tp) {
                     if (n.ho || n.po) {
