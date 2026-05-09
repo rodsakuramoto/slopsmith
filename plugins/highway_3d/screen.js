@@ -2008,11 +2008,29 @@
             if (txtCache[k]) return txtCache[k];
             const sp = TXT_STYLES[sName] || TXT_STYLES.technique;
             const h  = sp.srcH;
-            const w  = wide ? h * 4 : h;
+            const str = String(text);
+            const font = wide ? sp.wideFont : sp.font;
+
+            let w = wide ? h * 4 : h;
+
+            if (!wide && sName === 'noteFret') {
+                // Wide labels (D#2, Bb3) need a canvas wider than srcH; cap so
+                // glyphs stay centred at (w/2, h/2) without edge clipping.
+                const probe = document.createElement('canvas').getContext('2d');
+                probe.font = font;
+                const tw = probe.measureText(str).width;
+                let pad = 0;
+                if (sp.stroke && sp.strokeW > 0) pad += sp.strokeW * 2;
+                if (sp.shadow) {
+                    pad += Math.abs(sp.shadow.dx) + sp.shadow.blur * 2;
+                }
+                w = Math.min(12 * h, Math.max(h, Math.ceil(tw + pad)));
+            }
+
             const c  = document.createElement('canvas');
             c.width = w; c.height = h;
             const x = c.getContext('2d');
-            x.font = wide ? sp.wideFont : sp.font;
+            x.font = font;
             x.textAlign = 'center';
             x.textBaseline = 'middle';
             if (sp.shadow) {
@@ -2026,10 +2044,10 @@
                 x.miterLimit  = 2;
                 x.strokeStyle = sp.stroke;
                 x.lineWidth   = sp.strokeW;
-                x.strokeText(String(text), w / 2, h / 2);
+                x.strokeText(str, w / 2, h / 2);
             }
             x.fillStyle = col;
-            x.fillText(String(text), w / 2, h / 2);
+            x.fillText(str, w / 2, h / 2);
             const mat = new T.SpriteMaterial({
                 map: new T.CanvasTexture(c),
                 transparent: true,
