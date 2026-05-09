@@ -5891,7 +5891,9 @@
                 proj.material.opacity = Math.min(0.96,
                     projScale * rimSolid * (0.5 + 0.5 * glowMul) * bodyDim);
                 proj.material.emissiveIntensity = (0.07 + projFactor * 0.48) * glowMul * bodyDim;
-                proj.position.set(x, y, 0);
+                // Same Z as the flying note (dZ while dt>0); fixed z=0 sat the hit plane
+                // while the note was still at noteZ<0, so the rim looked "ahead" in depth.
+                proj.position.set(x, y, noteZ);
                 proj.scale.set(1, 1, 1);
                 proj.rotation.z = projRim;
                 proj.visible = true;
