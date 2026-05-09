@@ -280,6 +280,12 @@
         return { dMin, dMax };
     }
 
+    /** Same horizontal span as the dynamic highway lane: anchor at chart time `t`. */
+    function anchorLaneBoundsAt(anchorArr, t) {
+        if (!anchorArr || !anchorArr.length) return null;
+        return laneBoundsFromAnchor(getChartAnchorAt(anchorArr, t));
+    }
+
     const FRET_COOLDOWN = 0.5; // seconds a lane fret stays active after last note
 
     const DIAG_LINGER_S    = 0.55;
@@ -3880,7 +3886,12 @@
                     if (!validString(n.s)) continue;
                     const isNext = nextNoteByString[n.s] && Math.abs(nextNoteByString[n.s].t - n.t) < 0.001;
                     const skipLabel = lastFretForString[n.s] === n.f;
-                    drawNote(n, now, undefined, isNext, skipLabel, false);
+                    let singleOpenX;
+                    if (n.f === 0) {
+                        const ab = anchorLaneBoundsAt(anchors, n.t);
+                        if (ab) singleOpenX = (fretX(ab.dMin) + fretX(ab.dMax)) / 2;
+                    }
+                    drawNote(n, now, singleOpenX, isNext, skipLabel, false);
                     lastFretForString[n.s] = n.f;
                     // Onset in window OR started before the window but
                     // still sustaining right now. Gate sustain carry-over
@@ -3951,13 +3962,23 @@
                     prevChordSig = currentSig;
                     prevChordTime = ch.t;
 
-                    // Open-string center X
+                    const chAncB = anchorLaneBoundsAt(anchors, ch.t);
+                    // Open-string X: chart <anchor> lane centre when present (not curX /
+                    // fretted centroid), matching highway span.
                     let chordCX = curX;
-                    let cxL = Infinity, cxR = -Infinity, fretted = 0;
-                    for (const cn of chordNotes) {
-                        if (cn.f > 0) { const fx = fretMid(cn.f); if (fx < cxL) cxL = fx; if (fx > cxR) cxR = fx; fretted++; }
+                    if (chAncB) chordCX = (fretX(chAncB.dMin) + fretX(chAncB.dMax)) / 2;
+                    else {
+                        let cxL = Infinity, cxR = -Infinity, fretted = 0;
+                        for (const cn of chordNotes) {
+                            if (cn.f > 0) {
+                                const fx = fretMid(cn.f);
+                                if (fx < cxL) cxL = fx;
+                                if (fx > cxR) cxR = fx;
+                                fretted++;
+                            }
+                        }
+                        if (fretted > 0) chordCX = (cxL + cxR) / 2;
                     }
-                    if (fretted > 0) chordCX = (cxL + cxR) / 2;
 
                     // Onset in window OR chord started before the window
                     // but is still sustaining right now. Gate sustain
@@ -3994,15 +4015,30 @@
                         }
                     }
 
-                    // Chord frame-box
+                    // Chord frame-box — width/position from <anchor> when available
+                    // (same as dynamic highway), else from fretted span.
                     const chDt = ch.t - now;
                     if (chordNotes.length > 1 && chDt > -DIAG_LINGER_S && chDt < AHEAD) {
                         const z = Math.min(0, dZ(chDt));
-                        let fMinCh = 99, fMaxCh = 0;
-                        for (const cn of chordNotes) { if (cn.f > 0) { fMinCh = Math.min(fMinCh, cn.f); fMaxCh = Math.max(fMaxCh, cn.f); } }
-                        if (fMinCh < 99) {
-                            const xLeft = fretX(fMinCh - 1);
-                            const xRight = fretX(Math.max(fMaxCh, fMinCh + 2));
+                        let xLeft, xRight;
+                        if (chAncB) {
+                            xLeft = fretX(chAncB.dMin);
+                            xRight = fretX(chAncB.dMax);
+                        } else {
+                            let fMinCh = 99, fMaxCh = 0;
+                            for (const cn of chordNotes) {
+                                if (cn.f > 0) {
+                                    fMinCh = Math.min(fMinCh, cn.f);
+                                    fMaxCh = Math.max(fMaxCh, cn.f);
+                                }
+                            }
+                            if (fMinCh >= 99) xLeft = xRight = 0; // sentinel, skipped below
+                            else {
+                                xLeft = fretX(fMinCh - 1);
+                                xRight = fretX(Math.max(fMaxCh, fMinCh + 2));
+                            }
+                        }
+                        if (xLeft !== undefined && xRight !== undefined && xRight > xLeft) {
                             const padX = NW * 0.4;
                             const width = (xRight - xLeft) + padX * 2;
                             const cx = xLeft + width / 2 - padX;
