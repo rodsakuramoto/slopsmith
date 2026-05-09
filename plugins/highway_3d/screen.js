@@ -255,6 +255,9 @@
     const CAM_FOCUS_BLEND_RATE = 0.7;
     const CAM_FRET_EDGE_BLEND = 0.1;
     const DEFAULT_LOOKAHEAD_FRET_SPAN = 4;
+    /** Schmitt: avoid lock↔dynamic flicker when lookahead maxF jitters at the 12th fret. */
+    const LOOKAHEAD_LOCK_RELEASE_MAXF = 13;
+    const LOOKAHEAD_LOCK_ENGAGE_MAXF = 10;
 
     // Note: we deliberately do NOT scale the camUpdate lerp speed with
     // cameraSmoothing. Smoothing widens the hysteresis dead zones so the
@@ -1751,6 +1754,8 @@
         let _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
         let _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
         let _lookaheadCamPrevNow = null;
+        let _lookaheadLowBonusU = 0;
+        let _lookaheadHiNeckLatch = false;
 
         // Lifecycle flags
         let _isReady = false;
@@ -3964,6 +3969,8 @@
                     _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
                     _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
                     _lookaheadCamPrevNow = null;
+                    _lookaheadLowBonusU = 0;
+                    _lookaheadHiNeckLatch = false;
                 }
             }
 
@@ -4005,11 +4012,13 @@
                                 tgtX = fretMid(CAM_LOCK_CENTER_FRET);
                                 tgtDist = (lockedBaseU + lockedBonusU) * K * lockZoomMul;
                                 prevLowFretBonus = lockedBonusU;
+                                _lookaheadLowBonusU = lockedBonusU;
                             } else {
                                 const baseDU = camBaseDistU(_lookaheadFretSpan);
                                 const lowBU = camLowFretPullbackU(bd.minF);
                                 tgtDist = (baseDU + lowBU) * K;
                                 prevLowFretBonus = lowBU;
+                                _lookaheadLowBonusU = lowBU;
                                 tgtX = _lookaheadCamX;
                             }
                             curX = tgtX;
@@ -4694,7 +4703,6 @@
             } else {
                 const lookaheadMaxF = lookaheadBoundsNow ? lookaheadBoundsNow.maxF : 0;
                 const lookaheadHasBounds = lookaheadBoundsNow != null;
-                const lookaheadLockLowEligible = cameraLockLow && (!lookaheadHasBounds || lookaheadMaxF <= 12);
 
                 let dtSec = 1 / 120;
                 if (_lookaheadCamPrevNow !== null) {
@@ -4702,16 +4710,36 @@
                     if (rawDt > -1 && rawDt < 2) dtSec = Math.min(0.2, Math.max(1 / 960, rawDt));
                 }
                 _lookaheadCamPrevNow = bundle.currentTime;
+                const dBlend = Math.min(0.2, Math.max(1e-4, dtSec));
+                const lowBlendFs = 1 - Math.pow(1 - CAM_FOCUS_BLEND_RATE, dBlend);
+
+                if (!lookaheadHasBounds || lookaheadMaxF <= LOOKAHEAD_LOCK_ENGAGE_MAXF)
+                    _lookaheadHiNeckLatch = false;
+                else if (lookaheadMaxF >= LOOKAHEAD_LOCK_RELEASE_MAXF)
+                    _lookaheadHiNeckLatch = true;
+
+                const lookaheadLockLowEligible = cameraLockLow
+                    && (!lookaheadHasBounds
+                        || (!_lookaheadHiNeckLatch && lookaheadMaxF <= 12));
+
+                let rawLowBU;
+                if (lookaheadLockLowEligible) {
+                    rawLowBU = camLowFretPullbackU(1);
+                } else if (lookaheadBoundsNow) {
+                    rawLowBU = camLowFretPullbackU(lookaheadBoundsNow.minF);
+                } else {
+                    rawLowBU = camLowFretPullbackU(CAM_LOCK_CENTER_FRET);
+                }
+                _lookaheadLowBonusU = rawLowBU * lowBlendFs + _lookaheadLowBonusU * (1 - lowBlendFs);
 
                 if (lookaheadLockLowEligible) {
                     const lockedBaseU = camBaseDistU(12);
-                    const lockedBonusU = camLowFretPullbackU(1);
                     const lockZoomMul = CAM_LOCK_ZOOM_MIN +
                         (CAM_LOCK_ZOOM_MAX - CAM_LOCK_ZOOM_MIN) * cameraLockZoom;
-                    tgtX = fretMid(CAM_LOCK_CENTER_FRET);
-                    tgtDist = (lockedBaseU + lockedBonusU) * K * lockZoomMul;
-                    prevLowFretBonus = lockedBonusU;
                     lookaheadSmoothCamStep(dtSec, fretMid(CAM_LOCK_CENTER_FRET), 12);
+                    tgtX = _lookaheadCamX;
+                    tgtDist = (lockedBaseU + _lookaheadLowBonusU) * K * lockZoomMul;
+                    prevLowFretBonus = _lookaheadLowBonusU;
                     lockActive = true;
                 } else {
                     if (lookaheadBoundsNow) {
@@ -4720,14 +4748,12 @@
                         const tgtSpanInt = Math.max(
                             1, lookaheadBoundsNow.maxF - lookaheadBoundsNow.minF + 1);
                         lookaheadSmoothCamStep(dtSec, tgtWX, tgtSpanInt);
-                        const lowBU = camLowFretPullbackU(lookaheadBoundsNow.minF);
-                        tgtDist = (camBaseDistU(_lookaheadFretSpan) + lowBU) * K;
-                        prevLowFretBonus = lowBU;
+                        tgtDist = (camBaseDistU(_lookaheadFretSpan) + _lookaheadLowBonusU) * K;
+                        prevLowFretBonus = _lookaheadLowBonusU;
                     } else {
                         lookaheadSmoothCamStep(dtSec, _lookaheadCamX, _lookaheadFretSpan);
-                        const lowBU = camLowFretPullbackU(CAM_LOCK_CENTER_FRET);
-                        tgtDist = (camBaseDistU(_lookaheadFretSpan) + lowBU) * K;
-                        prevLowFretBonus = lowBU;
+                        tgtDist = (camBaseDistU(_lookaheadFretSpan) + _lookaheadLowBonusU) * K;
+                        prevLowFretBonus = _lookaheadLowBonusU;
                     }
                     tgtX = _lookaheadCamX;
                     lockActive = false;
@@ -5270,9 +5296,8 @@
         function camUpdate(bundle) {
             const bpm = computeBPM(bundle.beats, bundle.currentTime);
             const lerp = CAM_LERP_BASE * Math.max(bpm, 60) / 120;
-            const panLerp = LOOKAHEAD_PREVIEW_CAMERA ? 1 : lerp;
-            curX += (tgtX - curX) * panLerp;
-            curDist += (tgtDist - curDist) * panLerp;
+            curX += (tgtX - curX) * lerp;
+            curDist += (tgtDist - curDist) * lerp;
             const dist = curDist * aspectScale;
             const h = CAM_H_BASE * (dist / CAM_DIST_BASE);
             cam.position.set(curX + 20 * K, h * 0.95, dist * 0.75);
@@ -5419,6 +5444,8 @@
             _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
             _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
             _lookaheadCamPrevNow = null;
+            _lookaheadLowBonusU = 0;
+            _lookaheadHiNeckLatch = false;
             prevLowFretBonus = 0;
             prevLockActive = false;
             _camSnapped = false;
