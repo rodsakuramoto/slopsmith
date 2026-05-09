@@ -5068,6 +5068,7 @@
             if (!skipBody) {
                 // Rotate from vertical (π/2) when entering to horizontal (0) at the hit line; skip for open strings
                 const approachRot = n.f > 0 ? Math.max(0, Math.min(1, dt / AHEAD)) * Math.PI / 2 : 0;
+                const openSlabThickMul = n.f === 0 ? 1.5 : 1;
 
                 // ── Outline (slightly larger, bright emissive) ────────────
                 // Notedetect feedback (#9): if a recent hit/miss event
@@ -5114,7 +5115,7 @@
                 outline.position.set(x, y + vibrato, noteZ);
                 outline.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
-                    outline.scale.set((35 * K / NW) * 1.1 * openWScale, 0.1 * 1.1, 0.6 * 1.1);
+                    outline.scale.set((35 * K / NW) * 1.1 * openWScale, 0.1 * 1.1 * openSlabThickMul, 0.6 * 1.1);
                 } else {
                     outline.scale.set(1.1, 1.1, 2.8);
                 }
@@ -5125,7 +5126,7 @@
                 core.position.set(x, y + vibrato, noteZ + 0.001);
                 core.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
-                    core.scale.set((40 * K / NW) * openWScale, 0.1, 0.6);
+                    core.scale.set((40 * K / NW) * openWScale, 0.1 * openSlabThickMul, 0.6);
                 } else {
                     core.scale.set(1, 1, 2.5);
                 }
@@ -5163,7 +5164,7 @@
                     if (remSus > 0.01) {
                         const sliceDur = Math.min(remSus, AHEAD);
                         const tw = NW * 0.85 * (n.f === 0 ? openWScale : 1);
-                        const th = NH * 0.12 * (n.f === 0 ? openWScale : 1);
+                        const th = NH * 0.12 * (n.f === 0 ? openWScale : 1) * openSlabThickMul;
                         // Open strings get two parallel trails offset along
                         // X — visually echoes the wide flat open-note body.
                         // Fretted notes keep the single-trail path. Offsets
