@@ -5765,8 +5765,9 @@
             const projFactor = Math.max(0, Math.min(1, 1 - dt / PROJ_WIN));
             const isBlocked = dt < 0.15 && n.sus > 0;
             if (n.f > 0 && isNext && dt > 0 && dt < PROJ_WIN && projFactor > 0.05 && !isBlocked) {
-                const approachRotGhost = Math.max(0, Math.min(1, dt / AHEAD)) * Math.PI / 2;
-                const projRim = approachRotGhost + (isHarm ? Math.PI / 4 : 0);
+                // Ghost stays at final "on the board" orientation — not the
+                // incoming approachRot sweep — so it nests with the note at impact.
+                const projRim = isHarm ? Math.PI / 4 : 0;
 
                 const proj = projMeshArr[s];
                 // _vibrancyProjOp (0.15..0.5) is the vibrancy-scaled idle floor;
