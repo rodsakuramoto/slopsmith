@@ -2004,8 +2004,16 @@
             const arrIdx = si && si.arrangement_index != null ? si.arrangement_index : '';
             let palSig = '';
             const nLab = labels.length;
-            if (typeof T !== 'undefined' && T?.Color && activePalette) {
-                palSig = activePalette.slice(0, nLab).map(c => new T.Color(c).getHexString()).join('/');
+            if (activePalette) {
+                // activePalette entries are numeric hex (PALETTES) or already hex strings;
+                // convert without instantiating T.Color per string — this signature is
+                // built every frame inside _syncOpenStringPitchLabels.
+                const lim = Math.min(activePalette.length, nLab);
+                for (let i = 0; i < lim; i++) {
+                    if (i > 0) palSig += '/';
+                    const c = activePalette[i];
+                    palSig += typeof c === 'number' ? (c >>> 0).toString(16) : String(c);
+                }
             }
             return `${nStr}|${capo}|${tStr}|${arrIdx}|${labels.join(',')}|${palSig}|${_textSizeMul.toFixed(3)}|${boardStringStartX.toFixed(6)}|${boardTuningLabelX.toFixed(6)}`;
         }
@@ -4332,26 +4340,25 @@
 
             // ── Chords ────────────────────────────────────────────────────
             if (chords) {
-                const chordFirstInShapeRun = new Array(chords.length);
-                {
-                    let prevRunSig = null;
-                    for (let ciPre = 0; ciPre < chords.length; ciPre++) {
-                        const runSig = chordShapeSignature(chords[ciPre]);
-                        if (runSig === null) {
-                            chordFirstInShapeRun[ciPre] = true;
-                            continue;
-                        }
-                        chordFirstInShapeRun[ciPre] = runSig !== prevRunSig;
-                        prevRunSig = runSig;
-                    }
-                }
-
+                // Single-pass shape-run tracking: the previous pre-loop scanned
+                // every chord (and re-allocated chordShapeSignature() per chord)
+                // each frame, even though the render loop already iterates the
+                // full array. We compute runSig inline once per chord and reuse
+                // it for both first-in-run detection and isRepeat below.
+                let runSigPrev = null;
                 let prevChordSig = null;
                 let prevChordTime = -1;
 
                 for (let ci = 0; ci < chords.length; ci++) {
                     const ch = chords[ci];
-                    const firstInShapeRun = chordFirstInShapeRun[ci];
+                    const runSig = chordShapeSignature(ch);
+                    let firstInShapeRun;
+                    if (runSig === null) {
+                        firstInShapeRun = true;
+                    } else {
+                        firstInShapeRun = runSig !== runSigPrev;
+                        runSigPrev = runSig;
+                    }
                     if (!ch.notes) continue;
                     // Filter chord notes to in-range strings once. All
                     // chord-level aggregations (maxSus, repeat-chord
@@ -4374,10 +4381,11 @@
                     for (const n of chordNotes) if ((n.sus || 0) > maxSus) maxSus = n.sus;
                     if (ch.t + maxSus < t0 || ch.t > t1) continue;
 
-                    // Repeat-chord detection (consecutive same shape, short gap)
-                    const currentSig = chordShapeSignature(ch);
-                    const isRepeat = currentSig != null && prevChordSig === currentSig && Math.abs(ch.t - prevChordTime) < 0.5;
-                    prevChordSig = currentSig;
+                    // Repeat-chord detection (consecutive same shape, short gap).
+                    // Reuses runSig computed at loop entry — same signature as the
+                    // dedicated chordShapeSignature() call we used to make twice.
+                    const isRepeat = runSig !== null && prevChordSig === runSig && Math.abs(ch.t - prevChordTime) < 0.5;
+                    prevChordSig = runSig;
                     prevChordTime = ch.t;
 
                     const chAncB = anchorLaneBoundsAt(anchors, ch.t);
@@ -4536,90 +4544,91 @@
                         drawFrameBox(cx + width * 0.5 - ft * 0.5, sideCy, ft, sideH, 13);
 
                         const chordName = bundle.chordTemplates?.[ch.id]?.name;
-                        if (chordName) {
-                            if (firstInShapeRun) {
-                                    const postFade = chDt < 0 ? Math.max(0, 1 + chDt / DIAG_LINGER_S) : 1;
-                                    const lblW = 28 * K, lblH = 9 * K;
-                                    const lbl = pChordLbl.get();
-                                    const mat = txtMat(chordName, '#e8d080', true, 'chord');
-                                    if (lbl.material.map !== mat.map) { lbl.material.map = mat.map; lbl.material.needsUpdate = true; }
-                                    lbl.material.opacity = Math.min(1, 0.3 + fade * 0.7) * postFade;
-                                    // Gold chord name: slight +X shift from flush-left so it sits farther right.
-                                    const lblWS = lblW * _textSizeMul;
-                                    const lblHS = lblH * _textSizeMul;
-                                    const frameLeft = cx - width / 2;
-                                    const nameShiftX = NW * 0.94;
-                                    const nameVertTuck = NH * 0.02;
-                                    lbl.position.set(
-                                        frameLeft - lblWS / 2 + nameShiftX,
-                                        yMaxF + lblHS / 2 - nameVertTuck,
-                                        z);
-                                    lbl.scale.set(lblWS, lblHS, 1);
-                                }
+                        if (chordName && firstInShapeRun) {
+                            const postFade = chDt < 0 ? Math.max(0, 1 + chDt / DIAG_LINGER_S) : 1;
+                            const lblW = 28 * K, lblH = 9 * K;
+                            const lbl = pChordLbl.get();
+                            const mat = txtMat(chordName, '#e8d080', true, 'chord');
+                            if (lbl.material.map !== mat.map) { lbl.material.map = mat.map; lbl.material.needsUpdate = true; }
+                            lbl.material.opacity = Math.min(1, 0.3 + fade * 0.7) * postFade;
+                            // Gold chord name: slight +X shift from flush-left so it sits farther right.
+                            const lblWS = lblW * _textSizeMul;
+                            const lblHS = lblH * _textSizeMul;
+                            const frameLeft = cx - width / 2;
+                            const nameShiftX = NW * 0.94;
+                            const nameVertTuck = NH * 0.02;
+                            lbl.position.set(
+                                frameLeft - lblWS / 2 + nameShiftX,
+                                yMaxF + lblHS / 2 - nameVertTuck,
+                                z);
+                            lbl.scale.set(lblWS, lblHS, 1);
+                        }
 
-                                // Shape-based barre detection for the 3D indicator.
-                                // Matches drawChordDiagram PATH A + PATH B so the highway
-                                // line and overlay bracket always agree on the same shapes:
-                                //   PATH A: 2+ adjacent strings at the minimum fret.
-                                //   PATH B: outer-edge full-span barre (e.g. B major x24442)
-                                //           where the two outer strings are at the minimum fret,
-                                //           every intermediate string is fretted (f>0), and no
-                                //           intermediate string also sits at the minimum fret.
-                                // Scattered voicings like "1 3 1 3 1 0" (strings 0,2,4 at
-                                // fret 1 but no two adjacent, and string 2 sits at min fret)
-                                // correctly produce no indicator.
-                                {
-                                    let bFret = Infinity;
-                                    for (const cn of chordNotes) if (cn.f > 0) bFret = Math.min(bFret, cn.f);
-                                    const atMinFretStrings = bFret < Infinity
-                                        ? chordNotes.filter(cn => cn.f === bFret).map(cn => cn.s).sort((a, b) => a - b)
-                                        : [];
-                                    const barreRun3d = longestConsecutiveRun(atMinFretStrings);
-                                    let is3dBarre    = barreRun3d.length >= 2;   // PATH A
-                                    let barreMinStr3d = is3dBarre ? barreRun3d[0] : -1;
-                                    let barreMaxStr3d = is3dBarre ? barreRun3d[barreRun3d.length - 1] : -1;
+                        // Shape-based barre detection for the 3D indicator.
+                        // Drives off chord notes alone — independent of label
+                        // availability, so charts whose chordTemplates lack a
+                        // .name still show the barre line.
+                        // Matches drawChordDiagram PATH A + PATH B so the highway
+                        // line and overlay bracket always agree on the same shapes:
+                        //   PATH A: 2+ adjacent strings at the minimum fret.
+                        //   PATH B: outer-edge full-span barre (e.g. B major x24442)
+                        //           where the two outer strings are at the minimum fret,
+                        //           every intermediate string is fretted (f>0), and no
+                        //           intermediate string also sits at the minimum fret.
+                        // Scattered voicings like "1 3 1 3 1 0" (strings 0,2,4 at
+                        // fret 1 but no two adjacent, and string 2 sits at min fret)
+                        // correctly produce no indicator.
+                        {
+                            let bFret = Infinity;
+                            for (const cn of chordNotes) if (cn.f > 0) bFret = Math.min(bFret, cn.f);
+                            const atMinFretStrings = bFret < Infinity
+                                ? chordNotes.filter(cn => cn.f === bFret).map(cn => cn.s).sort((a, b) => a - b)
+                                : [];
+                            const barreRun3d = longestConsecutiveRun(atMinFretStrings);
+                            let is3dBarre    = barreRun3d.length >= 2;   // PATH A
+                            let barreMinStr3d = is3dBarre ? barreRun3d[0] : -1;
+                            let barreMaxStr3d = is3dBarre ? barreRun3d[barreRun3d.length - 1] : -1;
 
-                                    // PATH B: outer-edge full-span barre
-                                    const MIN_BARRE_SPAN_3D = Math.min(nStr - 1, 4);
-                                    if (atMinFretStrings.length >= 2) {
-                                        const minS = atMinFretStrings[0];
-                                        const maxS = atMinFretStrings[atMinFretStrings.length - 1];
-                                        if (maxS - minS >= MIN_BARRE_SPAN_3D) {
-                                            const frettedSet = new Set(chordNotes.filter(cn => cn.f > 0).map(cn => cn.s));
-                                            let allFretted = true;
-                                            for (let si = minS; si <= maxS; si++) {
-                                                if (!frettedSet.has(si)) { allFretted = false; break; }
-                                            }
-                                            if (allFretted) {
-                                                if (is3dBarre) {
-                                                    // PATH A fired: extend to full outer span.
-                                                    barreMinStr3d = minS; barreMaxStr3d = maxS;
-                                                } else {
-                                                    // PATH A did not fire: only draw if no inner
-                                                    // string also sits at the minimum fret.
-                                                    const innerAtMinFret = atMinFretStrings.some(s => s > minS && s < maxS);
-                                                    if (!innerAtMinFret) {
-                                                        is3dBarre = true;
-                                                        barreMinStr3d = minS; barreMaxStr3d = maxS;
-                                                    }
-                                                }
+                            // PATH B: outer-edge full-span barre
+                            const MIN_BARRE_SPAN_3D = Math.min(nStr - 1, 4);
+                            if (atMinFretStrings.length >= 2) {
+                                const minS = atMinFretStrings[0];
+                                const maxS = atMinFretStrings[atMinFretStrings.length - 1];
+                                if (maxS - minS >= MIN_BARRE_SPAN_3D) {
+                                    const frettedSet = new Set(chordNotes.filter(cn => cn.f > 0).map(cn => cn.s));
+                                    let allFretted = true;
+                                    for (let si = minS; si <= maxS; si++) {
+                                        if (!frettedSet.has(si)) { allFretted = false; break; }
+                                    }
+                                    if (allFretted) {
+                                        if (is3dBarre) {
+                                            // PATH A fired: extend to full outer span.
+                                            barreMinStr3d = minS; barreMaxStr3d = maxS;
+                                        } else {
+                                            // PATH A did not fire: only draw if no inner
+                                            // string also sits at the minimum fret.
+                                            const innerAtMinFret = atMinFretStrings.some(s => s > minS && s < maxS);
+                                            if (!innerAtMinFret) {
+                                                is3dBarre = true;
+                                                barreMinStr3d = minS; barreMaxStr3d = maxS;
                                             }
                                         }
                                     }
-
-                                    if (is3dBarre && chDt <= 0) {
-                                        const bx = xFretMid(bFret);
-                                        const yTop = Math.max(sY(barreMinStr3d), sY(barreMaxStr3d));
-                                        const yBot = Math.min(sY(barreMinStr3d), sY(barreMaxStr3d));
-                                        const lineH = yTop - yBot;
-                                        const postFadeB = Math.max(0, 1 + chDt / DIAG_LINGER_S);
-                                        const bl = pBarreLine.get();
-                                        bl.position.set(bx, (yTop + yBot) / 2, 0.05 * K);
-                                        bl.scale.set(0.5 * K, lineH, 0.5 * K);
-                                        bl.material.opacity = 0.8 * postFadeB;
-                                    }
                                 }
                             }
+
+                            if (is3dBarre && chDt <= 0) {
+                                const bx = xFretMid(bFret);
+                                const yTop = Math.max(sY(barreMinStr3d), sY(barreMaxStr3d));
+                                const yBot = Math.min(sY(barreMinStr3d), sY(barreMaxStr3d));
+                                const lineH = yTop - yBot;
+                                const postFadeB = Math.max(0, 1 + chDt / DIAG_LINGER_S);
+                                const bl = pBarreLine.get();
+                                bl.position.set(bx, (yTop + yBot) / 2, 0.05 * K);
+                                bl.scale.set(0.5 * K, lineH, 0.5 * K);
+                                bl.material.opacity = 0.8 * postFadeB;
+                            }
+                        }
                     }
                 }
             }
