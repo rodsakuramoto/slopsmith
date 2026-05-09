@@ -4475,16 +4475,16 @@
                                     const mat = txtMat(chordName, '#e8d080', true, 'chord');
                                     if (lbl.material.map !== mat.map) { lbl.material.map = mat.map; lbl.material.needsUpdate = true; }
                                     lbl.material.opacity = Math.min(1, 0.3 + fade * 0.7) * postFade;
-                                    // Use the post-scale half-extents so the label's
-                                    // left edge stays anchored to the chord-frame's
-                                    // left edge and its bottom edge stays anchored
-                                    // to the frame's top edge at any _textSizeMul.
-                                    // Sprites scale around their centre, so positions
-                                    // computed from unscaled extents drift left/down
-                                    // as textSize grows.
+                                    // Gold chord name: slight +X shift from flush-left so it sits farther right.
                                     const lblWS = lblW * _textSizeMul;
                                     const lblHS = lblH * _textSizeMul;
-                                    lbl.position.set((cx - width / 2) + lblWS / 2, yMaxF + lblHS / 2, z);
+                                    const frameLeft = cx - width / 2;
+                                    const nameShiftX = NW * 0.94;
+                                    const nameVertTuck = NH * 0.02;
+                                    lbl.position.set(
+                                        frameLeft - lblWS / 2 + nameShiftX,
+                                        yMaxF + lblHS / 2 - nameVertTuck,
+                                        z);
                                     lbl.scale.set(lblWS, lblHS, 1);
                                 }
 
