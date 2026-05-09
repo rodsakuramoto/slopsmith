@@ -336,6 +336,20 @@
     const DIAG_CELL_MAX    = 34;
     const CHORD_DIAG_POSITION_IDS = ['tl', 'tr', 'bl', 'br'];
 
+    /** Charter `Preview3DChordBoxDrawer` / `ChartPanelColors` PREVIEW_3D_CHORD_BOX. */
+    const CHARTER_CHORD_BOX_HEX = 0x00d2d5;
+    const CHARTER_CHORD_BOX_DARK_HEX = 0x003c3d;
+    /** `colorWithAlpha(128)` on frame quads. */
+    const CHARTER_CHORD_BOX_FRAME_ALPHA = 128 / 255;
+    /** Interior strip uses ARGB 32 on both stops in Charter (see drawChordBoxFilling). */
+    const CHARTER_CHORD_BOX_FILL_TEX_ALPHA = 32 / 255;
+
+    /** 3D chord-box rim bars (thin on all chords, including repeats in a sequence). */
+    const CHORD_FRAME_RIM_MIN = 0.055;       // × K — floor thickness
+    const CHORD_FRAME_RIM_FRAC_H = 0.028;    // × fullChordBoxH
+    const CHORD_FRAME_RIM_Z_MIN = 0.048;      // × K — depth squash
+    const CHORD_FRAME_RIM_Z_SCAL = 0.68;     // thickZ scales with ft
+
     /* ======================================================================
      *  Pure helpers
      * ====================================================================== */
@@ -1631,10 +1645,12 @@
         // Object pools
         let pNote, pSus, pLbl, pBeat, pSec;
         let pFretLbl, pLane, pLaneDivider;
-        let pChordBox, pChordLbl, pBarreLine;
+        let pChordBox, pChordFrameFill, pChordLbl, pBarreLine;
         let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron;
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
+        /** Horizontal gradient (Charter chord box fill). */
+        let chordFrameGradTex = null;
 
         // Dynamic glowing string meshes (BoxGeometry, one per string)
         let stringLines = [];
@@ -2812,12 +2828,50 @@
             });
             pLaneDivider = pool(noteG, () => new T.Mesh(gLaneDivider, mLaneDivider));
 
-            // Chord frame-boxes (replaces old bracket approach)
+            // Chord frame — Charter Preview3DChordBoxDrawer palette & layout hints
+            // (frame alpha 128, fill gradient alpha 32; MeshBasic = lighting-independent).
+            const chR = CHARTER_CHORD_BOX_HEX >> 16 & 255;
+            const chG = CHARTER_CHORD_BOX_HEX >> 8 & 255;
+            const chB = CHARTER_CHORD_BOX_HEX & 255;
+            const dkR = CHARTER_CHORD_BOX_DARK_HEX >> 16 & 255;
+            const dkG = CHARTER_CHORD_BOX_DARK_HEX >> 8 & 255;
+            const dkB = CHARTER_CHORD_BOX_DARK_HEX & 255;
+            const aFill = Math.round(CHARTER_CHORD_BOX_FILL_TEX_ALPHA * 255);
+            chordFrameGradTex = new T.DataTexture(
+                new Uint8Array([ chR, chG, chB, aFill, dkR, dkG, dkB, aFill, chR, chG, chB, aFill ]),
+                3, 1, T.RGBAFormat);
+            chordFrameGradTex.magFilter = T.LinearFilter;
+            chordFrameGradTex.minFilter = T.LinearFilter;
+            chordFrameGradTex.wrapS = T.ClampToEdgeWrapping;
+            chordFrameGradTex.wrapT = T.ClampToEdgeWrapping;
+            chordFrameGradTex.needsUpdate = true;
+
+            pChordFrameFill = pool(noteG, () => new T.Mesh(
+                new T.PlaneGeometry(1, 1),
+                new T.MeshBasicMaterial({
+                    map: chordFrameGradTex,
+                    transparent: true,
+                    opacity: 1,
+                    depthWrite: false,
+                    fog: false,
+                    side: T.DoubleSide,
+                    polygonOffset: true,
+                    polygonOffsetFactor: 1,
+                    polygonOffsetUnits: 1,
+                }),
+            ));
             pChordBox = pool(noteG, () => new T.Mesh(
                 new T.BoxGeometry(1, 1, 1),
-                new T.MeshStandardMaterial({
-                    color: 0x88ccff, transparent: true, opacity: 0.12,
-                    depthWrite: false, side: T.DoubleSide, metalness: 0.5, roughness: 0.2,
+                new T.MeshBasicMaterial({
+                    color: CHARTER_CHORD_BOX_HEX,
+                    transparent: true,
+                    opacity: CHARTER_CHORD_BOX_FRAME_ALPHA,
+                    depthWrite: false,
+                    fog: false,
+                    side: T.DoubleSide,
+                    polygonOffset: true,
+                    polygonOffsetFactor: -0.6,
+                    polygonOffsetUnits: 1,
                 }),
             ));
 
@@ -3779,7 +3833,7 @@
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             if (projGlowArr) for (const m of projGlowArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
-            pChordBox.reset(); pChordLbl.reset(); pBarreLine.reset(); pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
+            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
             pFretColMarker.reset();
             _ndLabels = [];
 
@@ -4279,7 +4333,7 @@
                         }
                     }
 
-                    // Chord frame-box — same chordFrameXL/XR/chordOpenBoxW as open-string cap.
+                    // Chord frame-box — Charter Preview3DChordBoxDrawer-style rim + fill.
                     const chDt = ch.t - now;
                     if (chordNotes.length > 1 && chDt > -DIAG_LINGER_S && chDt < AHEAD && chordOpenBoxW != null) {
                         const z = Math.min(0, dZ(chDt));
@@ -4287,29 +4341,59 @@
                         const xLeft = chordFrameXL;
                         const xRight = chordFrameXR;
                         const cx = (xLeft + xRight) * 0.5;
-                            const yA = sY(0), yB = sY(nStr - 1);
-                            const yMinF = Math.min(yA, yB) - S_GAP * 0.8;
-                            const yMaxF = Math.max(yA, yB) + S_GAP * 0.8;
-                            let height = yMaxF - yMinF;
-                            if (isRepeat) height *= 0.5;
-                            const cY = (yMinF + yMaxF) / 2;
-                            const fade = Math.max(0, 1 - chDt / AHEAD);
-                            const baseOp = isRepeat ? 0.05 + fade * 0.1 : 0.12 + fade * 0.2;
-                            const thick = 0.25 * K;
-                            const drawEdge = (px, py, sx, sy) => {
-                                const b = pChordBox.get(); b.position.set(px, py, z); b.scale.set(sx, sy, thick); b.material.opacity = baseOp;
-                            };
-                            drawEdge(cx - width / 2, cY, thick, height); // left
-                            drawEdge(cx + width / 2, cY, thick, height); // right
-                            drawEdge(cx, cY - height / 2, width, thick); // bottom
-                            drawEdge(cx, cY + height / 2, width, thick); // top
-                            const fill = pChordBox.get();
-                            fill.position.set(cx, cY, z); fill.scale.set(width, height, thick * 0.5);
-                            fill.material.opacity = isRepeat ? 0.02 : 0.04;
+                        const yA = sY(0), yB = sY(nStr - 1);
+                        const yMinF = Math.min(yA, yB) - S_GAP * 0.8;
+                        const yMaxF = Math.max(yA, yB) + S_GAP * 0.8;
+                        const fullChordBoxH = yMaxF - yMinF;
+                        let height = fullChordBoxH;
+                        if (isRepeat) height *= 0.5;
+                        const cY = (yMinF + yMaxF) / 2;
+                        const yBot = cY - height * 0.5;
+                        const yTop = cY + height * 0.5;
+                        const fade = Math.max(0, 1 - chDt / AHEAD);
+                        const chordAccent = chordNotes.some(cn => cn.ac);
 
-                            const chordName = bundle.chordTemplates?.[ch.id]?.name;
-                            if (chordName) {
-                                if (firstInShapeRun) {
+                        // Rim thickness from full vertical span — repeat halves inner height only,
+                        // not bar thickness vs first chord — see CHORD_FRAME_RIM_* tuning.
+                        let ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
+                        if (chordAccent) ft *= 1.22;
+
+                        const repDim = isRepeat ? 0.78 : 1;
+                        const edgeOp = fade * repDim * CHARTER_CHORD_BOX_FRAME_ALPHA * (isRepeat ? 0.85 : 1);
+                        const thickZ = Math.max(CHORD_FRAME_RIM_Z_MIN * K, ft * CHORD_FRAME_RIM_Z_SCAL);
+                        const drawFrameBox = (px, py, sx, sy, ord) => {
+                            const b = pChordBox.get();
+                            b.renderOrder = ord;
+                            b.position.set(px, py, z);
+                            b.scale.set(sx, sy, thickZ);
+                            b.material.opacity = edgeOp;
+                        };
+
+                        const innerW = Math.max(width - 2 * ft, width * 0.45);
+                        const innerH = Math.max(height - 2 * ft, height * 0.3);
+                        const fill = pChordFrameFill.get();
+                        fill.renderOrder = 10;
+                        fill.rotation.set(0, 0, 0);
+                        fill.position.set(cx, cY, z - 0.004 * K);
+                        fill.scale.set(innerW, innerH, 1);
+                        fill.material.opacity = fade * repDim;
+
+                        drawFrameBox(cx, yBot + ft * 0.5, width, ft, 12);
+                        const withTopFrame = !isRepeat;
+                        if (withTopFrame) {
+                            drawFrameBox(cx, yTop - ft * 0.5, width, ft, 12);
+                        }
+
+                        const ySideLo = yBot + ft;
+                        const ySideHi = withTopFrame ? yTop - ft : yTop - ft * 0.15;
+                        const sideH = Math.max(ySideHi - ySideLo, ft * 1.25);
+                        const sideCy = ySideLo + sideH * 0.5;
+                        drawFrameBox(cx - width * 0.5 + ft * 0.5, sideCy, ft, sideH, 13);
+                        drawFrameBox(cx + width * 0.5 - ft * 0.5, sideCy, ft, sideH, 13);
+
+                        const chordName = bundle.chordTemplates?.[ch.id]?.name;
+                        if (chordName) {
+                            if (firstInShapeRun) {
                                     const postFade = chDt < 0 ? Math.max(0, 1 + chDt / DIAG_LINGER_S) : 1;
                                     const lblW = 28 * K, lblH = 9 * K;
                                     const lbl = pChordLbl.get();
@@ -5436,7 +5520,8 @@
             _renderScale = 1;
             mBeatM = mBeatQ = null;
             pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
-            pFretLbl = pLane = pLaneDivider = pChordBox = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = null;
+            pFretLbl = pLane = pLaneDivider = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = null;
+            chordFrameGradTex = null;
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
             gNote = gSus = gBeat = gTechArrow = gTapChevron = null;
