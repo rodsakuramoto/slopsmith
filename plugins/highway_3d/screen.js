@@ -3864,6 +3864,25 @@
                 ? lookaheadComputeFretBounds(now, anchors, notes, chords)
                 : null;
 
+            // Open-string note width: same outer span as chord frame (anchor + padX,
+            // or default 4-fret window when chart has no anchor at t).
+            const padChordOpenX = NW * 0.4;
+            const openNoteLaneBoxW = chartTime => {
+                const chAncB = anchorLaneBoundsAt(anchors, chartTime);
+                if (chAncB) {
+                    const xl = fretX(chAncB.dMin);
+                    const xr = fretX(chAncB.dMax);
+                    if (xr > xl) return (xr - xl) + padChordOpenX * 2;
+                }
+                const spanF = 4;
+                const fMinCh = 1;
+                const fMaxCh = fMinCh + spanF - 1;
+                const xl = fretX(fMinCh - 1);
+                const xr = fretX(Math.max(fMaxCh, fMinCh + 2));
+                if (xr > xl) return (xr - xl) + padChordOpenX * 2;
+                return 40 * K;
+            };
+
             // ── Frame state ───────────────────────────────────────────────
             const noteState = {
                 stringSustain: new Array(nStr).fill(false),
@@ -4154,7 +4173,8 @@
                         const ab = anchorLaneBoundsAt(anchors, n.t);
                         if (ab) singleOpenX = (fretX(ab.dMin) + fretX(ab.dMax)) / 2;
                     }
-                    drawNote(n, now, singleOpenX, isNext, skipLabel, false);
+                    const singleOpenLaneW = n.f === 0 ? openNoteLaneBoxW(n.t) : undefined;
+                    drawNote(n, now, singleOpenX, isNext, skipLabel, false, 0.05, singleOpenLaneW);
                     lastFretForString[n.s] = n.f;
                     // Onset in window OR started before the window but
                     // still sustaining right now. Gate sustain carry-over
@@ -4287,6 +4307,10 @@
                         }
                     }
 
+                    const laneWForOpenStrings = (chordOpenBoxW != null && chordOpenBoxW > 1e-8)
+                        ? chordOpenBoxW
+                        : openNoteLaneBoxW(ch.t);
+
                     // Onset in window OR chord started before the window
                     // but is still sustaining right now. Gate sustain
                     // carry-over against the current frame time so camera
@@ -4311,7 +4335,7 @@
                             skipLabel,
                             isRepeat,
                             DIAG_LINGER_S,
-                            cn.f === 0 ? chordOpenBoxW : undefined,
+                            cn.f === 0 ? laneWForOpenStrings : undefined,
                         );
                         lastFretForString[cn.s] = cn.f;
                         // gate by THIS note's own sustain against the
@@ -5038,7 +5062,7 @@
             const OPEN_NOTE_WORLD_W = 40 * K;
             let openWScale = 1;
             if (n.f === 0 && openChordBoxWidth != null && openChordBoxWidth > 1e-8) {
-                openWScale = Math.min(1, (openChordBoxWidth * 0.96) / OPEN_NOTE_WORLD_W);
+                openWScale = Math.max(0.22, (openChordBoxWidth * 0.96) / OPEN_NOTE_WORLD_W);
             }
 
             if (!skipBody) {
