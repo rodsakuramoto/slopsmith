@@ -151,7 +151,7 @@
     // Sample [now, now+AHEAD] into this many strips; each strip’s <anchor>
     // comes from the chart time at that depth so far-downstage lane can show
     // the next window before the hit line crosses the anchor time.
-    const HWY_LANE_TIME_SLICES = 16;
+    const HWY_LANE_TIME_SLICES = 96;
     const TS = 200 * K;
 
     // Shorter, flatter notes (joel style)
@@ -4132,11 +4132,13 @@
                         hwyLaneFretClipMax = nearB.dMax;
                     }
 
+                    const sliceDt = AHEAD / HWY_LANE_TIME_SLICES;
                     const rawSeg = [];
                     for (let k = 0; k < HWY_LANE_TIME_SLICES; k++) {
-                        const dt0 = (k / HWY_LANE_TIME_SLICES) * AHEAD;
-                        const dt1 = ((k + 1) / HWY_LANE_TIME_SLICES) * AHEAD;
-                        const b = laneBoundsFromAnchor(getChartAnchorAt(anchors, now + (dt0 + dt1) * 0.5));
+                        const dt0 = k * sliceDt;
+                        const dt1 = (k + 1) * sliceDt;
+                        const tC = now + (dt0 + dt1) * 0.5;
+                        const b = laneBoundsFromAnchor(getChartAnchorAt(anchors, tC));
                         if (!b) continue;
                         const z0 = dZ(dt0) + TS * BEHIND;
                         const z1 = dZ(dt1) + TS * BEHIND;
