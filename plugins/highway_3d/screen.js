@@ -1601,6 +1601,9 @@
         let pSusOutline = null;
         let projMeshArr = null;
         let _probe = null;
+        let _ghostLblBox = null;
+        let _ghostLblMid = null;
+        let _ghostLblTowardCam = null;
         let _laneTargetColor = null;
         let _renderScale = 1;
         let lyricsCanvas = null, lyricsCtx = null;
@@ -1751,6 +1754,8 @@
         // Shared materials/geometry for the lane stripes — see initScene().
         // Hoisted so draw() can reference them when assigning per-stripe.
         let mLaneOdd = null, mLaneEven = null, gLanePlane = null;
+        /** Shared XY plane for ghost fret digits (lies on board like proj, not billboarding). */
+        let gGhostFretPlane = null, pGhostFretLbl = null;
         // Anchor-driven lane scratch buffers. Per-frame the loop builds up
         // to HWY_LANE_TIME_SLICES segments, but consecutive slices that share
         // an anchor (the common case) collapse into the same entry. Held as
@@ -2038,8 +2043,41 @@
             c.width = w; c.height = h;
             const x = c.getContext('2d');
             x.font = font;
-            x.textAlign = 'center';
-            x.textBaseline = 'middle';
+            // Fret / open-string digits: anchor from actualBoundingBox so the
+            // glyph sits at the true optical centre of the canvas (fixes
+            // sprites looking off-centre inside the board ghost and elsewhere).
+            const inkCenterFret = !wide && (sName === 'noteFret' || sName === 'open');
+            let drawX = w / 2;
+            let drawY = h / 2;
+            if (inkCenterFret) {
+                x.textAlign = 'left';
+                x.textBaseline = 'alphabetic';
+                const m = x.measureText(str);
+                const L = m.actualBoundingBoxLeft;
+                const R = m.actualBoundingBoxRight;
+                const A = m.actualBoundingBoxAscent;
+                const D = m.actualBoundingBoxDescent;
+                if (
+                    L != null && R != null && A != null && D != null &&
+                    Number.isFinite(L) && Number.isFinite(R) &&
+                    Number.isFinite(A) && Number.isFinite(D)
+                ) {
+                    const inkW = R - L;
+                    drawX = (w - inkW) / 2 - L;
+                    drawY = (h + A - D) / 2;
+                    // Tab digits sit visually a hair low vs bbox (stroke/shadow);
+                    // small canvas nudge keeps sprites centred on the board ghost.
+                    if (sName === 'noteFret') drawY -= h * 0.028;
+                } else {
+                    x.textAlign = 'center';
+                    x.textBaseline = 'middle';
+                    drawX = w / 2;
+                    drawY = h / 2;
+                }
+            } else {
+                x.textAlign = 'center';
+                x.textBaseline = 'middle';
+            }
             if (sp.shadow) {
                 x.shadowColor   = sp.shadow.color;
                 x.shadowBlur    = sp.shadow.blur;
@@ -2051,10 +2089,10 @@
                 x.miterLimit  = 2;
                 x.strokeStyle = sp.stroke;
                 x.lineWidth   = sp.strokeW;
-                x.strokeText(str, w / 2, h / 2);
+                x.strokeText(str, drawX, drawY);
             }
             x.fillStyle = col;
-            x.fillText(str, w / 2, h / 2);
+            x.fillText(str, drawX, drawY);
             const mat = new T.SpriteMaterial({
                 map: new T.CanvasTexture(c),
                 transparent: true,
@@ -2062,6 +2100,21 @@
             });
             txtCache[k] = mat;
             return mat;
+        }
+
+        /** MeshBasicMaterial sharing txtMat canvas texture — sits in board plane (not billboard). */
+        function _meshMatForGhostFretDigit(spriteMat) {
+            let mb = spriteMat.userData.h3dGhostFretMeshMat;
+            if (!mb) {
+                mb = new T.MeshBasicMaterial({
+                    map: spriteMat.map,
+                    transparent: true,
+                    depthTest: false,
+                    depthWrite: false,
+                });
+                spriteMat.userData.h3dGhostFretMeshMat = mb;
+            }
+            return mb;
         }
 
         function _disposeOpenStringPitchSprites() {
@@ -2183,7 +2236,12 @@
             let n = 0;
             return {
                 get() {
-                    if (n < a.length) { a[n].visible = true; return a[n++]; }
+                    if (n < a.length) {
+                        const o = a[n++];
+                        o.visible = true;
+                        if (o.center && o.center.isVector2) o.center.set(0.5, 0.5);
+                        return o;
+                    }
                     const o = mk(); parent.add(o); a.push(o); n++; return o;
                 },
                 reset() { for (let i = 0; i < a.length; i++) a[i].visible = false; n = 0; },
@@ -2867,6 +2925,9 @@
 
             ren = new T.WebGLRenderer({ antialias: true });
             _probe = new T.Vector3();
+            _ghostLblBox = new T.Box3();
+            _ghostLblMid = new T.Vector3();
+            _ghostLblTowardCam = new T.Vector3();
             ren.setClearColor(0x101820);
             wrap.appendChild(ren.domElement);
 
@@ -3116,6 +3177,18 @@
             _ownedSharedMats.push(mLaneOdd, mLaneEven);
             _ownedSharedGeos.push(gLanePlane);
             pLane = pool(noteG, () => new T.Mesh(gLanePlane, mLaneOdd));
+
+            gGhostFretPlane = new T.PlaneGeometry(1, 1);
+            _ownedSharedGeos.push(gGhostFretPlane);
+            const mGhostFretLblPh = new T.MeshBasicMaterial({
+                color: 0xffffff, transparent: true, depthTest: false, depthWrite: false,
+            });
+            _ownedSharedMats.push(mGhostFretLblPh);
+            pGhostFretLbl = pool(noteG, () => {
+                const m = new T.Mesh(gGhostFretPlane, mGhostFretLblPh);
+                m.renderOrder = 3;
+                return m;
+            });
 
             // Vertical fret dividers within active lane
             const gLaneDivider = new T.BoxGeometry(0.15 * K, 0.15 * K, 1);
@@ -4181,6 +4254,7 @@
             pBeat.reset(); pSec.reset();
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
+            if (pGhostFretLbl) pGhostFretLbl.reset();
             pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
             pFretColMarker.reset();
             _ndLabels = [];
@@ -5776,11 +5850,28 @@
                     fretNumberGhostScope === 'all' ||
                     (fretNumberGhostScope === 'rocksmith' && fromChord)
                 );
-                if (ghostFretOk) {
-                    const lb = pLbl.get();
-                    lb.material = txtMat(n.f, '#ffffff', false, 'noteFret');
-                    lb.scale.set(NW * 0.7 * _textSizeMul, NH * 0.85 * _textSizeMul, 1);
-                    lb.position.set(x, y, 0.012);
+                if (ghostFretOk && pGhostFretLbl && _ghostLblBox && _ghostLblMid && _ghostLblTowardCam && cam) {
+                    // Flat Mesh in the board XY plane (same as proj), not a Sprite billboard,
+                    // so perspective + projRim match the 3D ghost frame.
+                    const lb = pGhostFretLbl.get();
+                    const sprMat = txtMat(n.f, '#ffffff', false, 'noteFret');
+                    lb.material = _meshMatForGhostFretDigit(sprMat);
+                    const ghostOuterL = Math.max(NW * 1.1, NH * 1.1);
+                    const ghostLblS = 0.7 * ghostOuterL * _textSizeMul;
+                    lb.scale.set(ghostLblS, ghostLblS, 1);
+                    proj.updateMatrixWorld(true);
+                    _ghostLblBox.setFromObject(proj);
+                    _ghostLblBox.getCenter(_ghostLblMid);
+                    _ghostLblTowardCam.subVectors(cam.position, _ghostLblMid);
+                    const pull = _ghostLblTowardCam.length();
+                    const eps = 1.6 * K;
+                    if (pull > 1e-8) {
+                        _ghostLblTowardCam.multiplyScalar(eps / pull);
+                        lb.position.copy(_ghostLblMid).add(_ghostLblTowardCam);
+                    } else {
+                        lb.position.copy(_ghostLblMid);
+                    }
+                    lb.rotation.set(0, 0, projRim);
                 }
             }
         }
@@ -5924,7 +6015,13 @@
             // via scene.traverse if no event ever fired (never attached
             // to a mesh), so dispose explicitly.
             mHitOutline?.dispose?.(); mMissOutline?.dispose?.();
-            for (const k in txtCache) { txtCache[k].map?.dispose(); txtCache[k].dispose(); }
+            for (const k in txtCache) {
+                const tm = txtCache[k];
+                tm.userData.h3dGhostFretMeshMat?.dispose?.();
+                tm.userData.h3dGhostFretMeshMat = null;
+                tm.map?.dispose();
+                tm.dispose();
+            }
             // Dispose per-sprite cloned materials (e.g. pmMark._pmMat).
             // These aren't reachable via scene.traverse once the sprite
             // gets reassigned a different material, so the array tracks
@@ -5961,12 +6058,13 @@
             lyricsCanvas = lyricsCtx = null;
             projMeshArr = null;
             _probe = null;
+            _ghostLblBox = _ghostLblMid = _ghostLblTowardCam = null;
             _laneTargetColor = null;
             _renderScale = 1;
             mBeatM = mBeatQ = null;
             pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
-            pFretLbl = pLane = pLaneDivider = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = null;
-            mLaneOdd = mLaneEven = gLanePlane = null;
+            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = null;
+            mLaneOdd = mLaneEven = gLanePlane = gGhostFretPlane = null;
             chordFrameGradTex = null;
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
