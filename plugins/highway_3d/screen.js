@@ -1832,7 +1832,7 @@
         let _camPreScanned = false;
         let _songKey = null;
         // Smooth lookahead camera: fused world-X and displayed fret-span.
-        let _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
+        let _lookaheadCamX = xFretMid(CAM_LOCK_CENTER_FRET);
         let _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
         let _lookaheadCamPrevNow = null;
         let _lookaheadLowBonusU = 0;
@@ -3482,14 +3482,17 @@
             // without rebuilding the board geometry.
             // Nut lateral layout (matches headstock block below): playing strings start at the
             // fretboard-facing edge so they never project through nut/headstock.
+            const mir = _leftyCached ? -1 : 1;
             const nutLenX = 1.55 * K;
-            const nutXC = -0.78 * K;
-            const xHeadLeft = -6.85 * K;
+            const nutXC = -0.78 * K * mir;
+            const xHeadLeft = -6.85 * K * mir;
             const nutRearX = nutXC - nutLenX * 0.5;
             const nutFrontX = nutXC + nutLenX * 0.5;
-            boardStringStartX = nutFrontX + 0.03 * K;
-            boardTuningLabelX = (nutRearX + xHeadLeft) * 0.5 - 0.15 * K;
-            const stringEndX = fretX(NFRETS) + 2 * K;
+            const nutJoinX = nutFrontX + 0.03 * K;
+            const bridgeTipX = xFret(NFRETS) + 2 * K * mir;
+            boardStringStartX = Math.min(nutJoinX, bridgeTipX);
+            boardTuningLabelX = (nutRearX + xHeadLeft) * 0.5 - 0.15 * K * mir;
+            const stringEndX = Math.max(nutJoinX, bridgeTipX);
             const strSpan = Math.max(stringEndX - boardStringStartX, 1.5 * K);
 
             const lineGlowOp = 0.15 + 0.35 * vibrancy;
@@ -3541,7 +3544,7 @@
                     color: 0xa08058, roughness: 0.62, metalness: 0.02,
                 });
 
-                const coreLen = Math.max(nutRearX - xHeadLeft, 2 * K);
+                const coreLen = Math.max(Math.abs(nutRearX - xHeadLeft), 2 * K);
                 const coreCX = (nutRearX + xHeadLeft) * 0.5;
                 const headCoreD = 1.05 * K;
                 const headCore = new T.Mesh(
@@ -3784,8 +3787,8 @@
 
         function lookaheadTargetWorldX(minF, maxF) {
             const wb = CAM_FRET_EDGE_BLEND;
-            const middle = (fretMid(minF) + fretMid(maxF)) * 0.5;
-            const weighted = 0.6 * fretX(0) + 0.4 * fretX(NFRETS);
+            const middle = (xFretMid(minF) + xFretMid(maxF)) * 0.5;
+            const weighted = 0.6 * xFret(0) + 0.4 * xFret(NFRETS);
             return middle * (1 - wb) + weighted * wb;
         }
 
@@ -4122,7 +4125,7 @@
                     tgtDist = curDist = CAM_DIST_BASE;
                     prevLowFretBonus = 0;
                     prevLockActive = false;
-                    _lookaheadCamX = fretMid(CAM_LOCK_CENTER_FRET);
+                    _lookaheadCamX = xFretMid(CAM_LOCK_CENTER_FRET);
                     _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
                     _lookaheadCamPrevNow = null;
                     _lookaheadLowBonusU = 0;
@@ -4165,7 +4168,7 @@
                                 const lockedBonusU = camLowFretPullbackU(1);
                                 const lockZoomMul = CAM_LOCK_ZOOM_MIN +
                                     (CAM_LOCK_ZOOM_MAX - CAM_LOCK_ZOOM_MIN) * cameraLockZoom;
-                                tgtX = fretMid(CAM_LOCK_CENTER_FRET);
+                                tgtX = xFretMid(CAM_LOCK_CENTER_FRET);
                                 tgtDist = (lockedBaseU + lockedBonusU) * K * lockZoomMul;
                                 prevLowFretBonus = lockedBonusU;
                                 _lookaheadLowBonusU = lockedBonusU;
@@ -4254,7 +4257,7 @@
                     let singleOpenX;
                     if (n.f === 0) {
                         const ab = anchorLaneBoundsAt(anchors, n.t);
-                        if (ab) singleOpenX = (fretX(ab.dMin) + fretX(ab.dMax)) / 2;
+                        if (ab) singleOpenX = (xFret(ab.dMin) + xFret(ab.dMax)) / 2;
                     }
                     const singleOpenLaneW = n.f === 0 ? openNoteLaneBoxW(n.t) : undefined;
                     drawNote(n, now, singleOpenX, isNext, skipLabel, false, 0.05, singleOpenLaneW);
@@ -4369,8 +4372,8 @@
                     let chordFrameXL = null, chordFrameXR = null, chordOpenBoxW = null;
                     if (chordNotes.length > 1) {
                         if (chAncB) {
-                            chordFrameXL = fretX(chAncB.dMin);
-                            chordFrameXR = fretX(chAncB.dMax);
+                            chordFrameXL = xFret(chAncB.dMin);
+                            chordFrameXR = xFret(chAncB.dMax);
                         } else {
                             let fMinCh = 99, fMaxCh = 0;
                             for (const cn of chordNotes) {
@@ -4380,13 +4383,16 @@
                                 }
                             }
                             if (fMinCh < 99) {
-                                chordFrameXL = fretX(fMinCh - 1);
-                                chordFrameXR = fretX(Math.max(fMaxCh, fMinCh + 2));
+                                chordFrameXL = xFret(fMinCh - 1);
+                                chordFrameXR = xFret(Math.max(fMaxCh, fMinCh + 2));
                             }
                         }
-                        if (chordFrameXL != null && chordFrameXR != null && chordFrameXR > chordFrameXL) {
-                            const padX = NW * 0.4;
-                            chordOpenBoxW = (chordFrameXR - chordFrameXL) + padX * 2;
+                        if (chordFrameXL != null && chordFrameXR != null) {
+                            const span = Math.abs(chordFrameXR - chordFrameXL);
+                            if (span > 1e-8) {
+                                const padX = NW * 0.4;
+                                chordOpenBoxW = span + padX * 2;
+                            }
                         }
                     }
 
@@ -4960,7 +4966,7 @@
                     const lockedBaseU = camBaseDistU(12);
                     const lockZoomMul = CAM_LOCK_ZOOM_MIN +
                         (CAM_LOCK_ZOOM_MAX - CAM_LOCK_ZOOM_MIN) * cameraLockZoom;
-                    lookaheadSmoothCamStep(dtSec, fretMid(CAM_LOCK_CENTER_FRET), 12);
+                    lookaheadSmoothCamStep(dtSec, xFretMid(CAM_LOCK_CENTER_FRET), 12);
                     tgtX = _lookaheadCamX;
                     tgtDist = (lockedBaseU + _lookaheadLowBonusU) * K * lockZoomMul;
                     prevLowFretBonus = _lookaheadLowBonusU;
@@ -5616,6 +5622,9 @@
                         for (const m of mats) m?.dispose?.();
                     }
                 });
+                // Shared chord-frame fill gradient — not owned by txtCache;
+                // MeshBasicMaterial.dispose() does not release maps.
+                chordFrameGradTex?.dispose?.();
             }
             gNote?.dispose?.(); gSus?.dispose?.(); gBeat?.dispose?.(); gTechArrow?.dispose?.(); gTapChevron?.dispose?.();
             for (const m of mStr) m?.dispose?.();
