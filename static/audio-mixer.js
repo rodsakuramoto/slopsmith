@@ -53,6 +53,14 @@ function _writeSongVolume(v) {
     _songVolumeMemory = normalized;
     const a = _audioEl();
     if (a) a.volume = normalized / 100;
+    // Desktop + JUCE: song audio is mixed in the native engine; HTML5 volume is ignored.
+    const linear = normalized / 100;
+    if (window._juceMode) {
+        const setGain = window.slopsmithDesktop?.audio?.setGain;
+        if (typeof setGain === 'function') {
+            Promise.resolve(setGain('backing', linear)).catch(function () { /* IPC unavailable */ });
+        }
+    }
     try {
         localStorage.setItem('volume', String(normalized));
     } catch (e) {

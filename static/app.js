@@ -2614,6 +2614,164 @@ const jucePlayer = {
 };
 window.jucePlayer = jucePlayer;
 
+// Desktop JUCE backing uses an empty <audio> element; plugins such as Section Map
+// still seek via audio.currentTime / pause / play. Mirror those onto jucePlayer
+// while _juceMode is active. Same-tick pause+seek coalesce into a single seek
+// (no stopBacking before seek — HTML5 needed that for buffering; JUCE does not).
+let _resetJuceAudioShimChain = function () {};
+(function _installJuceAudioElementShim() {
+    if (!window.slopsmithDesktop?.audio) return;
+
+    const mediaProto = HTMLMediaElement.prototype;
+    const ctDesc = Object.getOwnPropertyDescriptor(mediaProto, 'currentTime');
+    const pausedDesc = Object.getOwnPropertyDescriptor(mediaProto, 'paused');
+    if (!ctDesc?.get || !ctDesc?.set || !pausedDesc?.get) return;
+
+    const nativePlay = mediaProto.play;
+    const nativePause = mediaProto.pause;
+
+    let chain = Promise.resolve();
+    /** Same-tick pause + seek (Section Map): coalesce to one seek — no stopBacking before seek. */
+    let _juceShimBatch = null;
+    let _juceShimBatchFlushScheduled = false;
+    let _juceShimGen = 0;
+    function enqueue(fn) {
+        const gen = _juceShimGen;
+        const p = chain.then(async () => {
+            if (gen !== _juceShimGen) return;
+            return fn(gen);
+        });
+        chain = p.catch((e) => {
+            console.warn('[juce-audio-shim]', e);
+        });
+        return p;
+    }
+    // forUpcomingPlay: caller will enqueue a play() right after, so don't
+    // emit pause-state side effects for a wantsPause batch — play() will
+    // overwrite them anyway.
+    function flushJuceShimBatchNow({ forUpcomingPlay = false } = {}) {
+        _juceShimBatchFlushScheduled = false;
+        const batch = _juceShimBatch;
+        _juceShimBatch = null;
+        if (!batch || !window._juceMode) return;
+        const wantsPause = !!batch.wantsPause;
+        const seekTime = batch.seekTime;
+        if (wantsPause && seekTime !== undefined) {
+            enqueue(async (gen) => {
+                await jucePlayer.seek(seekTime);
+                if (gen !== _juceShimGen) return;
+                if (!forUpcomingPlay) {
+                    await jucePlayer.pause();
+                    if (gen !== _juceShimGen) return;
+                    isPlaying = false;
+                    document.getElementById('btn-play').textContent = '▶ Play';
+                    const sm = window.slopsmith;
+                    if (sm) {
+                        sm.isPlaying = false;
+                        sm.emit('song:pause', { time: jucePlayer.currentTime });
+                    }
+                }
+                audio.dispatchEvent(new Event('seeked'));
+            });
+            return;
+        }
+        if (wantsPause) {
+            enqueue(async (gen) => {
+                await jucePlayer.pause();
+                if (gen !== _juceShimGen) return;
+                isPlaying = false;
+                document.getElementById('btn-play').textContent = '▶ Play';
+                const sm = window.slopsmith;
+                if (sm) {
+                    sm.isPlaying = false;
+                    sm.emit('song:pause', { time: jucePlayer.currentTime });
+                }
+            });
+            return;
+        }
+        if (seekTime !== undefined) {
+            enqueue(async (gen) => {
+                await jucePlayer.seek(seekTime);
+                if (gen !== _juceShimGen) return;
+                audio.dispatchEvent(new Event('seeked'));
+            });
+        }
+    }
+    function scheduleJuceShimBatchFlush() {
+        if (_juceShimBatchFlushScheduled) return;
+        _juceShimBatchFlushScheduled = true;
+        const flushGen = _juceShimGen;
+        queueMicrotask(() => {
+            if (flushGen !== _juceShimGen) {
+                _juceShimBatchFlushScheduled = false;
+                return;
+            }
+            flushJuceShimBatchNow();
+        });
+    }
+    _resetJuceAudioShimChain = function () {
+        chain = Promise.resolve();
+        _juceShimBatch = null;
+        _juceShimBatchFlushScheduled = false;
+        _juceShimGen++;
+    };
+
+    Object.defineProperty(audio, 'currentTime', {
+        get() {
+            if (window._juceMode) return jucePlayer.currentTime;
+            return ctDesc.get.call(this);
+        },
+        set(v) {
+            if (window._juceMode) {
+                const t = Math.max(0, Number(v) || 0);
+                _juceShimBatch = _juceShimBatch || {};
+                _juceShimBatch.seekTime = t;
+                scheduleJuceShimBatchFlush();
+                return;
+            }
+            ctDesc.set.call(this, v);
+        },
+        configurable: true,
+    });
+
+    Object.defineProperty(audio, 'paused', {
+        get() {
+            if (window._juceMode) return !isPlaying;
+            return pausedDesc.get.call(this);
+        },
+        configurable: true,
+    });
+
+    audio.pause = function () {
+        if (window._juceMode) {
+            _juceShimBatch = _juceShimBatch || {};
+            _juceShimBatch.wantsPause = true;
+            scheduleJuceShimBatchFlush();
+            return;
+        }
+        nativePause.call(audio);
+    };
+
+    audio.play = function () {
+        if (window._juceMode) {
+            if (_juceShimBatch != null) flushJuceShimBatchNow({ forUpcomingPlay: true });
+            const p = enqueue(async (gen) => {
+                const started = await jucePlayer.play();
+                if (gen !== _juceShimGen || !started) return;
+                isPlaying = true;
+                document.getElementById('btn-play').textContent = '⏸ Pause';
+                const sm = window.slopsmith;
+                if (sm) {
+                    sm.isPlaying = true;
+                    sm.emit('song:play', { time: jucePlayer.currentTime });
+                }
+            });
+            return p.then(() => undefined);
+        }
+        return nativePlay.call(audio);
+    };
+})();
+
 function _audioTime() { return window._juceMode ? jucePlayer.currentTime : audio.currentTime; }
 function _audioDuration() { return window._juceMode ? jucePlayer.duration : audio.duration; }
 async function _audioSeek(s) {
@@ -2724,6 +2882,11 @@ async function playSong(filename, arrangement) {
     artAbortController = null;
 
     highway.stop();
+    // Reset the JUCE shim BEFORE awaiting jucePlayer.stop() so any in-flight
+    // shim closures see a stale generation after their await and bail out
+    // before mutating isPlaying / button label / song:* events for the
+    // outgoing song.
+    _resetJuceAudioShimChain();
     if (window._juceMode) {
         await jucePlayer.stop().catch(() => {});
         window._juceMode = false;

@@ -2160,6 +2160,26 @@ function createHighway() {
                                                         if (gen !== _wsGen) return; // stale
                                                         window._juceMode = true;
                                                         window._juceAudioUrl = audioUrl;
+                                                        // Match native backing gain to the Song mixer / persisted volume
+                                                        // (default engine backing is ~0.7 linear; HTML path uses audio.volume).
+                                                        let songPct = window.slopsmith?.audio?.readSongVolume?.();
+                                                        if (!Number.isFinite(songPct)) {
+                                                            try {
+                                                                songPct = parseFloat(localStorage.getItem('volume'));
+                                                            } catch (_e) { songPct = NaN; }
+                                                        }
+                                                        if (!Number.isFinite(songPct)) songPct = 80;
+                                                        songPct = Math.min(100, Math.max(0, songPct));
+                                                        // Don't let setGain failures flip routing back to HTML5 —
+                                                        // the backing track already loaded successfully. Wrap in
+                                                        // its own try/catch and re-check generation after the
+                                                        // await so a reconnect mid-flight can't apply stale state.
+                                                        try {
+                                                            await juceApi.setGain('backing', songPct / 100);
+                                                        } catch (gainErr) {
+                                                            console.warn('[highway] JUCE setGain backing failed', gainErr);
+                                                        }
+                                                        if (gen !== _wsGen) return; // stale
                                                         // Clear the HTML5 element so it does not buffer an unused track
                                                         audio.src = '';
                                                         return;
