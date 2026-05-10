@@ -208,7 +208,9 @@
     /**
      * Post-hit tail fade shared by ghost fret digits and 3D chord UI: full
      * opacity until (holdS − fadeS) after onset, then linear fade over fadeS;
-     * canceled when `nextSoon` (next chord / note within that fade window).
+     * canceled when `nextSoon` — for ghosts: next note within `fadeS` of `now`;
+     * for chord frame: next chord onset lies in chart time [hold − fade, hold]
+     * after the current chord (so fade does not run into a same-window handoff).
      * @param {number} dt chart time minus now (negative once struck)
      * @param {number} fadeS linear fade duration (default: GHOST_FRET_LBL_FADE_S)
      */
@@ -5697,11 +5699,15 @@
                     // Chord frame-box: rim bars + interior fill gradient.
                     const chDt = ch.t - now;
                     let chordNextSoon = false;
+                    const chordFadeWinLo = ch.t + (CHORD_HWY_LINGER_S - CHORD_HWY_FADE_S);
+                    const chordFadeWinHi = ch.t + CHORD_HWY_LINGER_S;
                     for (let j = ci + 1; j < chords.length; j++) {
                         const cj = chords[j];
                         if (!cj?.notes) continue;
                         if (filterValidNotes(cj.notes).length === 0) continue;
-                        if (cj.t > ch.t + 1e-6 && (cj.t - now) <= CHORD_HWY_FADE_S) {
+                        if (cj.t > ch.t + 1e-6
+                            && cj.t >= chordFadeWinLo - 1e-6
+                            && cj.t <= chordFadeWinHi + 1e-6) {
                             chordNextSoon = true;
                         }
                         break;
