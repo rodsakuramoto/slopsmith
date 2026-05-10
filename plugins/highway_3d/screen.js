@@ -164,6 +164,8 @@
     const TS = 200 * K;
     /** Match `nextNoteByString` onset to this note (float + chart rounding; avoids ghost / glow flicker). */
     const NEXT_ON_STRING_T_EPS = 0.06;
+    /** `nextNoteByString` only lists `t > now`, so at/after onset it advances — keep board ghost visible this long past `n.t`. */
+    const GHOST_HOLD_AFTER_ONSET = 0.15;
 
     // Shorter, flatter notes (joel style)
     const NW = 5 * K, NH = 3 * K, ND = 0.5 * K;
@@ -4645,7 +4647,7 @@
                         if (ab) singleOpenX = (xFret(ab.dMin) + xFret(ab.dMax)) / 2;
                     }
                     const singleOpenLaneW = n.f === 0 ? openNoteLaneBoxW(n.t) : undefined;
-                    drawNote(n, now, singleOpenX, isNext, skipLabel, false, 0.05, singleOpenLaneW, false, undefined);
+                    drawNote(n, now, singleOpenX, isNext, skipLabel, false, GHOST_HOLD_AFTER_ONSET, singleOpenLaneW, false, undefined);
                     lastFretForString[n.s] = n.f;
                     // Onset in window OR started before the window but
                     // still sustaining right now. Gate sustain carry-over
@@ -5602,8 +5604,11 @@
             // spreads, so re-check here before indexing material arrays.
             if (!validString(s)) return;
             const nxFrame = _drawNextByString && _drawNextByString[s];
-            const isNextOnString = nxFrame != null && Math.abs(nxFrame.t - n.t) < NEXT_ON_STRING_T_EPS;
             const dt = n.t - now;
+            const nextTAligned = nxFrame != null && Math.abs(nxFrame.t - n.t) < NEXT_ON_STRING_T_EPS;
+            const ghostPastHold = dt <= 0 && dt > -GHOST_HOLD_AFTER_ONSET
+                && (nxFrame == null || nxFrame.t > n.t - 1e-6);
+            const isNextOnString = nextTAligned || ghostPastHold;
             const y = sY(s);
             const susEnd = n.t + (n.sus || 0);
             const hasSus = n.sus > 0;
@@ -5672,8 +5677,8 @@
                     });
                 }
                 const PROJ_WIN_G = 0.6;
-                const projFactorG = Math.max(0, Math.min(1, 1 - dt / PROJ_WIN_G));
-                const inGhostWin = n.f > 0 && isNextOnString && dt > 0 && dt < PROJ_WIN_G &&
+                const projFactorG = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN_G));
+                const inGhostWin = n.f > 0 && isNextOnString && dt > -GHOST_HOLD_AFTER_ONSET && dt < PROJ_WIN_G &&
                     projFactorG > 0.001;
 
                 const outline = pNote.get();
@@ -5897,8 +5902,8 @@
 
             // ── Board ghost: filled rim at Z=0 (always drawn for isNext) ─
             const PROJ_WIN = 0.6;
-            const projFactor = Math.max(0, Math.min(1, 1 - dt / PROJ_WIN));
-            if (n.f > 0 && isNextOnString && dt > 0 && dt < PROJ_WIN && projFactor > 0.001) {
+            const projFactor = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN));
+            if (n.f > 0 && isNextOnString && dt > -GHOST_HOLD_AFTER_ONSET && dt < PROJ_WIN && projFactor > 0.001) {
                 // Ghost stays at final "on the board" orientation — not the
                 // incoming approachRot sweep — so it nests with the note at impact.
                 const projRim = isHarm ? Math.PI / 4 : 0;
