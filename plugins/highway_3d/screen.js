@@ -180,6 +180,13 @@
     const CHORD_HWY_FADE_S = 0.32;
     const GHOST_HOLD_AFTER_ONSET = CHORD_HWY_LINGER_S;
     const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
+    /**
+     * When the previous chord (different voicing) is still in its post-hit tail, hide the
+     * incoming chord’s cyan frame only while it is closer than this many seconds to its hit —
+     * roughly the chart gap D5→D#5. Gems/ghost keep full ``AHEAD``; only the 3D rim/fill mutexes.
+     * Epsilon avoids z-fighting the handoff frame.
+     */
+    const CHORD_FRAME_MUTEX_TAIL_EPS = 1.2e-3;
     /** Purple lane rails: extend past last matched chord/note so Z reaches frame end. */
     const ARP_HWY_RAIL_END_TAIL_S = 0.38;
     /** Keep 0 — chord/note-based ``shapeLo`` already aligns to the visible frame. */
@@ -5726,7 +5733,32 @@
                     // Chord frame-box: rim bars + interior fill gradient.
                     const chDt = ch.t - now;
                     const chordTailMul = hwyPostHitTailFadeMul(chDt, chordTailHoldS, chordNextSoon, chordTailFadeS);
-                    if (chShape.size > 1 && chDt > -chordTailHoldS && chDt < AHEAD && chordOpenBoxW != null) {
+                    let skipNeckMutexChordFrame = false;
+                    if (ch.t > now + 1e-9 && chShape.size > 1) {
+                        let cpPrev = null;
+                        for (let pi = ci - 1; pi >= 0; pi--) {
+                            const cp = chords[pi];
+                            if (!cp?.notes) continue;
+                            if (filterValidNotes(cp.notes).length === 0) continue;
+                            cpPrev = cp;
+                            break;
+                        }
+                        if (cpPrev && ch.t > cpPrev.t + 1e-6) {
+                            const prevSig = chordShapeSignature(cpPrev);
+                            const sameVoicingPrev = runSig !== null && prevSig !== null && prevSig === runSig;
+                            if (!sameVoicingPrev) {
+                                const gapClip = Math.min(CHORD_HWY_LINGER_S, Math.max(ch.t - cpPrev.t, 1e-3));
+                                const prevInPostHitTail = now >= cpPrev.t - 1e-6 && now < cpPrev.t + gapClip - CHORD_FRAME_MUTEX_TAIL_EPS;
+                                const dtToHit = ch.t - now;
+                                if (prevInPostHitTail && dtToHit > 0
+                                    && dtToHit < gapClip - CHORD_FRAME_MUTEX_TAIL_EPS) {
+                                    skipNeckMutexChordFrame = true;
+                                }
+                            }
+                        }
+                    }
+                    if (chShape.size > 1 && chDt > -chordTailHoldS && chDt < AHEAD && chordOpenBoxW != null
+                        && !skipNeckMutexChordFrame) {
                         const z = Math.min(0, dZ(chDt));
                         const width = chordOpenBoxW;
                         const xLeft = chordFrameXL;
