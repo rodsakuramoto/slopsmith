@@ -1717,6 +1717,14 @@
         // wave's flight even as activeFrets shifts mid-song. Entries are
         // pruned each frame once their wave has passed `now`.
         let _fretMarkerWaveCache = new Map();
+        // Per-frame booleans: handShapes[i] passes inferArpeggioFromNotePattern
+        // once (see fillArpeggioGhostInferFlags) so the note loop skips O(hs×notes)
+        // rescans — ref fillArpeggioGhostInferFlags in update().
+        let _arpGhostHsInferScratch = [];
+        /** Per-frame: ``handShapeIsArpeggioForLaneRail`` baked once — lane slices were O(96 × hs × infer). */
+        let _arpLaneRailHsScratch = [];
+        let _arpRailBoundLoScratch = [];
+        let _arpRailBoundHiScratch = [];
         let _lastHwW = 0, _lastHwH = 0;
         let mBeatM = null, mBeatQ = null;
         let txtCache = {};
@@ -4549,6 +4557,14 @@
          *        When set (e.g. from ``<handShape>`` span), scan staggered picks
          *        across the whole held-shape window — RS often omits ``arp`` and ``hd``.
          */
+        function hitTimesQualifyArpeggioSpread(hitTimes) {
+            if (hitTimes.length < 2) return false;
+            hitTimes.sort((a, b) => a - b);
+            const spread = hitTimes[hitTimes.length - 1] - hitTimes[0];
+            if (spread >= 0.03) return true;
+            return hitTimes.length >= 4 && spread >= 0.016;
+        }
+
         function inferArpeggioFromNotePattern(ch, shape, notesArr, timeWin) {
             if (!notesArr || notesArr.length === 0 || shape.size < 2) return false;
             const tHi = timeWin ? timeWin.tHi : ch.t + 2.35;
@@ -4564,11 +4580,7 @@
                 if (ef === undefined || ef !== n.f) continue;
                 hitTimes.push(n.t);
             }
-            if (hitTimes.length < 2) return false;
-            hitTimes.sort((a, b) => a - b);
-            const spread = hitTimes[hitTimes.length - 1] - hitTimes[0];
-            if (spread >= 0.03) return true;
-            return hitTimes.length >= 4 && spread >= 0.016;
+            return hitTimesQualifyArpeggioSpread(hitTimes);
         }
 
         /**
@@ -4594,6 +4606,52 @@
                 const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
                 const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
                 if (inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw)) return cid;
+            }
+            return null;
+        }
+
+        /**
+         * Per-frame warmup: ``inferArpeggioFromNotePattern`` depends only on
+         * ``handShape × chart``, not on the candidate note — the old path
+         * recomputed it for every visible note (O(notecount × hs × notescan)).
+         * Fill ``outFlags[i]`` with the boolean once per ``handShapes[i]``.
+         */
+        function fillArpeggioGhostInferFlags(handShapes, chordTemplates, notesArr, outFlags) {
+            for (let i = 0; i < handShapes.length; i++) {
+                let infer = false;
+                const hs = handShapes[i];
+                const cid = hs.chord_id;
+                if (cid != null && notesArr.length > 0) {
+                    const tmpl = chordTemplates?.[cid] ?? chordTemplates?.[Number(cid)];
+                    if (tmpl && Array.isArray(tmpl.frets)) {
+                        const synthNotes = chordNotesFromTemplate(cid, chordTemplates);
+                        if (synthNotes.length > 0) {
+                            const fakeCh = { t: hs.start_time, id: cid, notes: synthNotes };
+                            const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
+                            const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
+                            infer = inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw);
+                        }
+                    }
+                }
+                outFlags[i] = infer;
+            }
+        }
+
+        function arpeggioChordIdForNoteWithInferCache(n, handShapes, chordTemplates, notesArr, hsInferFlags) {
+            if (!handShapes || handShapes.length === 0 || !notesArr || notesArr.length === 0 || !hsInferFlags)
+                return arpeggioChordIdForNote(n, handShapes, chordTemplates, notesArr);
+            if (!validString(n.s)) return null;
+            for (let i = 0; i < handShapes.length; i++) {
+                if (!hsInferFlags[i]) continue;
+                const hs = handShapes[i];
+                if (n.t + 1e-4 < hs.start_time || n.t > hs.end_time + 1e-4) continue;
+                const cid = hs.chord_id;
+                if (cid == null) continue;
+                const tmpl = chordTemplates?.[cid] ?? chordTemplates?.[Number(cid)];
+                if (!tmpl || !Array.isArray(tmpl.frets)) continue;
+                const tf = tmpl.frets[n.s];
+                if (typeof tf !== 'number' || tf < 0 || n.f !== tf) continue;
+                return cid;
             }
             return null;
         }
@@ -4670,30 +4728,64 @@
             return { shapeLo, shapeHi };
         }
 
+        function fillLaneRailHandShapeFlags(handShapes, chordTemplates, notesArr, chords, outFlags) {
+            const nHs = handShapes.length;
+            for (let i = 0; i < nHs; i++) {
+                outFlags[i] = handShapeIsArpeggioForLaneRail(
+                    handShapes[i], handShapes, chordTemplates, notesArr, chords,
+                );
+            }
+        }
+
+        function fillArpeggioRailShapeBoundsCaches(
+            handShapes, chords, chordTemplates, notesArr, laneRailFlags, loOut, hiOut,
+        ) {
+            const nHs = handShapes.length;
+            for (let i = 0; i < nHs; i++) {
+                if (!laneRailFlags[i]) continue;
+                const b = effectiveArpRailChartBoundsForHandShape(
+                    handShapes[i], chords, chordTemplates, notesArr,
+                );
+                loOut[i] = b.shapeLo;
+                hiOut[i] = b.shapeHi;
+            }
+        }
+
         /** ``[tChartLo,tChartHi]`` chart times that a lane slice covers (see module ``BEHIND`` / approach ``dt``). */
-        function arpeggioLaneOuterRailChartIntervalOverlaps(tChartLo, tChartHi, handShapes, chordTemplates, notesArr, chords) {
+        function arpeggioLaneOuterRailChartIntervalOverlaps(
+            tChartLo,
+            tChartHi,
+            handShapes,
+            boundLo,
+            boundHi,
+            laneRailFlags,
+        ) {
             if (!handShapes || handShapes.length === 0) return false;
+            if (!laneRailFlags) return false;
             if (tChartHi < tChartLo) {
                 const s = tChartLo;
                 tChartLo = tChartHi;
                 tChartHi = s;
             }
             for (let i = 0; i < handShapes.length; i++) {
-                const hs = handShapes[i];
-                if (!handShapeIsArpeggioForLaneRail(hs, handShapes, chordTemplates, notesArr, chords)) continue;
-                const { shapeLo, shapeHi } = effectiveArpRailChartBoundsForHandShape(
-                    hs, chords, chordTemplates, notesArr,
-                );
+                if (!laneRailFlags[i]) continue;
+                const shapeLo = boundLo[i];
+                const shapeHi = boundHi[i];
                 if (tChartHi < shapeLo - 1e-4 || tChartLo > shapeHi + 1e-4) continue;
                 return true;
             }
             return false;
         }
 
-        function arpeggioLaneOuterRailLaneSlice(dt0, dt1, nowClock, handShapes, chordTemplates, notesArr, chords) {
+        function arpeggioLaneOuterRailLaneSlice(
+            dt0, dt1, nowClock,
+            handShapes, boundLo, boundHi, laneRailFlags,
+        ) {
             const tLo = nowClock + Math.min(dt0, dt1) - BEHIND;
             const tHi = nowClock + Math.max(dt0, dt1) - BEHIND;
-            return arpeggioLaneOuterRailChartIntervalOverlaps(tLo, tHi, handShapes, chordTemplates, notesArr, chords);
+            return arpeggioLaneOuterRailChartIntervalOverlaps(
+                tLo, tHi, handShapes, boundLo, boundHi, laneRailFlags,
+            );
         }
 
         /**
@@ -4701,9 +4793,11 @@
          * Uses a short end tail only — no ``CHORD_HWY_LINGER_S`` — so purple lane
          * rails match visible highway slices and do not leak after shapes end.
          */
-        function arpeggioLaneOuterRailAtChartTime(chartT, handShapes, chordTemplates, notesArr, chords) {
+        function arpeggioLaneOuterRailAtChartTime(
+            chartT, handShapes, boundLo, boundHi, laneRailFlags,
+        ) {
             return arpeggioLaneOuterRailChartIntervalOverlaps(
-                chartT, chartT, handShapes, chordTemplates, notesArr, chords,
+                chartT, chartT, handShapes, boundLo, boundHi, laneRailFlags,
             );
         }
 
@@ -4712,22 +4806,21 @@
          * rails match an accented frame when the active hand shape links to a
          * chord row that carries ``.ac`` notes.
          */
-        function arpeggioLaneDividerFrameAccentMul(nowT, handShapes, chordTemplates, notesArr, chords) {
+        function arpeggioLaneDividerFrameAccentMul(nowT, handShapes, chords, boundLo, boundHi, laneRailFlags) {
             if (!handShapes || handShapes.length === 0 || !chords || chords.length === 0) return 1;
+            if (!laneRailFlags) return 1;
             for (let i = 0; i < handShapes.length; i++) {
-                const hs = handShapes[i];
-                if (!handShapeIsArpeggioForLaneRail(hs, handShapes, chordTemplates, notesArr, chords)) continue;
-                const { shapeLo, shapeHi } = effectiveArpRailChartBoundsForHandShape(
-                    hs, chords, chordTemplates, notesArr,
-                );
+                if (!laneRailFlags[i]) continue;
+                const shapeLo = boundLo[i];
+                const shapeHi = boundHi[i];
                 if (nowT + 1e-4 < shapeLo || nowT > shapeHi + 1e-4) continue;
 
-                const cid = hs.chord_id;
+                const cid = handShapes[i].chord_id;
                 if (cid == null) return 1;
                 for (let j = 0; j < chords.length; j++) {
                     const ch = chords[j];
                     if (ch.id !== cid && Number(ch.id) !== Number(cid)) continue;
-                    if (Math.abs(ch.t - hs.start_time) > 0.12) continue;
+                    if (Math.abs(ch.t - handShapes[i].start_time) > 0.12) continue;
                     const chordNotes = ch.notes ? filterValidNotes(ch.notes) : [];
                     if (chordNotes.some(cn => cn.ac)) return 1.22;
                     return 1;
@@ -4809,6 +4902,46 @@
                 bundle.handShapes,
                 bundle.chordTemplates,
             );
+
+            let arpGhostHsInfer = null;
+            const hsForArpGhost = bundle.handShapes;
+            if (hsForArpGhost && hsForArpGhost.length && notes && notes.length) {
+                const nHs = hsForArpGhost.length;
+                while (_arpGhostHsInferScratch.length < nHs) _arpGhostHsInferScratch.push(false);
+                fillArpeggioGhostInferFlags(hsForArpGhost, bundle.chordTemplates, notes, _arpGhostHsInferScratch);
+                arpGhostHsInfer = _arpGhostHsInferScratch;
+            }
+
+            /** Arpeggio lane purple rails — per-frame inferred/bounds caches (avoid 96 × hs × infer). */
+            let laneRailArpHsFlags = null;
+            let laneRailBoundLo = null;
+            let laneRailBoundHi = null;
+            const hsLaneRail = bundle.handShapes;
+            const chordArrForRails = chords ?? [];
+            const notesArrForRails = notes || [];
+            if (hsLaneRail && hsLaneRail.length) {
+                const nHsL = hsLaneRail.length;
+                while (_arpLaneRailHsScratch.length < nHsL) _arpLaneRailHsScratch.push(false);
+                while (_arpRailBoundLoScratch.length < nHsL) {
+                    _arpRailBoundLoScratch.push(0);
+                    _arpRailBoundHiScratch.push(0);
+                }
+                fillLaneRailHandShapeFlags(
+                    hsLaneRail, bundle.chordTemplates, notesArrForRails, chordArrForRails, _arpLaneRailHsScratch,
+                );
+                fillArpeggioRailShapeBoundsCaches(
+                    hsLaneRail,
+                    chordArrForRails,
+                    bundle.chordTemplates,
+                    notesArrForRails,
+                    _arpLaneRailHsScratch,
+                    _arpRailBoundLoScratch,
+                    _arpRailBoundHiScratch,
+                );
+                laneRailArpHsFlags = _arpLaneRailHsScratch;
+                laneRailBoundLo = _arpRailBoundLoScratch;
+                laneRailBoundHi = _arpRailBoundHiScratch;
+            }
             const beats = bundle.beats;
             const sections = bundle.sections;
             const anchors = bundle.anchors;
@@ -5209,7 +5342,13 @@
                         if (ab) singleOpenX = (xFret(ab.dMin) + xFret(ab.dMax)) / 2;
                     }
                     const singleOpenLaneW = n.f === 0 ? openNoteLaneBoxW(n.t) : undefined;
-                    const arGhostCid = arpeggioChordIdForNote(n, bundle.handShapes, bundle.chordTemplates, notes);
+                    const arGhostCid = arpeggioChordIdForNoteWithInferCache(
+                        n,
+                        bundle.handShapes,
+                        bundle.chordTemplates,
+                        notes,
+                        arpGhostHsInfer,
+                    );
                     drawNote(
                         n,
                         now,
@@ -5638,16 +5777,14 @@
             // fret and stuck out past the lane whenever the camera narrowed.
             let hwyLaneFretClipMin = null, hwyLaneFretClipMax = null;
 
-            hwyLaneArpOuterDividers = arpeggioLaneOuterRailAtChartTime(
-                now,
-                bundle.handShapes,
-                bundle.chordTemplates,
-                notes,
-                chords,
-            );
-            const arpLaneRimAccentMul = hwyLaneArpOuterDividers
+            const handShapesRails = bundle.handShapes;
+            hwyLaneArpOuterDividers = !!(handShapesRails && handShapesRails.length && laneRailArpHsFlags
+                && arpeggioLaneOuterRailAtChartTime(
+                    now, handShapesRails, laneRailBoundLo, laneRailBoundHi, laneRailArpHsFlags,
+                ));
+            const arpLaneRimAccentMul = hwyLaneArpOuterDividers && laneRailArpHsFlags && handShapesRails
                 ? arpeggioLaneDividerFrameAccentMul(
-                    now, bundle.handShapes, bundle.chordTemplates, notes, chords,
+                    now, handShapesRails, chords, laneRailBoundLo, laneRailBoundHi, laneRailArpHsFlags,
                 )
                 : 1;
             const arpLaneS = hwyLaneArpOuterDividers
@@ -5685,9 +5822,12 @@
                         if (!b) continue;
                         const z0 = dZ(dt0) + TS * BEHIND;
                         const z1 = dZ(dt1) + TS * BEHIND;
-                        const arpSlice = arpeggioLaneOuterRailLaneSlice(
-                            dt0, dt1, now, bundle.handShapes, bundle.chordTemplates, notes, chords,
-                        );
+                        const arpSlice = (laneRailArpHsFlags && handShapesRails && handShapesRails.length)
+                            ? arpeggioLaneOuterRailLaneSlice(
+                                dt0, dt1, now,
+                                handShapesRails, laneRailBoundLo, laneRailBoundHi, laneRailArpHsFlags,
+                            )
+                            : false;
                         if (_laneSegLen > 0
                             && _laneSegDMin[_laneSegLen - 1] === b.dMin
                             && _laneSegDMax[_laneSegLen - 1] === b.dMax
@@ -5782,9 +5922,12 @@
                             const arpRailLen = Math.max(Math.abs(segZ1 - segZ0), 1e-6);
                             const zArpMid = (segZ0 + segZ1) * 0.5;
                             const tMidSeg = (_laneSegTLo[s] + _laneSegTHi[s]) * 0.5;
-                            const arpMulSeg = arpeggioLaneDividerFrameAccentMul(
-                                tMidSeg, bundle.handShapes, bundle.chordTemplates, notes, chords,
-                            );
+                            const arpMulSeg = (laneRailArpHsFlags && handShapesRails && handShapesRails.length)
+                                ? arpeggioLaneDividerFrameAccentMul(
+                                    tMidSeg, handShapesRails, chords,
+                                    laneRailBoundLo, laneRailBoundHi, laneRailArpHsFlags,
+                                )
+                                : 1;
                             const arpSSeg = arpeggioLaneDividerXYScaleMatchFrameRim(arpMulSeg);
                             for (const xf of [fL, fR]) {
                                 const div = pLaneDivider.get();
@@ -6739,7 +6882,9 @@
                     const ghostOuterL = Math.max(NW * 1.1, NH * 1.1);
                     const ghostLblS = 0.7 * ghostOuterL * _textSizeMul * fretLabelScaleForFret(n.f);
                     lb.scale.set(ghostLblS, ghostLblS, 1);
-                    proj.updateMatrixWorld(true);
+                    // Leaf mesh under stationary noteG — no need to recurse children
+                    // (true forced a full subgraph walk each ghost label).
+                    proj.updateMatrixWorld(false);
                     _ghostLblBox.setFromObject(proj);
                     _ghostLblBox.getCenter(_ghostLblMid);
                     _ghostLblTowardCam.subVectors(cam.position, _ghostLblMid);
