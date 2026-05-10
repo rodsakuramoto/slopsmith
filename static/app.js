@@ -2893,7 +2893,14 @@ window.slopsmith = Object.assign(new EventTarget(), {
         this.dispatchEvent(new CustomEvent(event, { detail }));
     },
     on(event, fn, options) { this.addEventListener(event, fn, options); },
-    off(event, fn, options) { this.removeEventListener(event, fn, options); }
+    off(event, fn, options) { this.removeEventListener(event, fn, options); },
+    // Loop API — plugins should never reach for #btn-loop-* directly.
+    // The script-scope `setLoop` and `clearLoop` are hoisted so these
+    // method bodies resolve them lexically; `getLoop` reads the live
+    // loopA/loopB bindings at call time.
+    setLoop(a, b) { return setLoop(a, b); },
+    clearLoop() { clearLoop(); },
+    getLoop() { return { loopA, loopB }; },
 });
 if (_slopsmithExisting) {
     for (const key of Object.keys(_slopsmithExisting)) {
@@ -3723,6 +3730,63 @@ function clearLoop() {
     document.getElementById('saved-loops').value = '';
 }
 
+// Resync #saved-loops + #btn-loop-delete with the currently-active
+// loopA/loopB. Used by both setLoop's success path (so plugin-driven
+// loops show up correctly in the dropdown) and loadSavedLoop's
+// failure path (so a cancelled selection reverts to the still-active
+// loop). Without this sync, deleteSelectedLoop could target a stale
+// option that doesn't match the active loop.
+function _syncSavedLoopSelection() {
+    const sel = document.getElementById('saved-loops');
+    const delBtn = document.getElementById('btn-loop-delete');
+    if (!sel || !delBtn) return;
+    let selected = '';
+    if (loopA !== null && loopB !== null) {
+        for (const opt of sel.options) {
+            if (Number(opt.dataset.start) === loopA && Number(opt.dataset.end) === loopB) {
+                selected = opt.value;
+                break;
+            }
+        }
+    }
+    sel.value = selected;
+    delBtn.classList.toggle('hidden', !selected);
+}
+
+// Programmatically set both loop endpoints and seek to A. The dropdown
+// path (loadSavedLoop) and the plugin-API path (window.slopsmith.setLoop)
+// both funnel through here so the UI state stays canonical regardless of
+// who triggered the loop.
+//
+// Returns true if the seek landed at A and the loop is now active;
+// returns false if the seek was cancelled by teardown or landed off-target
+// (JUCE clamp / HTML5 snap > 50ms from A). On false, loopA/loopB are NOT
+// committed and the UI is not painted — the prior loop (if any) stays
+// active. Throws on invalid inputs.
+async function setLoop(a, b) {
+    const aNum = Number(a);
+    const bNum = Number(b);
+    if (!Number.isFinite(aNum) || !Number.isFinite(bNum) || bNum <= aNum) {
+        throw new Error(`setLoop: requires finite a and b with b > a (got a=${a}, b=${b})`);
+    }
+    // Don't arm loopA/loopB before the seek lands — the 60Hz tick's wrap
+    // detector (`ct >= loopB`) would trigger startCountIn against
+    // half-applied state.
+    const r = await _audioSeek(aNum, 'loop-set');
+    if (!r.completed || Math.abs(r.to - aNum) > 0.05) return false;
+    loopA = aNum;
+    loopB = bNum;
+    document.getElementById('btn-loop-a').className = 'px-3 py-1.5 bg-green-900/50 rounded-lg text-xs text-green-300 transition';
+    document.getElementById('btn-loop-b').className = 'px-3 py-1.5 bg-green-900/50 rounded-lg text-xs text-green-300 transition';
+    updateLoopUI();
+    // Sync the saved-loops dropdown so a plugin-driven setLoop call
+    // surfaces the matching saved option (and Delete button) — otherwise
+    // the dropdown can stay on a stale selection and deleteSelectedLoop
+    // would target the wrong record.
+    _syncSavedLoopSelection();
+    return true;
+}
+
 function updateLoopUI() {
     const label = document.getElementById('loop-label');
     const hasLoop = loopA !== null && loopB !== null;
@@ -3767,37 +3831,29 @@ async function loadSavedLoop(loopId) {
         delBtn.classList.add('hidden');
         return;
     }
-    const newA = parseFloat(opt.dataset.start);
-    const newB = parseFloat(opt.dataset.end);
-    // Don't arm loopA/loopB before the seek lands. If the seek aborts
-    // (teardown) or rolls back (JUCE clamp), leaving them set would let
-    // the 60Hz tick's wrap detector (`ct >= loopB`) trigger startCountIn
-    // even though loading the saved loop effectively failed.
-    const r = await _audioSeek(newA, 'loop-set');
-    if (!r.completed || Math.abs(r.to - newA) > 0.05) {
-        // Resync the dropdown with the still-active loop state so the UI
-        // doesn't lie about which loop is loaded. Find the option whose
-        // bounds match the current loopA/loopB; fall back to "" (no
-        // selection) when no match exists.
-        let restored = '';
-        if (loopA !== null && loopB !== null) {
-            for (const o of sel.options) {
-                if (parseFloat(o.dataset.start) === loopA && parseFloat(o.dataset.end) === loopB) {
-                    restored = o.value;
-                    break;
-                }
-            }
-        }
-        sel.value = restored;
-        if (!restored) delBtn.classList.add('hidden');
+    let ok = false;
+    try {
+        // Pass raw strings — setLoop's Number() coercion is stricter than
+        // parseFloat (rejects "12abc") so malformed dataset values throw
+        // and fall into the catch instead of silently truncating.
+        ok = await setLoop(opt.dataset.start, opt.dataset.end);
+    } catch (err) {
+        // Malformed dataset (server returned bad data): treat the same as
+        // a failed seek so the dropdown resyncs and we don't propagate an
+        // uncaught rejection out of the onchange handler.
+        console.warn('[loadSavedLoop] setLoop threw:', err);
+        ok = false;
+    }
+    if (!ok) {
+        // Seek aborted, landed off-target, or input was malformed.
+        // Resync the dropdown with the still-active loop so the UI
+        // doesn't lie about which loop is loaded.
+        _syncSavedLoopSelection();
         return;
     }
-    loopA = newA;
-    loopB = newB;
-    document.getElementById('btn-loop-a').className = 'px-3 py-1.5 bg-green-900/50 rounded-lg text-xs text-green-300 transition';
-    document.getElementById('btn-loop-b').className = 'px-3 py-1.5 bg-green-900/50 rounded-lg text-xs text-green-300 transition';
-    updateLoopUI();
-    delBtn.classList.remove('hidden');
+    // Success path: setLoop already called _syncSavedLoopSelection,
+    // which surfaces the delete button when the new loop matches a
+    // saved option (which the dropdown selection guarantees here).
 }
 
 async function saveCurrentLoop() {
