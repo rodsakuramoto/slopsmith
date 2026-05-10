@@ -165,7 +165,9 @@
     /** Match `nextNoteByString` onset to this note (float + chart rounding; avoids ghost / glow flicker). */
     const NEXT_ON_STRING_T_EPS = 0.06;
     /** `nextNoteByString` only lists `t > now`, so at/after onset it advances — keep board ghost visible this long past `n.t`. */
-    const GHOST_HOLD_AFTER_ONSET = 0.15;
+    const GHOST_HOLD_AFTER_ONSET = 0.24;
+    /** Post-onset: fade ghost **number** out over this many seconds at end of hold (must be ≤ GHOST_HOLD_AFTER_ONSET). */
+    const GHOST_FRET_LBL_FADE_S = 0.20;
 
     // Shorter, flatter notes (joel style)
     const NW = 5 * K, NH = 3 * K, ND = 0.5 * K;
@@ -5935,7 +5937,32 @@
                         ? _templateFretForChordGhost(chordId, n.s, n.f)
                         : n.f;
                     const sprMat = txtMat(ghostFretDisplay, '#ffffff', false, 'noteFret');
-                    lb.material = _meshMatForGhostFretDigit(sprMat);
+                    const baseGhostMat = _meshMatForGhostFretDigit(sprMat);
+                    let ghostFretLblAlpha = 1;
+                    if (ghostPastHold && dt > -GHOST_HOLD_AFTER_ONSET && dt <= 0) {
+                        const nextSoon = nxFrame != null && nxFrame.t > n.t + 1e-6
+                            && (nxFrame.t - now) <= GHOST_FRET_LBL_FADE_S;
+                        if (!nextSoon) {
+                            const gone = -dt;
+                            const fadeStartT = Math.max(0, GHOST_HOLD_AFTER_ONSET - GHOST_FRET_LBL_FADE_S);
+                            if (gone >= fadeStartT && GHOST_FRET_LBL_FADE_S > 1e-6) {
+                                ghostFretLblAlpha = Math.max(0,
+                                    1 - (gone - fadeStartT) / GHOST_FRET_LBL_FADE_S);
+                            }
+                        }
+                    }
+                    let instMat = lb.userData.h3dGhostFretLblInstMat;
+                    if (!instMat || instMat.map !== baseGhostMat.map) {
+                        if (instMat) {
+                            try { instMat.dispose(); } catch (_) { /* idempotent */ }
+                        }
+                        instMat = baseGhostMat.clone();
+                        lb.userData.h3dGhostFretLblInstMat = instMat;
+                    }
+                    instMat.opacity = ghostFretLblAlpha;
+                    instMat.transparent = true;
+                    instMat.needsUpdate = true;
+                    lb.material = instMat;
                     const ghostOuterL = Math.max(NW * 1.1, NH * 1.1);
                     const ghostLblS = 0.7 * ghostOuterL * _textSizeMul;
                     lb.scale.set(ghostLblS, ghostLblS, 1);
