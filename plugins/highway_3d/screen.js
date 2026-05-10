@@ -58,6 +58,13 @@
 
     const NFRETS = 24;
     const NSTR = 6;
+    /**
+     * Pure 12-semitone spacing compresses toward the bridge; multiply each
+     * segment **above** this fret by the factor so high positions stay
+     * slightly more playable/readable in 3D.
+     */
+    const FRET_SPACING_STRETCH_ABOVE12 = 1.1;
+    const FRET_SPACING_ANCHOR_F = 12;
     // Per-string materials and projection meshes are built via S_COL.map(),
     // so the renderer can only address strings 0..S_COL.length-1. Using a
     // higher count would index undefined into mGlow/mStr/mSus/projMeshArr.
@@ -432,8 +439,29 @@
         return bn.toFixed(1);
     }
 
-    const fretX = f => (f <= 0 ? 0 : SCALE - SCALE / Math.pow(2, f / 12));
+    const fretX = f => {
+        if (f <= 0) return 0;
+        const raw = SCALE - SCALE / Math.pow(2, f / 12);
+        if (f <= FRET_SPACING_ANCHOR_F) return raw;
+        const rawAnchor = SCALE - SCALE / Math.pow(2, FRET_SPACING_ANCHOR_F / 12);
+        return rawAnchor + (raw - rawAnchor) * FRET_SPACING_STRETCH_ABOVE12;
+    };
     const fretMid = f => (f <= 0 ? -2 * K : (fretX(f - 1) + fretX(f)) / 2);
+    /** World-space width of fret column (wires f−1 .. f); used to scale row markers past ~12. */
+    function fretColumnWorldW(f) {
+        const fi = Math.round(Number(f));
+        if (!Number.isFinite(fi) || fi <= 0) return Math.abs(fretX(1) - fretX(0));
+        const lo = Math.min(NFRETS, Math.max(1, fi));
+        return Math.abs(fretX(lo) - fretX(lo - 1));
+    }
+    /** Reference column (~mid board): prior fixed K-based sprites matched this neighborhood. */
+    const FRET_LABEL_SCALE_REF_FRET = 5;
+    const _fretLabelScaleRefW = Math.max(1e-8, fretColumnWorldW(FRET_LABEL_SCALE_REF_FRET));
+    function fretLabelScaleForFret(f) {
+        const w = fretColumnWorldW(f);
+        const m = w / _fretLabelScaleRefW;
+        return Math.max(0.32, Math.min(1.45, m));
+    }
     const dZ = dt => -dt * TS;
 
     /**
@@ -4054,7 +4082,7 @@
                 mat.depthWrite = false;
                 mat.opacity = 0.55;
                 const lbl = new T.Sprite(mat);
-                const scale = 5.5 * (0.5 + textSize);
+                const scale = 5.5 * (0.5 + textSize) * fretLabelScaleForFret(f);
                 lbl.scale.set(scale * K, scale * K, 1);
                 lbl.position.set(xFretMid(f), yTop - S_GAP * 0.4, -K);
                 lbl.visible = inlayLabelsVisible;
@@ -4263,9 +4291,10 @@
             // Rescale inlay labels to track the live text-size slider.
             // buildBoard() sets an initial scale using (0.5 + textSize) but
             // _textSizeMul is only authoritative from here onward.
-            for (const lbl of _inlayLabels) {
-                const s = 5.5 * _textSizeMul * K;
-                lbl.scale.set(s, s, 1);
+            for (let i = 0; i < _inlayLabels.length; i++) {
+                const f = INLAY_LABEL_FRETS[i];
+                const s = 5.5 * _textSizeMul * K * fretLabelScaleForFret(f);
+                _inlayLabels[i].scale.set(s, s, 1);
             }
             _syncOpenStringPitchLabels(bundle);
 
@@ -5191,7 +5220,7 @@
                     lb.position.set(xFretMid(f), yBottom - S_GAP * 1.4, 0.5 * K);
                     const intensity = noteState.fretHeat[f];
                     lb.material.opacity = 0.35 + intensity * 0.65;
-                    const scale = (3.5 + intensity * 2.2) * _textSizeMul;
+                    const scale = (3.5 + intensity * 2.2) * _textSizeMul * fretLabelScaleForFret(f);
                     lb.scale.set(scale * K, scale * K, 1);
                     lb.renderOrder = 1000;
                 }
@@ -5339,7 +5368,7 @@
                         }
                         sp.material.opacity = 0.85;
                         sp.position.set(xFretMid(f), labelY, z);
-                        const sz = NH * 2.2 * _textSizeMul;
+                        const sz = NH * 2.2 * _textSizeMul * fretLabelScaleForFret(f);
                         sp.scale.set(sz, sz, 1);
                     }
                 }
@@ -5892,7 +5921,8 @@
                         fretLabel.material.needsUpdate = true;
                     }
                     fretLabel.position.set(x, labelY, noteZ);
-                    fretLabel.scale.set(NH * 2.2 * _textSizeMul, NH * 2.2 * _textSizeMul, 1);
+                    const flS = NH * 2.2 * _textSizeMul * fretLabelScaleForFret(n.f);
+                    fretLabel.scale.set(flS, flS, 1);
                     fretLabel.material.opacity = alpha;
 
                     const line = pConnectorLine.get();
@@ -5964,7 +5994,7 @@
                     instMat.needsUpdate = true;
                     lb.material = instMat;
                     const ghostOuterL = Math.max(NW * 1.1, NH * 1.1);
-                    const ghostLblS = 0.7 * ghostOuterL * _textSizeMul;
+                    const ghostLblS = 0.7 * ghostOuterL * _textSizeMul * fretLabelScaleForFret(n.f);
                     lb.scale.set(ghostLblS, ghostLblS, 1);
                     proj.updateMatrixWorld(true);
                     _ghostLblBox.setFromObject(proj);
