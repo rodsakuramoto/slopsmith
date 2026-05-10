@@ -477,6 +477,14 @@
     const CHORD_FRAME_RIM_FRAC_H = 0.028;    // × fullChordBoxH
     const CHORD_FRAME_RIM_Z_MIN = 0.048;      // × K — depth squash
     const CHORD_FRAME_RIM_Z_SCAL = 0.68;     // thickZ scales with ft
+    /**
+     * Highway arpeggio frame uses ``inferArpeggioFromNotePattern`` only inside this
+     * window around ``ch.t``. Hand-shape spans can cover many seconds and several
+     * separate strums of the same voicing; a full-span scan mis-detects arpeggio
+     * from beats that belong to different chord rows.
+     */
+    const ARP_FRAME_ONSET_PAD_S = 0.06;
+    const ARP_FRAME_ONSET_CLUSTER_S = 0.26;
 
     /* ======================================================================
      *  Pure helpers
@@ -4493,6 +4501,8 @@
                     id: cid,
                     hd: explicitArp,
                     notes,
+                    /** Hand-shape fill-in (no authored chord row) — skip note-stream arp frame. */
+                    h3dSynth: true,
                 });
             }
             if (synth.length === 0) return reals;
@@ -4588,17 +4598,30 @@
             return null;
         }
 
-        function handShapeIsArpeggioForLaneRail(hs, chordTemplates, notesArr) {
+        function handShapeIsArpeggioForLaneRail(hs, handShapes, chordTemplates, notesArr, chords) {
             if (hs.arp === true || hs.arp === 1 || hs.arpeggio === true) return true;
             const cid = hs.chord_id;
-            if (cid == null || !chordTemplates) return false;
-            const synthNotes = chordNotesFromTemplate(cid, chordTemplates);
-            if (synthNotes.length === 0) return false;
-            const fakeCh = { t: hs.start_time, id: cid, notes: synthNotes };
-            const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
-            if (shape.size < 2) return false;
-            const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
-            return inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw);
+            if (cid == null || !chords || chords.length === 0 || !handShapes) return false;
+            const tHsLo = hs.start_time - 1e-4;
+            const tHsHi = hs.end_time + 1e-4;
+            for (let j = 0; j < chords.length; j++) {
+                const ch = chords[j];
+                if (ch.id !== cid && Number(ch.id) !== Number(cid)) continue;
+                if (ch.t < tHsLo || ch.t > tHsHi) continue;
+                if (!ch.notes) continue;
+                const chordNotes = filterValidNotes(ch.notes);
+                if (chordNotes.length === 0) continue;
+                const hsHint = chordHandShapeArpeggioHint(ch, handShapes);
+                const chShape = mergeChordShape(ch, chordNotes, chordTemplates);
+                const inferredFromNotes = !ch.h3dSynth && inferArpeggioFromNotePattern(
+                    ch, chShape, notesArr,
+                    { tLo: ch.t - ARP_FRAME_ONSET_PAD_S, tHi: ch.t + ARP_FRAME_ONSET_CLUSTER_S });
+                if (chordWireHighDensity(ch)
+                    || (inferredFromNotes && (hsHint.explicit || hsHint.covered))) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /**
@@ -4657,7 +4680,7 @@
             }
             for (let i = 0; i < handShapes.length; i++) {
                 const hs = handShapes[i];
-                if (!handShapeIsArpeggioForLaneRail(hs, chordTemplates, notesArr)) continue;
+                if (!handShapeIsArpeggioForLaneRail(hs, handShapes, chordTemplates, notesArr, chords)) continue;
                 const { shapeLo, shapeHi } = effectiveArpRailChartBoundsForHandShape(
                     hs, chords, chordTemplates, notesArr,
                 );
@@ -4693,7 +4716,7 @@
             if (!handShapes || handShapes.length === 0 || !chords || chords.length === 0) return 1;
             for (let i = 0; i < handShapes.length; i++) {
                 const hs = handShapes[i];
-                if (!handShapeIsArpeggioForLaneRail(hs, chordTemplates, notesArr)) continue;
+                if (!handShapeIsArpeggioForLaneRail(hs, handShapes, chordTemplates, notesArr, chords)) continue;
                 const { shapeLo, shapeHi } = effectiveArpRailChartBoundsForHandShape(
                     hs, chords, chordTemplates, notesArr,
                 );
@@ -5463,9 +5486,18 @@
                         // not bar thickness vs first chord — see CHORD_FRAME_RIM_* tuning.
                         let ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
                         if (chordAccent) ft *= 1.22;
-                        // Same gate as gems/sustain trail so the approaching box reads arpeggio
-                        // like the neck; interior uses lavender gradient (not ciano map × tint).
-                        const isArpeggioFrame = !isRepeat && chordSusTrailMatchArpFrame;
+                        // For synth chord rows (hand-shape only), note-stream inference often
+                        // matches successive lead picks to the template and looks like arpeggio.
+                        const inferredFromNotesForFrame = !ch.h3dSynth && inferArpeggioFromNotePattern(
+                            ch, chShape, notes,
+                            { tLo: ch.t - ARP_FRAME_ONSET_PAD_S,
+                              tHi: ch.t + ARP_FRAME_ONSET_CLUSTER_S });
+                        // Lavender frame: high-density flag, or staggered picks in a short window
+                        // around an authored chord row (not hand-shape synthesis).
+                        const isArpeggioFrame = !isRepeat && (
+                            chordWireHighDensity(ch)
+                            || (inferredFromNotesForFrame && (hsHintFrame.explicit || hsHintFrame.covered))
+                        );
                         const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
                         const rimHex = isArpeggioFrame ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
 
