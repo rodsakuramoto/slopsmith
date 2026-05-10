@@ -1644,8 +1644,9 @@ function createHighway() {
 
     // True if a chord note carries per-strum technique data (bend,
     // hammer/pull/tap, slide, palm-mute, tremolo, accent, harmonic, pinch
-    // harmonic, dead note). drawNote renders these as glyph labels —
-    // alternate render paths (repeat box, open-string-in-chord wide bar)
+    // harmonic, dead note). drawNote shows these in 3D (`ac` accent is a brighter
+    // gem instead of a glyph there). Alternate render paths (repeat box,
+    // open-string-in-chord wide bar)
     // bypass drawNote and so must fall back to the full path whenever a
     // technique flag is present, otherwise authored cues vanish silently.
     function _noteHasTechniqueFlags(n) {

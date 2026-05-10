@@ -180,6 +180,26 @@
     const CHORD_HWY_FADE_S = 0.32;
     const GHOST_HOLD_AFTER_ONSET = CHORD_HWY_LINGER_S;
     const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
+    /** Drives emissive (`mGlow` / accent fill) for notes with `.ac`; matches drawNote `linger` cutoff (0.05). */
+    const ACCENT_NOTE_STR_GLOW = 3.55;
+    const ACCENT_NOTE_LINGER_EPS = 0.05;
+    /** Extra emissive layered on accent-only body material (`mAccentCore`), after `strGlow * glowMul`. */
+    const ACCENT_NOTE_FILL_BOOST = 2.55;
+    /** Accent rim draws brighter than normal string-coloured outlines (`mStrHitOutline`). */
+    const ACCENT_RIM_BASE_EMISSIVE = 3.45;
+    /** Outline / core scale bump vs normal gems (accent reads slightly larger). */
+    const ACCENT_RIM_XY_SCALE_MUL = 1.09;
+    const ACCENT_RIM_Z_SCALE_MUL = 1.06;
+    // Soft neon-style outer bloom (AdditiveBlending) — layered shells behind outline/core.
+    const ACCENT_HALO_OP_NEAR = 0.68;
+    const ACCENT_HALO_OP_MID = 0.42;
+    const ACCENT_HALO_OP_FAR = 0.24;
+    const ACCENT_HALO_XY_INNER = 1.36;
+    const ACCENT_HALO_XY_MID = 1.82;
+    const ACCENT_HALO_XY_OUTER = 2.32;
+    const ACCENT_HALO_Z_INNER = 1.05;
+    const ACCENT_HALO_Z_MID = 1.12;
+    const ACCENT_HALO_Z_OUTER = 1.22;
 
     /**
      * Post-hit tail fade shared by ghost fret digits and 3D chord UI: full
@@ -1636,7 +1656,7 @@
         let ambLight = null, dirLight = null;
         let fretG = null, tuningLblG = null, noteG = null, beatG = null, lblG = null;
         let gNote = null, gSus = null, gBeat = null, gTechArrow = null, gTapChevron = null;
-        let mStr = [], mGlow = [], mSus = [], mProj = [], mProjGlow = [], mStrHitOutline = [];
+        let mStr = [], mGlow = [], mSus = [], mProj = [], mProjGlow = [], mStrHitOutline = [], mAccentOutline = [], mAccentCore = [], mAccentHaloNear = [], mAccentHaloMid = [], mAccentHaloFar = [];
         let mWhiteOutline = null, mSusOutline = null;
         // Shared materials for the legato technique meshes — one per geometry
         // type, reused across every pooled mesh instance to avoid per-mesh
@@ -1827,7 +1847,7 @@
         const _laneSegZ1 = [];
         let _laneSegLen = 0;
         let pChordBox, pChordFrameFill, pChordLbl, pBarreLine;
-        let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron;
+        let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron, pAccentHalo;
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
         /** Horizontal gradient (Charter chord box fill). */
@@ -3108,6 +3128,27 @@
             mStrHitOutline = activePalette.map(c => new T.MeshLambertMaterial({
                 color: c, emissive: c, emissiveIntensity: 1.0,
             }));
+            // Stronger coloured rim + body for accented notes (.ac); drawNote swaps these in behind ND hit/miss.
+            mAccentOutline = activePalette.map(c => new T.MeshLambertMaterial({
+                color: c, emissive: c, emissiveIntensity: ACCENT_RIM_BASE_EMISSIVE,
+            }));
+            // Same colour response as mGlow (vibrancy lerp) but separate emissive drive for extra accent punch.
+            mAccentCore = activePalette.map(c => new T.MeshLambertMaterial({
+                color: 0xffffff, emissive: c, emissiveIntensity: 1.5,
+            }));
+            const mkAccentHaloMats = (baseOp) => activePalette.map(c => new T.MeshBasicMaterial({
+                color: new T.Color(c),
+                transparent: true,
+                opacity: baseOp,
+                depthWrite: false,
+                depthTest: true,
+                blending: T.AdditiveBlending,
+                side: T.DoubleSide,
+                fog: true,
+            }));
+            mAccentHaloNear = mkAccentHaloMats(ACCENT_HALO_OP_NEAR);
+            mAccentHaloMid = mkAccentHaloMats(ACCENT_HALO_OP_MID);
+            mAccentHaloFar = mkAccentHaloMats(ACCENT_HALO_OP_FAR);
             // Notedetect feedback (issue #9): bright green / red outline
             // tints. Note rendering swaps its outline.material between
             // mWhiteOutline / mHitOutline / mMissOutline based on
@@ -3143,6 +3184,7 @@
 
             // ── Pools ──────────────────────────────────────────────────────
             pNote = pool(noteG, () => new T.Mesh(gNote, mStr[0]));
+            pAccentHalo = pool(noteG, () => new T.Mesh(gNote, mAccentHaloFar[0]));
             pSus = pool(noteG, () => new T.Mesh(gSus, mSus[0]));
             pSusOutline = pool(noteG, () => new T.Mesh(gSus, mSusOutline));
             const mkSlideRibbonGeo = () => {
@@ -3677,6 +3719,14 @@
                     mStrHitOutline[s].color.setHex(c);
                     mStrHitOutline[s].emissive.setHex(c);
                 }
+                if (mAccentOutline[s]) {
+                    mAccentOutline[s].color.setHex(c);
+                    mAccentOutline[s].emissive.setHex(c);
+                }
+                if (mAccentCore[s]) mAccentCore[s].emissive.setHex(c);
+                for (const haloArr of [mAccentHaloNear, mAccentHaloMid, mAccentHaloFar]) {
+                    if (haloArr[s]) haloArr[s].color.setHex(c);
+                }
                 const pm = projMeshArr && projMeshArr[s];
                 if (pm && pm.material) {
                     pm.material.color.setHex(c);
@@ -3720,6 +3770,12 @@
                         mGlow[s].color.setHex(0xffffff).lerp(_paletteColorTmp.setHex(activePalette[s]), t);
                     }
                 }
+                if (mAccentCore[s]) {
+                    if (!_paletteColorTmp && T) _paletteColorTmp = new T.Color();
+                    if (_paletteColorTmp) {
+                        mAccentCore[s].color.setHex(0xffffff).lerp(_paletteColorTmp.setHex(activePalette[s]), t);
+                    }
+                }
                 const pm = projMeshArr && projMeshArr[s];
                 if (pm && pm.material) pm.material.opacity = projIdleOp;
             }
@@ -3748,6 +3804,9 @@
                 const pm = projMeshArr && projMeshArr[s];
                 if (pm && pm.material) pm.material.emissiveIntensity = 0.002 * g;
                 if (mStrHitOutline[s]) mStrHitOutline[s].emissiveIntensity = 1.0 * g;
+                if (mAccentOutline[s]) mAccentOutline[s].emissiveIntensity = ACCENT_RIM_BASE_EMISSIVE * g;
+                // mAccentCore[].emissiveIntensity is per-frame in update()
+                // alongside mGlow (accent fill boost).
             }
             if (mWhiteOutline) mWhiteOutline.emissiveIntensity = 0.6 * g;
             if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.0 * g;
@@ -3756,6 +3815,11 @@
             if (mTechArrow)    mTechArrow.emissiveIntensity    = 0.9 * g;
             if (mTapChevron)   mTapChevron.emissiveIntensity   = 0.9 * g;
             if (mBarre)        mBarre.emissiveIntensity        = 0.9 * g;
+            for (let si = 0; si < activePalette.length; si++) {
+                if (mAccentHaloNear[si]) mAccentHaloNear[si].opacity = ACCENT_HALO_OP_NEAR * g;
+                if (mAccentHaloMid[si]) mAccentHaloMid[si].opacity = ACCENT_HALO_OP_MID * g;
+                if (mAccentHaloFar[si]) mAccentHaloFar[si].opacity = ACCENT_HALO_OP_FAR * g;
+            }
         }
         function _bgMountStyle() {
             const style = BG_STYLES[bgStyleId] || BG_STYLES.off;
@@ -4325,7 +4389,7 @@
             }
             _syncOpenStringPitchLabels(bundle);
 
-            pNote.reset(); pSus.reset(); pSusOutline.reset(); pSusRibbon.reset(); pSusRibbonOl.reset(); pTechArrow.reset(); pTapChevron.reset(); pLbl.reset();
+            pNote.reset(); pSus.reset(); pSusOutline.reset(); pSusRibbon.reset(); pSusRibbonOl.reset(); pTechArrow.reset(); pTapChevron.reset(); pAccentHalo.reset(); pLbl.reset();
             pBeat.reset(); pSec.reset();
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
@@ -4386,6 +4450,8 @@
                 stringAnticipation: new Array(nStr).fill(0),
                 fretHeat: new Array(NFRETS + 1).fill(0),
                 strGlow: new Array(nStr).fill(0.5),
+                /** Per-string extra drive for `.ac` gem fill only (`mAccentCore`). */
+                accentFillBoost: new Array(nStr).fill(0),
             };
 
             // Compute sustain / anticipation / fret heat / per-string glow
@@ -4494,11 +4560,58 @@
                 }
             }
 
+            // Accent: brighter note body (`mGlow` in drawNote) instead of the old '>' sprite.
+            if (notes) {
+                for (const n of notes) {
+                    if (!validString(n.s) || !n.ac) continue;
+                    const dt = n.t - now;
+                    if (dt > AHEAD) continue;
+                    const susEnd = n.t + (n.sus || 0);
+                    const hasSus = (n.sus || 0) > 0;
+                    if (dt < -ACCENT_NOTE_LINGER_EPS && (!hasSus || now > susEnd)) continue;
+                    noteState.strGlow[n.s] = Math.max(noteState.strGlow[n.s], ACCENT_NOTE_STR_GLOW);
+                    noteState.accentFillBoost[n.s] = Math.max(
+                        noteState.accentFillBoost[n.s],
+                        ACCENT_NOTE_FILL_BOOST,
+                    );
+                }
+            }
+            if (chords) {
+                for (const ch of chords) {
+                    if (!ch.notes) continue;
+                    const chordNotes = filterValidNotes(ch.notes);
+                    if (!chordNotes.length) continue;
+                    let maxSus = 0;
+                    for (const x of chordNotes) if ((x.sus || 0) > maxSus) maxSus = x.sus;
+                    const susEnd = ch.t + maxSus;
+                    const dt = ch.t - now;
+                    if (dt > AHEAD) continue;
+                    const hasChordSus = maxSus > 0;
+                    if (dt < -ACCENT_NOTE_LINGER_EPS && (!hasChordSus || now > susEnd)) continue;
+                    for (const cn of chordNotes) {
+                        if (!validString(cn.s) || !cn.ac) continue;
+                        noteState.strGlow[cn.s] = Math.max(noteState.strGlow[cn.s], ACCENT_NOTE_STR_GLOW);
+                        noteState.accentFillBoost[cn.s] = Math.max(
+                            noteState.accentFillBoost[cn.s],
+                            ACCENT_NOTE_FILL_BOOST,
+                        );
+                    }
+                }
+            }
+
             updateStringHighlights(noteState);
             // Hit-note emissive is per-frame from noteState.strGlow[s]; the
             // glow slider scales it at the assignment site since this
             // write would stomp anything _applyGlow() set statically.
-            for (let s = 0; s < nStr; s++) mGlow[s].emissiveIntensity = noteState.strGlow[s] * glowMul;
+            // mAccentCore adds accentFillBoost (accent-only bright fill).
+            for (let s = 0; s < nStr; s++) {
+                const bg = noteState.strGlow[s] * glowMul;
+                if (mGlow[s]) mGlow[s].emissiveIntensity = bg;
+                if (mAccentCore[s]) {
+                    mAccentCore[s].emissiveIntensity =
+                        bg + noteState.accentFillBoost[s] * glowMul;
+                }
+            }
 
             // Active frets (notes in cooldown window) + highway intensity
             const activeFrets = new Set();
@@ -5748,25 +5861,66 @@
                 const inGhostWin = n.f > 0 && isNextOnString && dt > -GHOST_HOLD_AFTER_ONSET && dt < PROJ_WIN_G &&
                     projFactorG > 0.001;
 
+                const rimXY = n.ac ? ACCENT_RIM_XY_SCALE_MUL : 1;
+                const rimZ = n.ac ? ACCENT_RIM_Z_SCALE_MUL : 1;
+
+                // Accent: soft neon outer glow (reference: diffused halo fading out).
+                // Three additive shells drawn behind outline/core; colour = string hue.
+                if (n.ac && mAccentHaloNear[s]) {
+                    const rZ = approachRot + (isHarm ? Math.PI / 4 : 0);
+                    const accentShells = [
+                        { mat: mAccentHaloFar[s], ixy: ACCENT_HALO_XY_OUTER, iz: ACCENT_HALO_Z_OUTER, zK: 0.012 },
+                        { mat: mAccentHaloMid[s], ixy: ACCENT_HALO_XY_MID, iz: ACCENT_HALO_Z_MID, zK: 0.008 },
+                        { mat: mAccentHaloNear[s], ixy: ACCENT_HALO_XY_INNER, iz: ACCENT_HALO_Z_INNER, zK: 0.005 },
+                    ];
+                    for (let hi = 0; hi < accentShells.length; hi++) {
+                        const sh = accentShells[hi];
+                        const glow = pAccentHalo.get();
+                        glow.material = sh.mat;
+                        glow.rotation.z = rZ;
+                        glow.position.set(x, y + vibrato, noteZ - sh.zK * K);
+                        if (n.f === 0) {
+                            const slabPuff = Math.max(2.4, 1 + (sh.ixy - 1) * 3.2);
+                            glow.scale.set(
+                                (40 * K / NW) * rimXY * sh.ixy * openWScale,
+                                0.1 * openSlabThickMul * slabPuff,
+                                0.6 * rimZ * sh.iz,
+                            );
+                        } else {
+                            glow.scale.set(rimXY * sh.ixy, rimXY * sh.ixy, 2.5 * rimZ * sh.iz);
+                        }
+                    }
+                }
+
                 const outline = pNote.get();
-                outline.material = _ndOutline;
+                outline.material = _ndMatchedMark != null ? _ndOutline
+                    : (n.ac ? mAccentOutline[s] : _ndOutline);
                 outline.position.set(x, y + vibrato, noteZ);
                 outline.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
-                    outline.scale.set((35 * K / NW) * 1.1 * openWScale, 0.1 * 1.1 * openSlabThickMul, 0.6 * 1.1);
+                    outline.scale.set(
+                        (35 * K / NW) * 1.1 * rimXY * openWScale,
+                        0.1 * 1.1 * openSlabThickMul,
+                        0.6 * 1.1 * rimZ,
+                    );
                 } else {
-                    outline.scale.set(1.1, 1.1, 2.8);
+                    outline.scale.set(1.1 * rimXY, 1.1 * rimXY, 2.8 * rimZ);
                 }
 
                 // ── Core (filled note body) ───────────────────────────────
                 const core = pNote.get();
-                core.material = (hit || (n.f > 0 && inGhostWin)) ? mGlow[s] : mStr[s];
+                core.material = n.ac ? mAccentCore[s]
+                    : ((hit || (n.f > 0 && inGhostWin)) ? mGlow[s] : mStr[s]);
                 core.position.set(x, y + vibrato, noteZ + 0.001);
                 core.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
-                    core.scale.set((40 * K / NW) * openWScale, 0.1 * openSlabThickMul, 0.6);
+                    core.scale.set(
+                        (40 * K / NW) * rimXY * openWScale,
+                        0.1 * openSlabThickMul,
+                        0.6 * rimZ,
+                    );
                 } else {
-                    core.scale.set(1, 1, 2.5);
+                    core.scale.set(rimXY, rimXY, 2.5 * rimZ);
                 }
                 if (n.f === 0) {
                     // "0" label on open string
@@ -5883,8 +6037,8 @@
                 const LBL_MULT = 1.6;
                 const distFactor = 1 + Math.max(0, Math.min(1, dt / AHEAD)) * 1.5;
                 // Fold the user's text-size multiplier into sLbl so technique
-                // labels (bend, H/P/T arrows, accent, tremolo, palm mute,
-                // pinch harmonic) all scale alongside the rest.
+                // labels (bend, H/P/T arrows, tremolo, palm mute, pinch harmonic)
+                // all scale alongside the rest (`ac` accent → brighter body via mGlow).
                 const sLbl = LBL_MULT * distFactor * _textSizeMul;
                 // txtMat(..., 'technique') disables depthTest; without a high
                 // renderOrder the transparent note core (mStr) can still paint
@@ -5918,12 +6072,6 @@
                         chevron.scale.set(chevronScale, chevronScale, 1);
                         chevron.renderOrder = TECH_RO;
                     }
-                }
-                if (n.ac) {
-                    const l = pLbl.get();
-                    l.material = txtMat('>', '#fff', false, 'technique');
-                    l.scale.set(NH * 1.6 * sLbl, NH * 1.6 * sLbl, 1); l.position.set(x, yo, noteZ); yo += NH * 1.2 * sLbl;
-                    l.renderOrder = TECH_RO;
                 }
                 if (n.tr) {
                     const l = pLbl.get();
@@ -6188,6 +6336,11 @@
             for (const m of mProj) m?.dispose?.();
             for (const m of mProjGlow) m?.dispose?.();
             for (const m of mStrHitOutline) m?.dispose?.();
+            for (const m of mAccentOutline) m?.dispose?.();
+            for (const m of mAccentCore) m?.dispose?.();
+            for (const m of mAccentHaloNear) m?.dispose?.();
+            for (const m of mAccentHaloMid) m?.dispose?.();
+            for (const m of mAccentHaloFar) m?.dispose?.();
             mBeatM?.dispose?.(); mBeatQ?.dispose?.();
             // Notedetect outline materials (#9). May not be reachable
             // via scene.traverse if no event ever fired (never attached
@@ -6217,7 +6370,7 @@
             if (ren) { ren.dispose(); ren = null; }
             scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
             ambLight = dirLight = null;
-            mStr = []; mGlow = []; mSus = []; mProj = []; mProjGlow = []; mStrHitOutline = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = null; stringLines = []; stringLineGlows = [];
+            mStr = []; mGlow = []; mSus = []; mProj = []; mProjGlow = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = null; stringLines = []; stringLineGlows = [];
             for (const m of _inlayMats) m?.dispose?.(); _inlayMats = []; _inlayLabels = [];
             // mTechArrow / mTapChevron are owned by pooled meshes attached
             // to noteG; the scene.traverse() dispose pass above already
@@ -6243,7 +6396,7 @@
             _renderScale = 1;
             mBeatM = mBeatQ = null;
             pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
-            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = null;
+            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = pAccentHalo = null;
             mLaneOdd = mLaneEven = gLanePlane = gGhostFretPlane = null;
             chordFrameGradTex = null;
             pFretColMarker = null;
