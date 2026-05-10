@@ -485,6 +485,27 @@
      */
     const ARP_FRAME_ONSET_PAD_S = 0.06;
     const ARP_FRAME_ONSET_CLUSTER_S = 0.26;
+    /**
+     * Rocksmith encodes fast alternating power chords (e.g. D5/D#5 gallops) as
+     * very short ``<handShape>`` rows (~0.05–0.2 s). Note-stream arpeggio
+     * inference must not treat strum spread across strings as arpeggio there —
+     * it false-triggers lavender highway rails / frames (see Frantic ~2:36).
+     */
+    const ARP_INFER_MIN_HAND_SHAPE_SPAN_S = 0.21;
+    /**
+     * In a **short** chart window, chord strums (same voicing, strings picked
+     * within ~30–45 ms) barely exceed this total spread; real arpeggios in that
+     * window are usually slower across strings OR have 4+ plucks.
+     */
+    const ARP_INFER_STRUM_VS_ARP_SPREAD_MIN_S = 0.047;
+    /**
+     * If more than ``shape.size + ARP_INFER_MULTI_STRUM_HIT_SLACKS`` matching picks
+     * sit inside a non-trivial hand-shape window, the chart is almost certainly
+     * **repeated strums** of the same chord (or gallops), not one arpeggio sweep.
+     */
+    const ARP_INFER_MULTI_STRUM_HIT_SLACK = 2;
+    /** ``timeWin`` span above which we apply the multi-strum hit-count cap. */
+    const ARP_INFER_MULTI_STRUM_WIN_MIN_S = 0.26;
 
     /* ======================================================================
      *  Pure helpers
@@ -4454,8 +4475,12 @@
             const cid = ch.id;
             for (let i = 0; i < hss.length; i++) {
                 const hs = hss[i];
-                if (t + 1e-4 < hs.start_time || t > hs.end_time + 1e-4) continue;
-                if (hs.chord_id !== cid && Number(hs.chord_id) !== Number(cid)) continue;
+                const tLo = hsStart(hs);
+                const tHi = hsEnd(hs);
+                if (Number.isNaN(tLo) || Number.isNaN(tHi)) continue;
+                if (t + 1e-4 < tLo || t > tHi + 1e-4) continue;
+                const hsCid = hsChordIdNorm(hs);
+                if (hsCid !== cid && Number(hsCid) !== Number(cid)) continue;
                 const explicit = hs.arp === true || hs.arp === 1 || hs.arpeggio === true;
                 return { explicit, covered: true, hs };
             }
@@ -4548,6 +4573,42 @@
             return shape;
         }
 
+        function hitTimesQualifyArpeggioSpread(hitTimes) {
+            if (hitTimes.length < 2) return false;
+            hitTimes.sort((a, b) => a - b);
+            const spread = hitTimes[hitTimes.length - 1] - hitTimes[0];
+            if (spread >= 0.03) return true;
+            return hitTimes.length >= 4 && spread >= 0.016;
+        }
+
+        /** RS XML / IPC payloads use snake_case or camelCase field names. */
+        function hsStart(hs) {
+            if (!hs) return NaN;
+            const v = hs.start_time != null ? hs.start_time : hs.startTime;
+            if (v == null) return NaN;
+            const n = Number(v);
+            return Number.isNaN(n) ? NaN : n;
+        }
+        function hsEnd(hs) {
+            if (!hs) return NaN;
+            const v = hs.end_time != null ? hs.end_time : hs.endTime;
+            if (v == null) return NaN;
+            const n = Number(v);
+            return Number.isNaN(n) ? NaN : n;
+        }
+        function hsChordIdNorm(hs) {
+            if (!hs) return null;
+            const v = hs.chord_id != null ? hs.chord_id : hs.chordId;
+            return v == null ? null : v;
+        }
+
+        /** ``<handShape>`` chart duration in seconds (snake_case or camelCase XML). */
+        function handShapeChartSpanSec(hs) {
+            const a = hsStart(hs), b = hsEnd(hs);
+            if (Number.isNaN(a) || Number.isNaN(b)) return 0;
+            return Math.max(0, b - a);
+        }
+
         /**
          * When ``hd`` is missing/false, detect arpeggio from the **note** stream
          * using the **full voicing** (template ∪ chord notes). RS often stores the
@@ -4557,14 +4618,6 @@
          *        When set (e.g. from ``<handShape>`` span), scan staggered picks
          *        across the whole held-shape window — RS often omits ``arp`` and ``hd``.
          */
-        function hitTimesQualifyArpeggioSpread(hitTimes) {
-            if (hitTimes.length < 2) return false;
-            hitTimes.sort((a, b) => a - b);
-            const spread = hitTimes[hitTimes.length - 1] - hitTimes[0];
-            if (spread >= 0.03) return true;
-            return hitTimes.length >= 4 && spread >= 0.016;
-        }
-
         function inferArpeggioFromNotePattern(ch, shape, notesArr, timeWin) {
             if (!notesArr || notesArr.length === 0 || shape.size < 2) return false;
             const tHi = timeWin ? timeWin.tHi : ch.t + 2.35;
@@ -4580,7 +4633,19 @@
                 if (ef === undefined || ef !== n.f) continue;
                 hitTimes.push(n.t);
             }
-            return hitTimesQualifyArpeggioSpread(hitTimes);
+            if (!hitTimesQualifyArpeggioSpread(hitTimes)) return false;
+            if (timeWin) {
+                const winSpan = timeWin.tHi - timeWin.tLo;
+                if (winSpan > ARP_INFER_MULTI_STRUM_WIN_MIN_S
+                    && hitTimes.length > shape.size + ARP_INFER_MULTI_STRUM_HIT_SLACK) {
+                    return false;
+                }
+                if (winSpan < 0.70 && hitTimes.length < 4) {
+                    const spread = hitTimes[hitTimes.length - 1] - hitTimes[0];
+                    if (spread < ARP_INFER_STRUM_VS_ARP_SPREAD_MIN_S) return false;
+                }
+            }
+            return true;
         }
 
         /**
@@ -4593,8 +4658,11 @@
             if (!validString(n.s)) return null;
             for (let i = 0; i < handShapes.length; i++) {
                 const hs = handShapes[i];
-                if (n.t + 1e-4 < hs.start_time || n.t > hs.end_time + 1e-4) continue;
-                const cid = hs.chord_id;
+                const hsLo = hsStart(hs);
+                const hsHi = hsEnd(hs);
+                if (Number.isNaN(hsLo) || Number.isNaN(hsHi)) continue;
+                if (n.t + 1e-4 < hsLo || n.t > hsHi + 1e-4) continue;
+                const cid = hsChordIdNorm(hs);
                 if (cid == null) continue;
                 const tmpl = chordTemplates?.[cid] ?? chordTemplates?.[Number(cid)];
                 if (!tmpl || !Array.isArray(tmpl.frets)) continue;
@@ -4602,9 +4670,10 @@
                 if (typeof tf !== 'number' || tf < 0 || n.f !== tf) continue;
                 const synthNotes = chordNotesFromTemplate(cid, chordTemplates);
                 if (synthNotes.length === 0) continue;
-                const fakeCh = { t: hs.start_time, id: cid, notes: synthNotes };
+                const fakeCh = { t: hsLo, id: cid, notes: synthNotes };
                 const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
-                const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
+                const tw = { tLo: hsLo - 0.06, tHi: hsHi + 0.06 };
+                if (handShapeChartSpanSec(hs) < ARP_INFER_MIN_HAND_SHAPE_SPAN_S) continue;
                 if (inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw)) return cid;
             }
             return null;
@@ -4620,15 +4689,21 @@
             for (let i = 0; i < handShapes.length; i++) {
                 let infer = false;
                 const hs = handShapes[i];
-                const cid = hs.chord_id;
+                if (handShapeChartSpanSec(hs) < ARP_INFER_MIN_HAND_SHAPE_SPAN_S) {
+                    outFlags[i] = false;
+                    continue;
+                }
+                const cid = hsChordIdNorm(hs);
                 if (cid != null && notesArr.length > 0) {
                     const tmpl = chordTemplates?.[cid] ?? chordTemplates?.[Number(cid)];
                     if (tmpl && Array.isArray(tmpl.frets)) {
                         const synthNotes = chordNotesFromTemplate(cid, chordTemplates);
                         if (synthNotes.length > 0) {
-                            const fakeCh = { t: hs.start_time, id: cid, notes: synthNotes };
+                            const hsLo = hsStart(hs);
+                            const hsHi = hsEnd(hs);
+                            const fakeCh = { t: hsLo, id: cid, notes: synthNotes };
                             const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
-                            const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
+                            const tw = { tLo: hsLo - 0.06, tHi: hsHi + 0.06 };
                             infer = inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw);
                         }
                     }
@@ -4644,8 +4719,11 @@
             for (let i = 0; i < handShapes.length; i++) {
                 if (!hsInferFlags[i]) continue;
                 const hs = handShapes[i];
-                if (n.t + 1e-4 < hs.start_time || n.t > hs.end_time + 1e-4) continue;
-                const cid = hs.chord_id;
+                const hsLo = hsStart(hs);
+                const hsHi = hsEnd(hs);
+                if (Number.isNaN(hsLo) || Number.isNaN(hsHi)) continue;
+                if (n.t + 1e-4 < hsLo || n.t > hsHi + 1e-4) continue;
+                const cid = hsChordIdNorm(hs);
                 if (cid == null) continue;
                 const tmpl = chordTemplates?.[cid] ?? chordTemplates?.[Number(cid)];
                 if (!tmpl || !Array.isArray(tmpl.frets)) continue;
@@ -4658,10 +4736,12 @@
 
         function handShapeIsArpeggioForLaneRail(hs, handShapes, chordTemplates, notesArr, chords) {
             if (hs.arp === true || hs.arp === 1 || hs.arpeggio === true) return true;
-            const cid = hs.chord_id;
+            const cid = hsChordIdNorm(hs);
             if (cid == null || !chords || chords.length === 0 || !handShapes) return false;
-            const tHsLo = hs.start_time - 1e-4;
-            const tHsHi = hs.end_time + 1e-4;
+            const hsSpanOk = handShapeChartSpanSec(hs) >= ARP_INFER_MIN_HAND_SHAPE_SPAN_S;
+            const tHsLo = hsStart(hs) - 1e-4;
+            const tHsHi = hsEnd(hs) + 1e-4;
+            if (Number.isNaN(tHsLo) || Number.isNaN(tHsHi)) return false;
             for (let j = 0; j < chords.length; j++) {
                 const ch = chords[j];
                 if (ch.id !== cid && Number(ch.id) !== Number(cid)) continue;
@@ -4671,11 +4751,10 @@
                 if (chordNotes.length === 0) continue;
                 const hsHint = chordHandShapeArpeggioHint(ch, handShapes);
                 const chShape = mergeChordShape(ch, chordNotes, chordTemplates);
-                const inferredFromNotes = !ch.h3dSynth && inferArpeggioFromNotePattern(
+                const inferredFromNotes = hsSpanOk && !ch.h3dSynth && inferArpeggioFromNotePattern(
                     ch, chShape, notesArr,
                     { tLo: ch.t - ARP_FRAME_ONSET_PAD_S, tHi: ch.t + ARP_FRAME_ONSET_CLUSTER_S });
-                if (chordWireHighDensity(ch)
-                    || (inferredFromNotes && (hsHint.explicit || hsHint.covered))) {
+                if ((inferredFromNotes && (hsHint.explicit || hsHint.covered))) {
                     return true;
                 }
             }
@@ -4689,9 +4768,12 @@
          * before the box or end before the last arpeggiated note.
          */
         function effectiveArpRailChartBoundsForHandShape(hs, chords, chordTemplates, notesArr) {
-            let shapeLo = hs.start_time;
-            let shapeHi = hs.end_time;
-            const cid = hs.chord_id;
+            let shapeLo = hsStart(hs);
+            let shapeHi = hsEnd(hs);
+            const cid = hsChordIdNorm(hs);
+            if (Number.isNaN(shapeLo) || Number.isNaN(shapeHi)) {
+                return { shapeLo: 1e9, shapeHi: -1e9 };
+            }
             if (notesArr && notesArr.length > 0 && chordTemplates && cid != null) {
                 const tmpl = chordTemplates[cid] ?? chordTemplates[Number(cid)];
                 if (tmpl && Array.isArray(tmpl.frets)) {
@@ -4699,7 +4781,7 @@
                     let tLast = null;
                     for (let i = 0; i < notesArr.length; i++) {
                         const n = notesArr[i];
-                        if (n.t + 1e-4 < hs.start_time - 0.18 || n.t > hs.end_time + 0.45) continue;
+                        if (n.t + 1e-4 < shapeLo - 0.18 || n.t > shapeHi + 0.45) continue;
                         if (!validString(n.s)) continue;
                         const tf = tmpl.frets[n.s];
                         if (typeof tf !== 'number' || tf < 0 || n.f !== tf) continue;
@@ -4716,7 +4798,7 @@
                 for (let j = 0; j < chords.length; j++) {
                     const ch = chords[j];
                     if (ch.id !== cid && Number(ch.id) !== Number(cid)) continue;
-                    if (ch.t + 1e-4 < hs.start_time || ch.t > hs.end_time + 0.28) continue;
+                    if (ch.t + 1e-4 < shapeLo || ch.t > shapeHi + 0.28) continue;
                     if (tMinC === null || ch.t < tMinC) tMinC = ch.t;
                     if (tMaxC === null || ch.t > tMaxC) tMaxC = ch.t;
                 }
@@ -4823,12 +4905,12 @@
                 const shapeHi = boundHi[i];
                 if (nowT + 1e-4 < shapeLo || nowT > shapeHi + 1e-4) continue;
 
-                const cid = handShapes[i].chord_id;
+                const cid = hsChordIdNorm(handShapes[i]);
                 if (cid == null) return 1;
                 for (let j = 0; j < chords.length; j++) {
                     const ch = chords[j];
                     if (ch.id !== cid && Number(ch.id) !== Number(cid)) continue;
-                    if (Math.abs(ch.t - handShapes[i].start_time) > 0.12) continue;
+                    if (Math.abs(ch.t - hsStart(handShapes[i])) > 0.12) continue;
                     const chordNotes = ch.notes ? filterValidNotes(ch.notes) : [];
                     if (chordNotes.some(cn => cn.ac)) return 1.22;
                     return 1;
@@ -5541,15 +5623,24 @@
 
                     const hsHintFrame = chordHandShapeArpeggioHint(ch, bundle.handShapes);
                     const hsTimeWinFrame = hsHintFrame.hs
-                        ? { tLo: hsHintFrame.hs.start_time - 0.06, tHi: hsHintFrame.hs.end_time + 0.06 }
+                        ? { tLo: hsStart(hsHintFrame.hs) - 0.06, tHi: hsEnd(hsHintFrame.hs) + 0.06 }
                         : null;
-                    const inferredArpPattern = inferArpeggioFromNotePattern(
-                        ch, chShape, notes, hsTimeWinFrame);
+                    const inferredArpPattern = (!hsHintFrame.hs
+                        || handShapeChartSpanSec(hsHintFrame.hs) >= ARP_INFER_MIN_HAND_SHAPE_SPAN_S)
+                        && inferArpeggioFromNotePattern(
+                            ch, chShape, notes, hsTimeWinFrame);
                     const deferChordGems = inferredArpPattern
                         || (hsHintFrame.explicit && hsHintFrame.covered);
-                    const chordSusTrailMatchArpFrame = chordWireHighDensity(ch)
-                        || hsHintFrame.explicit
+                    /**
+                     * Lavender chord frame + purple highway rails: ``<handShape>`` arp flags
+                     * or note-stream inference only. RS ``highDensity`` marks gallops /
+                     * repeated strums on the same voicing (e.g. Frantic ~2:46) — not arpeggio;
+                     * keep ``hd`` for sustain-ribbon width via ``chordSusTrailMatchArpFrame``.
+                     */
+                    const chordHighwayLavenderArpVisual = hsHintFrame.explicit
                         || (hsHintFrame.covered && inferredArpPattern);
+                    const chordSusTrailMatchArpFrame = chordWireHighDensity(ch)
+                        || chordHighwayLavenderArpVisual;
 
                     // Onset in window OR chord started before the window
                     // but is still sustaining right now. Gate sustain
@@ -5638,12 +5729,10 @@
                         // not bar thickness vs first chord — see CHORD_FRAME_RIM_* tuning.
                         let ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
                         if (chordAccent) ft *= 1.22;
-                        // Lavender frame: match ``chordSusTrailMatchArpFrame`` (gems / sustain
-                        // trail) — same ``hd`` / hand-shape explicit / covered + wide-window
-                        // ``inferredArpPattern``. The old path gated inference on ``!h3dSynth``
-                        // and a tight ``ch.t`` cluster window, which hid the rim + fill on
-                        // many real arpeggio passages (especially synth chord rows).
-                        const isArpeggioFrame = !isRepeat && chordSusTrailMatchArpFrame;
+                        // Lavender frame: ``chordHighwayLavenderArpVisual`` only (explicit
+                        // ``<handShape>`` arp / inferred stagger). RS ``highDensity`` is kept
+                        // out — it tags gallops & repeated strums (Frantic ~2:46), not arpeggio.
+                        const isArpeggioFrame = !isRepeat && chordHighwayLavenderArpVisual;
                         const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
                         const rimHex = isArpeggioFrame ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
 
@@ -6612,14 +6701,6 @@
                     );
                 } else {
                     core.scale.set(rimXY, rimXY, 2.5 * rimZ);
-                }
-                if (n.f === 0) {
-                    // "0" label on open string
-                    const lb = pLbl.get();
-                    lb.material = txtMat(0, hit ? '#fff' : '#ddd', false, 'open');
-                    lb.scale.set(NW * 0.7 * _textSizeMul * openWScale, NH * 0.8 * _textSizeMul * openWScale, 1);
-                    lb.position.set(x, y + vibrato, noteZ + 0.01 * K);
-                    lb.renderOrder = 1000;
                 }
 
                 // ── Sustain trail ─────────────────────────────────────────
