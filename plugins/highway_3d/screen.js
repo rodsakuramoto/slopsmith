@@ -171,10 +171,32 @@
     const TS = 200 * K;
     /** Match `nextNoteByString` onset to this note (float + chart rounding; avoids ghost / glow flicker). */
     const NEXT_ON_STRING_T_EPS = 0.06;
-    /** `nextNoteByString` only lists `t > now`, so at/after onset it advances — keep board ghost visible this long past `n.t`. */
-    const GHOST_HOLD_AFTER_ONSET = 0.24;
-    /** Post-onset: fade ghost **number** out over this many seconds at end of hold (must be ≤ GHOST_HOLD_AFTER_ONSET). */
-    const GHOST_FRET_LBL_FADE_S = 0.20;
+    /**
+     * 3D highway post-strum tail — chord frame + ghost fret digit share the same
+     * hold and fade so timing stays consistent.
+     */
+    const CHORD_HWY_LINGER_S = 0.48;
+    /** Linear fade at end of `CHORD_HWY_LINGER_S` (applies to chord UI and board ghost numbers). */
+    const CHORD_HWY_FADE_S = 0.32;
+    const GHOST_HOLD_AFTER_ONSET = CHORD_HWY_LINGER_S;
+    const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
+
+    /**
+     * Post-hit tail fade shared by ghost fret digits and 3D chord UI: full
+     * opacity until (holdS − fadeS) after onset, then linear fade over fadeS;
+     * canceled when `nextSoon` (next chord / note within that fade window).
+     * @param {number} dt chart time minus now (negative once struck)
+     * @param {number} fadeS linear fade duration (default: GHOST_FRET_LBL_FADE_S)
+     */
+    function hwyPostHitTailFadeMul(dt, holdS, nextSoon, fadeS = GHOST_FRET_LBL_FADE_S) {
+        if (nextSoon || dt >= 0) return 1;
+        const gone = -dt;
+        if (gone >= holdS) return 0;
+        const fS = Math.min(Math.max(fadeS, 1e-6), holdS);
+        const fadeStartT = Math.max(0, holdS - fS);
+        if (gone < fadeStartT) return 1;
+        return Math.max(0, 1 - (gone - fadeStartT) / fS);
+    }
 
     // Shorter, flatter notes (joel style)
     const NW = 5 * K, NH = 3 * K, ND = 0.5 * K;
@@ -4855,7 +4877,7 @@
                             isNext,
                             skipLabel,
                             isRepeat,
-                            DIAG_LINGER_S,
+                            CHORD_HWY_LINGER_S,
                             cn.f === 0 ? laneWForOpenStrings : undefined,
                             true,
                             ch.id,
@@ -4882,7 +4904,18 @@
 
                     // Chord frame-box — Charter Preview3DChordBoxDrawer-style rim + fill.
                     const chDt = ch.t - now;
-                    if (chordNotes.length > 1 && chDt > -DIAG_LINGER_S && chDt < AHEAD && chordOpenBoxW != null) {
+                    let chordNextSoon = false;
+                    for (let j = ci + 1; j < chords.length; j++) {
+                        const cj = chords[j];
+                        if (!cj?.notes) continue;
+                        if (filterValidNotes(cj.notes).length === 0) continue;
+                        if (cj.t > ch.t + 1e-6 && (cj.t - now) <= CHORD_HWY_FADE_S) {
+                            chordNextSoon = true;
+                        }
+                        break;
+                    }
+                    const chordTailMul = hwyPostHitTailFadeMul(chDt, CHORD_HWY_LINGER_S, chordNextSoon, CHORD_HWY_FADE_S);
+                    if (chordNotes.length > 1 && chDt > -CHORD_HWY_LINGER_S && chDt < AHEAD && chordOpenBoxW != null) {
                         const z = Math.min(0, dZ(chDt));
                         const width = chordOpenBoxW;
                         const xLeft = chordFrameXL;
@@ -4906,7 +4939,7 @@
                         if (chordAccent) ft *= 1.22;
 
                         const repDim = isRepeat ? 0.78 : 1;
-                        const edgeOp = fade * repDim * CHARTER_CHORD_BOX_FRAME_ALPHA * (isRepeat ? 0.85 : 1);
+                        const edgeOp = fade * repDim * CHARTER_CHORD_BOX_FRAME_ALPHA * (isRepeat ? 0.85 : 1) * chordTailMul;
                         const thickZ = Math.max(CHORD_FRAME_RIM_Z_MIN * K, ft * CHORD_FRAME_RIM_Z_SCAL);
                         const drawFrameBox = (px, py, sx, sy, ord) => {
                             const b = pChordBox.get();
@@ -4923,7 +4956,7 @@
                         fill.rotation.set(0, 0, 0);
                         fill.position.set(cx, cY, z - 0.004 * K);
                         fill.scale.set(innerW, innerH, 1);
-                        fill.material.opacity = fade * repDim;
+                        fill.material.opacity = fade * repDim * chordTailMul;
 
                         drawFrameBox(cx, yBot + ft * 0.5, width, ft, 12);
                         const withTopFrame = !isRepeat;
@@ -4940,12 +4973,11 @@
 
                         const chordName = bundle.chordTemplates?.[ch.id]?.name;
                         if (chordName && firstInShapeRun) {
-                            const postFade = chDt < 0 ? Math.max(0, 1 + chDt / DIAG_LINGER_S) : 1;
                             const lblW = 28 * K, lblH = 9 * K;
                             const lbl = pChordLbl.get();
                             const mat = txtMat(chordName, '#e8d080', true, 'chord');
                             if (lbl.material.map !== mat.map) { lbl.material.map = mat.map; lbl.material.needsUpdate = true; }
-                            lbl.material.opacity = Math.min(1, 0.3 + fade * 0.7) * postFade;
+                            lbl.material.opacity = Math.min(1, 0.3 + fade * 0.7) * chordTailMul;
                             // Gold chord name: slight +X shift from flush-left so it sits farther right.
                             const lblWS = lblW * _textSizeMul;
                             const lblHS = lblH * _textSizeMul;
@@ -5017,11 +5049,10 @@
                                 const yTop = Math.max(sY(barreMinStr3d), sY(barreMaxStr3d));
                                 const yBot = Math.min(sY(barreMinStr3d), sY(barreMaxStr3d));
                                 const lineH = yTop - yBot;
-                                const postFadeB = Math.max(0, 1 + chDt / DIAG_LINGER_S);
                                 const bl = pBarreLine.get();
                                 bl.position.set(bx, (yTop + yBot) / 2, 0.05 * K);
                                 bl.scale.set(0.5 * K, lineH, 0.5 * K);
-                                bl.material.opacity = 0.8 * postFadeB;
+                                bl.material.opacity = 0.8 * chordTailMul;
                             }
                         }
                     }
@@ -5969,17 +6000,10 @@
                     const sprMat = txtMat(ghostFretDisplay, '#ffffff', false, 'noteFret');
                     const baseGhostMat = _meshMatForGhostFretDigit(sprMat);
                     let ghostFretLblAlpha = 1;
-                    if (ghostPastHold && dt > -GHOST_HOLD_AFTER_ONSET && dt <= 0) {
+                    if (ghostPastHold) {
                         const nextSoon = nxFrame != null && nxFrame.t > n.t + 1e-6
                             && (nxFrame.t - now) <= GHOST_FRET_LBL_FADE_S;
-                        if (!nextSoon) {
-                            const gone = -dt;
-                            const fadeStartT = Math.max(0, GHOST_HOLD_AFTER_ONSET - GHOST_FRET_LBL_FADE_S);
-                            if (gone >= fadeStartT && GHOST_FRET_LBL_FADE_S > 1e-6) {
-                                ghostFretLblAlpha = Math.max(0,
-                                    1 - (gone - fadeStartT) / GHOST_FRET_LBL_FADE_S);
-                            }
-                        }
+                        ghostFretLblAlpha = hwyPostHitTailFadeMul(dt, GHOST_HOLD_AFTER_ONSET, nextSoon);
                     }
                     let instMat = lb.userData.h3dGhostFretLblInstMat;
                     if (!instMat || instMat.map !== baseGhostMat.map) {
