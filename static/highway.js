@@ -37,6 +37,7 @@ function createHighway() {
     let songInfo = {};
     let notes = [];
     let chords = [];
+    let handShapes = [];
     let beats = [];
     let sections = [];
     let anchors = [];
@@ -68,6 +69,7 @@ function createHighway() {
     let _filteredNotes = null;
     let _filteredChords = null;
     let _filteredAnchors = null;
+    let _filteredHandShapes = null;
     let showLyrics = localStorage.getItem('showLyrics') !== 'false';
     let _drawHooks = [];  // plugin draw callbacks: fn(ctx, W, H)
     let _renderScale = parseFloat(localStorage.getItem('renderScale') || '1');  // 1 = full, 0.5 = half res
@@ -269,6 +271,11 @@ function createHighway() {
             // Master-difficulty (slopsmith#48)
             mastery: _mastery,
             hasPhraseData: !!(_phrases && _phrases.length > 0),
+            // Phrase-level `handshapes` are often empty on DLC even when the flat
+            // arrangement carried them — fall back so 3D arpeggio hints still work.
+            handShapes: (_filteredHandShapes !== null && _filteredHandShapes.length > 0)
+                ? _filteredHandShapes
+                : handShapes,
 
             // Display flags
             inverted: _inverted,
@@ -1835,11 +1842,13 @@ function createHighway() {
             _filteredNotes = null;
             _filteredChords = null;
             _filteredAnchors = null;
+            _filteredHandShapes = null;
             return;
         }
         const outNotes = [];
         const outChords = [];
         const outAnchors = [];
+        const outHandShapes = [];
         for (const p of _phrases) {
             const n = p.levels.length;
             if (n === 0) continue;
@@ -1856,10 +1865,15 @@ function createHighway() {
             // the highway panning into empty regions — filter them to
             // the same level as the notes they pair with.
             for (const x of lv.anchors) outAnchors.push(x);
+            for (const x of (lv.handshapes || [])) outHandShapes.push(x);
         }
         _filteredNotes = outNotes;
         _filteredChords = outChords;
         _filteredAnchors = outAnchors;
+        if (outHandShapes.length) {
+            outHandShapes.sort((a, b) => a.start_time - b.start_time);
+        }
+        _filteredHandShapes = outHandShapes;
     }
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -1890,7 +1904,7 @@ function createHighway() {
             _resizeHandler = () => this.resize();
             window.addEventListener('resize', _resizeHandler);
             ready = false;
-            notes = []; chords = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
+            notes = []; chords = []; handShapes = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
             stringCount = 6;  // default until song_info arrives
             // Reset phrase ladder + filter (slopsmith#48). _mastery
             // persists across arrangement switches — the slider's
@@ -1901,6 +1915,7 @@ function createHighway() {
             _filteredNotes = null;
             _filteredChords = null;
             _filteredAnchors = null;
+            _filteredHandShapes = null;
             _resetChordRenderState();
         },
 
@@ -2253,6 +2268,7 @@ function createHighway() {
                         case 'tone_changes': toneChanges = msg.data; toneBase = msg.base || ""; break;
                         case 'notes': notes = notes.concat(msg.data); break;
                         case 'chords': chords = chords.concat(msg.data); break;
+                        case 'handshapes': handShapes = handShapes.concat(msg.data); break;
                         case 'phrases':
                             // Accumulate chunks but DON'T rebuild the filter
                             // until `ready` — rebuilding per chunk would
@@ -2264,8 +2280,12 @@ function createHighway() {
                             break;
                         case 'ready':
                             ready = true;
+                            if (handShapes.length) {
+                                handShapes.sort((a, b) => a.start_time - b.start_time);
+                            }
                             _rebuildMasteryFilter();
                             console.log(`Highway ready: ${notes.length} notes, ${chords.length} chords` +
+                                `, ${handShapes.length} handShapes` +
                                 (_phrases !== null ? `, ${_phrases.length} phrases (mastery ${Math.round(_mastery * 100)}%)` : ""));
                             // Wait for the off-chain JUCE routing (if any) to settle
                             // so _juceMode is correctly set before _onReady and song:ready fire.
@@ -2382,7 +2402,7 @@ function createHighway() {
             // Close old WS but keep audio + animation running
             if (ws) { ws.close(); ws = null; }
             ready = false;
-            notes = []; chords = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
+            notes = []; chords = []; handShapes = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
             stringCount = 6;  // default until song_info arrives
             // Reset phrase ladder + filter (slopsmith#48). _mastery
             // persists across arrangement switches — the slider's
@@ -2393,6 +2413,7 @@ function createHighway() {
             _filteredNotes = null;
             _filteredChords = null;
             _filteredAnchors = null;
+            _filteredHandShapes = null;
             _resetChordRenderState();
             const arrParam = arrangement !== undefined ? `?arrangement=${arrangement}` : '';
             // filename might already be encoded from data-play attribute

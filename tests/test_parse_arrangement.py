@@ -23,6 +23,28 @@ _TUNING_AND_TEMPLATES = (
 )
 
 
+def test_hand_shape_parses_arpeggio_attribute(tmp_path):
+    xml = (
+        "<song>"
+        + _TUNING_AND_TEMPLATES
+        + '<levels count="1">'
+        + '<level difficulty="0">'
+        + '<notes count="0"/>'
+        + '<chords count="0"/>'
+        + '<anchors count="0"/>'
+        + '<handShapes count="1">'
+        + '<handShape chordId="2" startTime="1.0" endTime="2.0" arpeggio="1"/>'
+        + "</handShapes>"
+        + "</level>"
+        + "</levels>"
+        + "</song>"
+    )
+    arr = parse_arrangement(_write_xml(tmp_path, xml))
+    assert len(arr.hand_shapes) == 1
+    assert arr.hand_shapes[0].chord_id == 2
+    assert arr.hand_shapes[0].arpeggio is True
+
+
 def _song(levels_xml: str, phrases_xml: str = "", iters_xml: str = "") -> str:
     return (
         "<song>"

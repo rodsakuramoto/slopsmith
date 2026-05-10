@@ -3279,6 +3279,21 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                 "total": len(chords),
             })
 
+        hand_shapes_out = []
+        for h in arr.hand_shapes:
+            hand_shapes_out.append({
+                "chord_id": h.chord_id,
+                "start_time": round(h.start_time, 3),
+                "end_time": round(h.end_time, 3),
+                "arp": h.arpeggio,
+            })
+        for i in range(0, len(hand_shapes_out), 500):
+            await websocket.send_json({
+                "type": "handshapes",
+                "data": hand_shapes_out[i:i+500],
+                "total": len(hand_shapes_out),
+            })
+
         # Per-phrase difficulty data for the master-difficulty slider
         # (slopsmith#48). Only sent when the source chart had multiple
         # `<level>` tiers — single-level charts (GP converter, older

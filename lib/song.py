@@ -73,6 +73,8 @@ class HandShape:
     chord_id: int
     start_time: float
     end_time: float
+    """EOF / some CDLC emit ``arpeggio`` on ``<handShape>`` (RS14+)."""
+    arpeggio: bool = False
 
 
 @dataclass
@@ -213,7 +215,7 @@ def phrase_level_to_wire(pl: PhraseLevel) -> dict:
         "chords": [chord_to_wire(c) for c in pl.chords],
         "anchors": [{"time": a.time, "fret": a.fret, "width": a.width} for a in pl.anchors],
         "handshapes": [
-            {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time}
+            {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time, "arp": h.arpeggio}
             for h in pl.hand_shapes
         ],
     }
@@ -241,7 +243,8 @@ def phrase_level_from_wire(d: dict) -> PhraseLevel:
         hand_shapes=[
             HandShape(chord_id=int(h.get("chord_id", 0)),
                       start_time=float(h.get("start_time", 0)),
-                      end_time=float(h.get("end_time", 0)))
+                      end_time=float(h.get("end_time", 0)),
+                      arpeggio=bool(h.get("arp", False)))
             for h in d.get("handshapes", [])
         ],
     )
@@ -341,7 +344,7 @@ def arrangement_to_wire(arr: Arrangement) -> dict:
         "chords": [chord_to_wire(c) for c in arr.chords],
         "anchors": [{"time": a.time, "fret": a.fret, "width": a.width} for a in arr.anchors],
         "handshapes": [
-            {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time}
+            {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time, "arp": h.arpeggio}
             for h in arr.hand_shapes
         ],
         "templates": [
@@ -376,7 +379,8 @@ def arrangement_from_wire(d: dict) -> Arrangement:
         hand_shapes=[
             HandShape(chord_id=int(h.get("chord_id", 0)),
                       start_time=float(h.get("start_time", 0)),
-                      end_time=float(h.get("end_time", 0)))
+                      end_time=float(h.get("end_time", 0)),
+                      arpeggio=bool(h.get("arp", False)))
             for h in d.get("handshapes", [])
         ],
         chord_templates=[
@@ -414,6 +418,22 @@ def _int(elem, attr, default=0):
 def _bool(elem, attr):
     v = elem.get(attr)
     return v is not None and v != "0"
+
+
+def _hand_shape_arpeggio_flag(elem) -> bool:
+    """Rocksmith / EOF may mark arpeggio on ``<handShape>`` (various casings)."""
+    for attr in ("arpeggio", "Arpeggio", "arp", "Arp"):
+        if _bool(elem, attr):
+            return True
+    return False
+
+
+def _chord_high_density(elem: ET.Element) -> bool:
+    """RS14 uses ``highDensity`` on ``<chord>``; some converters vary casing."""
+    for attr in ("highDensity", "highdensity", "HighDensity"):
+        if _bool(elem, attr):
+            return True
+    return False
 
 
 def _parse_note(n) -> Note:
@@ -524,7 +544,7 @@ def parse_arrangement(xml_path: str) -> Arrangement:
                             chord_notes.append(Note(time=t, string=s, fret=ct.frets[s]))
                 lv_chords.append(Chord(
                     time=t, chord_id=cid, notes=chord_notes,
-                    high_density=_bool(c, "highDensity"),
+                    high_density=_chord_high_density(c),
                 ))
         lv_chords.sort(key=lambda c: c.time)
 
@@ -546,6 +566,7 @@ def parse_arrangement(xml_path: str) -> Arrangement:
                     chord_id=_int(hs, "chordId"),
                     start_time=_float(hs, "startTime"),
                     end_time=_float(hs, "endTime"),
+                    arpeggio=_hand_shape_arpeggio_flag(hs),
                 ))
         lv_hand_shapes.sort(key=lambda h: h.start_time)
 

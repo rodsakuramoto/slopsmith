@@ -180,6 +180,8 @@
     const CHORD_HWY_FADE_S = 0.32;
     const GHOST_HOLD_AFTER_ONSET = CHORD_HWY_LINGER_S;
     const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
+    /** Purple lane rails: tight end tail only (no ``CHORD_HWY_LINGER_S`` — avoids bleeding past the highway). */
+    const ARP_HWY_RAIL_END_TAIL_S = 0.1;
     /** Drives emissive (`mGlow` / accent fill) for notes with `.ac`; matches drawNote `linger` cutoff (0.05). */
     const ACCENT_NOTE_STR_GLOW = 3.55;
     const ACCENT_NOTE_LINGER_EPS = 0.05;
@@ -462,6 +464,8 @@
     const CHARTER_CHORD_BOX_FRAME_ALPHA = 128 / 255;
     /** Interior strip uses ARGB 32 on both stops in Charter (see drawChordBoxFilling). */
     const CHARTER_CHORD_BOX_FILL_TEX_ALPHA = 32 / 255;
+    /** Arpeggio tint (Charter) for outer lane dividers — thickness tracks chord rim ``ftSide``. */
+    const CHARTER_PREVIEW_3D_ARPEGGIO_HEX = 0xc040ff;
 
     /** 3D chord-box rim bars (thin on all chords, including repeats in a sequence). */
     const CHORD_FRAME_RIM_MIN = 0.055;       // × K — floor thickness
@@ -1834,6 +1838,8 @@
         // Shared materials/geometry for the lane stripes — see initScene().
         // Hoisted so draw() can reference them when assigning per-stripe.
         let mLaneOdd = null, mLaneEven = null, gLanePlane = null;
+        /** Lane fret dividers: default white vs arpeggio frame tint on outer wires only. */
+        let mLaneDivider = null, mLaneDividerArp = null;
         /** Shared XY plane for ghost fret digits (lies on board like proj, not billboarding). */
         let gGhostFretPlane = null, pGhostFretLbl = null;
         // Anchor-driven lane scratch buffers. Per-frame the loop builds up
@@ -1845,8 +1851,12 @@
         const _laneSegDMax = [];
         const _laneSegZ0 = [];
         const _laneSegZ1 = [];
+        /** Chart-time span per merged lane segment (for per-slice arpeggio rail tint). */
+        const _laneSegTLo = [];
+        const _laneSegTHi = [];
+        const _laneSegArp = [];
         let _laneSegLen = 0;
-        let pChordBox, pChordFrameFill, pChordLbl, pBarreLine;
+        let pChordBox, pChordFrameFill, pChordLbl, pBarreLine, pArpBracket;
         let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron, pAccentHalo;
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
@@ -3303,9 +3313,14 @@
 
             // Vertical fret dividers within active lane
             const gLaneDivider = new T.BoxGeometry(0.15 * K, 0.15 * K, 1);
-            const mLaneDivider = new T.MeshBasicMaterial({
+            mLaneDivider = new T.MeshBasicMaterial({
                 color: 0xffffff, transparent: true, opacity: 0.08, fog: false, depthWrite: false,
             });
+            mLaneDividerArp = new T.MeshBasicMaterial({
+                color: CHARTER_PREVIEW_3D_ARPEGGIO_HEX,
+                transparent: true, opacity: 0.08, fog: false, depthWrite: false,
+            });
+            _ownedSharedMats.push(mLaneDivider, mLaneDividerArp);
             pLaneDivider = pool(noteG, () => new T.Mesh(gLaneDivider, mLaneDivider));
 
             // Chord frame — Charter Preview3DChordBoxDrawer palette & layout hints
@@ -3365,6 +3380,14 @@
             // recycled / future-allocated barre mesh picks up the change.
             mBarre = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.9 * glowMul, transparent: true, depthWrite: false });
             pBarreLine  = pool(noteG, () => new T.Mesh(new T.BoxGeometry(1, 1, 1), mBarre));
+            // Charter Preview3DFingeringDrawer arpeggio brackets (per-string L-glyph meshes).
+            pArpBracket = pool(noteG, () => new T.Mesh(
+                new T.BoxGeometry(1, 1, 1),
+                new T.MeshBasicMaterial({
+                    transparent: true, opacity: 1, depthWrite: false, fog: false,
+                    polygonOffset: true, polygonOffsetFactor: -0.4, polygonOffsetUnits: 1,
+                }),
+            ));
 
             // Per-note fret number below note with connector line
             pNoteFretLabel = pool(lblG, () => new T.Sprite(txtMat('0', '#ffffff', false, 'noteFret').clone()));
@@ -4373,6 +4396,323 @@
             return lockActive;
         }
 
+        /** RS / sloppak `hd` (highDensity); tolerate occasional string forms. */
+        function chordWireHighDensity(ch) {
+            const h = ch && ch.hd;
+            if (h === true || h === 1) return true;
+            if (h === '1') return true;
+            if (typeof h === 'string' && h.toLowerCase() === 'true') return true;
+            return false;
+        }
+
+        /**
+         * Rocksmith ``<handShape>``: optional ``arpeggio`` / ``arp``; also use
+         * shape window + staggered note picks when the chart omits flags.
+         */
+        function chordHandShapeArpeggioHint(ch, hss) {
+            if (!hss || hss.length === 0) {
+                return { explicit: false, covered: false, hs: null };
+            }
+            const t = ch.t;
+            const cid = ch.id;
+            for (let i = 0; i < hss.length; i++) {
+                const hs = hss[i];
+                if (t + 1e-4 < hs.start_time || t > hs.end_time + 1e-4) continue;
+                if (hs.chord_id !== cid && Number(hs.chord_id) !== Number(cid)) continue;
+                const explicit = hs.arp === true || hs.arp === 1 || hs.arpeggio === true;
+                return { explicit, covered: true, hs };
+            }
+            return { explicit: false, covered: false, hs: null };
+        }
+
+        /** Build ``ch.notes`` from ``chordTemplates[cid].frets`` (-1 omitted). */
+        function chordNotesFromTemplate(cid, templates) {
+            if (templates == null || cid == null) return [];
+            const tmpl = templates[cid] ?? templates[Number(cid)];
+            if (!tmpl || !Array.isArray(tmpl.frets)) return [];
+            const out = [];
+            for (let si = 0; si < tmpl.frets.length; si++) {
+                const f = tmpl.frets[si];
+                if (f >= 0 && validString(si)) out.push({ s: si, f, sus: 0 });
+            }
+            return out;
+        }
+
+        /**
+         * Rocksmith fingerpicking passages often have ``<handShape>`` + per-string
+         * ``<note>`` rows but **no** ``<chord>`` events. The 3D chord frame / arp
+         * styling only runs over ``bundle.chords``, so synthesize minimal chord
+         * rows at each hand-shape onset when the chart omits them.
+         */
+        function mergeHandShapeSynthChords(realChords, handShapes, chordTemplates) {
+            if (!handShapes || handShapes.length === 0) return realChords;
+            const reals = realChords && realChords.length ? realChords : [];
+            const synth = [];
+            const seenSynth = new Set();
+            const tol = 0.028;
+            outer: for (let i = 0; i < handShapes.length; i++) {
+                const hs = handShapes[i];
+                const cid = hs.chord_id != null ? hs.chord_id : hs.chordId;
+                const st = hs.start_time != null ? hs.start_time : hs.startTime;
+                if (cid == null || st == null || Number.isNaN(Number(st))) continue;
+                const key = `${cid}|${Number(st).toFixed(3)}`;
+                if (seenSynth.has(key)) continue;
+                seenSynth.add(key);
+                for (let j = 0; j < reals.length; j++) {
+                    const ch = reals[j];
+                    const rid = ch.id;
+                    if (rid !== cid && Number(rid) !== Number(cid)) continue;
+                    if (Math.abs(ch.t - st) <= tol) continue outer;
+                }
+                const notes = chordNotesFromTemplate(cid, chordTemplates);
+                if (notes.length === 0) continue;
+                const explicitArp = hs.arp === true || hs.arp === 1 || hs.arpeggio === true;
+                synth.push({
+                    t: st,
+                    id: cid,
+                    hd: explicitArp,
+                    notes,
+                });
+            }
+            if (synth.length === 0) return reals;
+            const merged = reals.concat(synth);
+            merged.sort((a, b) => {
+                const dt = a.t - b.t;
+                if (Math.abs(dt) > 1e-6) return dt;
+                const ia = Number(a.id);
+                const ib = Number(b.id);
+                return (ia - ib) || 0;
+            });
+            return merged;
+        }
+
+        /** Merge Rocksmith ``chordTemplates[id].frets`` with live ``chordNote`` rows. */
+        function mergeChordShape(ch, chordNotes, templates) {
+            const shape = new Map();
+            const tid = ch && ch.id != null ? ch.id : null;
+            const tmpl = (tid != null && templates)
+                ? (templates[tid] ?? templates[Number(tid)])
+                : null;
+            if (tmpl && Array.isArray(tmpl.frets)) {
+                for (let si = 0; si < tmpl.frets.length; si++) {
+                    if (!validString(si)) continue;
+                    const f = tmpl.frets[si];
+                    if (f >= 0) shape.set(si, f);
+                }
+            }
+            for (let i = 0; i < chordNotes.length; i++) {
+                const cn = chordNotes[i];
+                if (!validString(cn.s)) continue;
+                if (cn.f < 0) shape.delete(cn.s);
+                else shape.set(cn.s, cn.f);
+            }
+            return shape;
+        }
+
+        /**
+         * When ``hd`` is missing/false, detect arpeggio from the **note** stream
+         * using the **full voicing** (template ∪ chord notes). RS often stores the
+         * plucks only in ``notes[]``, not as duplicate chord rows.
+         *
+         * @param {{ tLo: number, tHi: number } | null} [timeWin]
+         *        When set (e.g. from ``<handShape>`` span), scan staggered picks
+         *        across the whole held-shape window — RS often omits ``arp`` and ``hd``.
+         */
+        function inferArpeggioFromNotePattern(ch, shape, notesArr, timeWin) {
+            if (!notesArr || notesArr.length === 0 || shape.size < 2) return false;
+            const tHi = timeWin ? timeWin.tHi : ch.t + 2.35;
+            const tLo = timeWin ? timeWin.tLo : ch.t - 0.28;
+            let i2 = lowerBoundT(notesArr, tLo - 0.02);
+            const hitTimes = [];
+            for (; i2 < notesArr.length; i2++) {
+                const n = notesArr[i2];
+                if (n.t > tHi) break;
+                if (n.t < tLo) continue;
+                if (!validString(n.s)) continue;
+                const ef = shape.get(n.s);
+                if (ef === undefined || ef !== n.f) continue;
+                hitTimes.push(n.t);
+            }
+            if (hitTimes.length < 2) return false;
+            hitTimes.sort((a, b) => a - b);
+            const spread = hitTimes[hitTimes.length - 1] - hitTimes[0];
+            if (spread >= 0.03) return true;
+            return hitTimes.length >= 4 && spread >= 0.016;
+        }
+
+        /**
+         * Notes in an inferred arpeggio passage are charted in ``notes[]`` with
+         * staggered times; treat them like chord-cluster notes for Rocksmith-style
+         * board-ghost fret digits (``fromChord`` + template column).
+         */
+        function arpeggioChordIdForNote(n, handShapes, chordTemplates, notesArr) {
+            if (!handShapes || handShapes.length === 0 || !notesArr || notesArr.length === 0) return null;
+            if (!validString(n.s)) return null;
+            for (let i = 0; i < handShapes.length; i++) {
+                const hs = handShapes[i];
+                if (n.t + 1e-4 < hs.start_time || n.t > hs.end_time + 1e-4) continue;
+                const cid = hs.chord_id;
+                if (cid == null) continue;
+                const tmpl = chordTemplates?.[cid] ?? chordTemplates?.[Number(cid)];
+                if (!tmpl || !Array.isArray(tmpl.frets)) continue;
+                const tf = tmpl.frets[n.s];
+                if (typeof tf !== 'number' || tf < 0 || n.f !== tf) continue;
+                const synthNotes = chordNotesFromTemplate(cid, chordTemplates);
+                if (synthNotes.length === 0) continue;
+                const fakeCh = { t: hs.start_time, id: cid, notes: synthNotes };
+                const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
+                const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
+                if (inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw)) return cid;
+            }
+            return null;
+        }
+
+        /**
+         * True when **chart time** ``chartT`` falls inside an arpeggio hand-shape.
+         * Uses a short end tail only — no ``CHORD_HWY_LINGER_S`` — so purple lane
+         * rails match visible highway slices and do not leak after shapes end.
+         */
+        function arpeggioLaneOuterRailAtChartTime(chartT, handShapes, chordTemplates, notesArr) {
+            if (!handShapes || handShapes.length === 0) return false;
+            for (let i = 0; i < handShapes.length; i++) {
+                const hs = handShapes[i];
+                if (chartT + 1e-4 < hs.start_time - 0.1 || chartT > hs.end_time + ARP_HWY_RAIL_END_TAIL_S) continue;
+                if (hs.arp === true || hs.arp === 1 || hs.arpeggio === true) return true;
+                const cid = hs.chord_id;
+                if (cid == null || !chordTemplates) continue;
+                const synthNotes = chordNotesFromTemplate(cid, chordTemplates);
+                if (synthNotes.length === 0) continue;
+                const fakeCh = { t: hs.start_time, id: cid, notes: synthNotes };
+                const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
+                if (shape.size < 2) continue;
+                const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
+                if (inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw)) return true;
+            }
+            return false;
+        }
+
+        /**
+         * Same ``chordAccent ? ft *= 1.22`` as the 3D arpeggio chord rim so lane
+         * rails match an accented frame when the active hand shape links to a
+         * chord row that carries ``.ac`` notes.
+         */
+        function arpeggioLaneDividerFrameAccentMul(nowT, handShapes, chordTemplates, notesArr, chords) {
+            if (!handShapes || handShapes.length === 0 || !chords || chords.length === 0) return 1;
+            for (let i = 0; i < handShapes.length; i++) {
+                const hs = handShapes[i];
+                if (nowT + 1e-4 < hs.start_time - 0.1 || nowT > hs.end_time + ARP_HWY_RAIL_END_TAIL_S) continue;
+
+                const explicitArp = hs.arp === true || hs.arp === 1 || hs.arpeggio === true;
+                let inArp = explicitArp;
+                if (!inArp) {
+                    const cid0 = hs.chord_id;
+                    if (cid0 == null || !chordTemplates) continue;
+                    const synthNotes = chordNotesFromTemplate(cid0, chordTemplates);
+                    if (synthNotes.length === 0) continue;
+                    const fakeCh = { t: hs.start_time, id: cid0, notes: synthNotes };
+                    const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
+                    if (shape.size < 2) continue;
+                    const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
+                    if (!inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw)) continue;
+                    inArp = true;
+                }
+                if (!inArp) continue;
+
+                const cid = hs.chord_id;
+                if (cid == null) return 1;
+                for (let j = 0; j < chords.length; j++) {
+                    const ch = chords[j];
+                    if (ch.id !== cid && Number(ch.id) !== Number(cid)) continue;
+                    if (Math.abs(ch.t - hs.start_time) > 0.12) continue;
+                    const chordNotes = ch.notes ? filterValidNotes(ch.notes) : [];
+                    if (chordNotes.some(cn => cn.ac)) return 1.22;
+                    return 1;
+                }
+                return 1;
+            }
+            return 1;
+        }
+
+        /** World-scale XY for purple lane rails = arpeggio ``ftSide`` / ``gLaneDivider`` edge (0.15×K). */
+        function arpeggioLaneDividerXYScaleMatchFrameRim(accentMul = 1) {
+            const yA = sY(0), yB = sY(nStr - 1);
+            const yMinF = Math.min(yA, yB) - S_GAP * 0.8;
+            const yMaxF = Math.max(yA, yB) + S_GAP * 0.8;
+            const fullChordBoxH = yMaxF - yMinF;
+            let ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
+            if (accentMul !== 1 && accentMul > 0) ft *= accentMul;
+            const ftSide = ft * 1.55;
+            return ftSide / (0.15 * K);
+        }
+
+        /**
+         * Charter Preview3DFingeringDrawer addArpeggioBrackets: corner
+         * ticks on fretted strings and paired edge hooks for open strings.
+         * Uses the merged **shape** (full template), not just chordNote rows.
+         */
+        function placeArpeggioBracketsForShape(shape, zBoard, cxBox, fullWidth, fadeMul) {
+            if (!pArpBracket || !shape || shape.size === 0) return;
+            if (T && !_paletteColorTmp) _paletteColorTmp = new T.Color();
+            if (!_paletteColorTmp) return;
+            const L = NW * 0.42;
+            const t = Math.max(0.09 * K, NW * 0.11);
+            const z = zBoard - 0.0035 * K;
+            const boxL = cxBox - fullWidth * 0.5;
+            const boxR = cxBox + fullWidth * 0.5;
+            const plen = Math.max(1, activePalette.length);
+            for (const [st, fv] of shape) {
+                if (!validString(st)) continue;
+                const yS = sY(st);
+                const pc = activePalette[st % plen];
+                _paletteColorTmp.setHex(typeof pc === 'number' ? pc : new T.Color(pc).getHex());
+                const op0 = fadeMul;
+                if (fv > 0) {
+                    const xm = xFretMid(fv);
+                    const h = pArpBracket.get();
+                    h.renderOrder = 15;
+                    h.rotation.set(0, 0, 0);
+                    h.position.set(xm + L * 0.5, yS, z);
+                    h.scale.set(L, t, t);
+                    h.material.color.copy(_paletteColorTmp);
+                    h.material.opacity = 0.93 * op0;
+                    const v = pArpBracket.get();
+                    v.renderOrder = 15;
+                    v.position.set(xm, yS - L * 0.5, z);
+                    v.scale.set(t, L, t);
+                    v.material.color.copy(_paletteColorTmp);
+                    v.material.opacity = 0.93 * op0;
+                } else if (fv === 0) {
+                    const inset = t * 0.55;
+                    const xl = boxL + inset;
+                    const hL = pArpBracket.get();
+                    hL.renderOrder = 15;
+                    hL.position.set(xl - L * 0.5, yS, z);
+                    hL.scale.set(L, t, t);
+                    hL.material.color.copy(_paletteColorTmp);
+                    hL.material.opacity = 0.88 * op0;
+                    const vL = pArpBracket.get();
+                    vL.renderOrder = 15;
+                    vL.position.set(xl, yS - L * 0.5, z);
+                    vL.scale.set(t, L, t);
+                    vL.material.color.copy(_paletteColorTmp);
+                    vL.material.opacity = 0.88 * op0;
+                    const xr = boxR - inset;
+                    const hR = pArpBracket.get();
+                    hR.renderOrder = 15;
+                    hR.position.set(xr + L * 0.5, yS, z);
+                    hR.scale.set(L, t, t);
+                    hR.material.color.copy(_paletteColorTmp);
+                    hR.material.opacity = 0.88 * op0;
+                    const vR = pArpBracket.get();
+                    vR.renderOrder = 15;
+                    vR.position.set(xr, yS - L * 0.5, z);
+                    vR.scale.set(t, L, t);
+                    vR.material.color.copy(_paletteColorTmp);
+                    vR.material.opacity = 0.88 * op0;
+                }
+            }
+        }
+
         /* ── Per-frame rendering ─────────────────────────────────────────── */
         function update(bundle) {
             // Materialize the text-size multiplier from the user's slider.
@@ -4394,9 +4734,12 @@
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
             if (pGhostFretLbl) pGhostFretLbl.reset();
-            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
+            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset();
+            if (pArpBracket) pArpBracket.reset();
+            pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
             pFretColMarker.reset();
             _ndLabels = [];
+            let hwyLaneArpOuterDividers = false;
 
             // Prune expired notedetect marks once per frame instead of
             // once per drawNote call (issue #9 perf nit). drawNote then
@@ -4417,7 +4760,11 @@
             const t1 = now + AHEAD;
 
             const notes = bundle.notes;
-            const chords = bundle.chords;
+            const chords = mergeHandShapeSynthChords(
+                bundle.chords,
+                bundle.handShapes,
+                bundle.chordTemplates,
+            );
             const beats = bundle.beats;
             const sections = bundle.sections;
             const anchors = bundle.anchors;
@@ -4818,7 +5165,20 @@
                         if (ab) singleOpenX = (xFret(ab.dMin) + xFret(ab.dMax)) / 2;
                     }
                     const singleOpenLaneW = n.f === 0 ? openNoteLaneBoxW(n.t) : undefined;
-                    drawNote(n, now, singleOpenX, isNext, skipLabel, false, GHOST_HOLD_AFTER_ONSET, singleOpenLaneW, false, undefined);
+                    const arGhostCid = arpeggioChordIdForNote(n, bundle.handShapes, bundle.chordTemplates, notes);
+                    drawNote(
+                        n,
+                        now,
+                        singleOpenX,
+                        isNext,
+                        skipLabel,
+                        false,
+                        GHOST_HOLD_AFTER_ONSET,
+                        singleOpenLaneW,
+                        arGhostCid != null,
+                        arGhostCid,
+                        arGhostCid != null,
+                    );
                     lastFretForString[n.s] = n.f;
                     // Onset in window OR started before the window but
                     // still sustaining right now. Gate sustain carry-over
@@ -4901,6 +5261,7 @@
                     // visible sustain.
                     const chordNotes = filterValidNotes(ch.notes);
                     if (chordNotes.length === 0) continue;
+                    const chShape = mergeChordShape(ch, chordNotes, bundle.chordTemplates);
 
                     if (ch.t > now) {
                         const dt = ch.t - now;
@@ -4941,21 +5302,26 @@
                     // Horizontals for chord frame + max width for open-string meshes
                     // (same outer width as pChordBox, including padX).
                     let chordFrameXL = null, chordFrameXR = null, chordOpenBoxW = null;
-                    if (chordNotes.length > 1) {
+                    if (chShape.size > 1) {
                         if (chAncB) {
                             chordFrameXL = xFret(chAncB.dMin);
                             chordFrameXR = xFret(chAncB.dMax);
                         } else {
-                            let fMinCh = 99, fMaxCh = 0;
-                            for (const cn of chordNotes) {
-                                if (cn.f > 0) {
-                                    fMinCh = Math.min(fMinCh, cn.f);
-                                    fMaxCh = Math.max(fMaxCh, cn.f);
+                            let fMinCh = 99, fMaxCh = 0, anyFretted = false;
+                            for (const [, f] of chShape) {
+                                if (f > 0) {
+                                    anyFretted = true;
+                                    fMinCh = Math.min(fMinCh, f);
+                                    fMaxCh = Math.max(fMaxCh, f);
                                 }
                             }
-                            if (fMinCh < 99) {
+                            if (anyFretted) {
                                 chordFrameXL = xFret(fMinCh - 1);
                                 chordFrameXR = xFret(Math.max(fMaxCh, fMinCh + 2));
+                            } else {
+                                const wNut = openNoteLaneBoxW(ch.t);
+                                chordFrameXL = chordCX - wNut * 0.5;
+                                chordFrameXR = chordCX + wNut * 0.5;
                             }
                         }
                         if (chordFrameXL != null && chordFrameXR != null) {
@@ -4971,6 +5337,18 @@
                         ? chordOpenBoxW
                         : openNoteLaneBoxW(ch.t);
 
+                    const hsHintFrame = chordHandShapeArpeggioHint(ch, bundle.handShapes);
+                    const hsTimeWinFrame = hsHintFrame.hs
+                        ? { tLo: hsHintFrame.hs.start_time - 0.06, tHi: hsHintFrame.hs.end_time + 0.06 }
+                        : null;
+                    const inferredArpPattern = inferArpeggioFromNotePattern(
+                        ch, chShape, notes, hsTimeWinFrame);
+                    const deferChordGems = inferredArpPattern
+                        || (hsHintFrame.explicit && hsHintFrame.covered);
+                    const chordSusTrailMatchArpFrame = chordWireHighDensity(ch)
+                        || hsHintFrame.explicit
+                        || (hsHintFrame.covered && inferredArpPattern);
+
                     // Onset in window OR chord started before the window
                     // but is still sustaining right now. Gate sustain
                     // carry-over against the current frame time so camera
@@ -4984,39 +5362,42 @@
                     // ch.t (not per-note onset) since chord notes
                     // share a strum time.
                     const chW          = chWindowed ? Math.exp(-Math.abs(ch.t - now) / camTau) : 0;
-                    for (const cn of chordNotes) {
-                        const isNext = nextNoteByString[cn.s] &&
-                            Math.abs(nextNoteByString[cn.s].t - ch.t) < NEXT_ON_STRING_T_EPS;
-                        const skipLabel = !firstInShapeRun || lastFretForString[cn.s] === cn.f;
-                        drawNote(
-                            { ...cn, t: ch.t, sus: cn.sus || 0 },
-                            now,
-                            cn.f === 0 ? chordCX : undefined,
-                            isNext,
-                            skipLabel,
-                            isRepeat,
-                            CHORD_HWY_LINGER_S,
-                            cn.f === 0 ? laneWForOpenStrings : undefined,
-                            true,
-                            ch.id,
-                        );
-                        lastFretForString[cn.s] = cn.f;
-                        // gate by THIS note's own sustain against the
-                        // current render time — drawNote has already
-                        // dropped short-sustain notes whose ringing has
-                        // ended, so they should not keep pulling the
-                        // camera frame wider than the notes actually
-                        // still on screen (chord-wide maxSus would
-                        // over-pullback for mixed-sustain chords).
-                        if (!(cameraMode === 'lookahead')) {
-                        const cnSustainOk = chOnsetInWin || (chSusActive && ch.t + (cn.sus || 0) >= now);
-                        if (cn.f > 0 && cnSustainOk) {
-                            camWX += xFretMid(cn.f) * chW;
-                            camWSum += chW;
-                            if (cn.f < camDistMin) camDistMin = cn.f;
-                            if (cn.f > camDistMax) camDistMax = cn.f;
-                            camDistGot = true;
-                        }
+                    if (!deferChordGems) {
+                        for (const cn of chordNotes) {
+                            const isNext = nextNoteByString[cn.s] &&
+                                Math.abs(nextNoteByString[cn.s].t - ch.t) < NEXT_ON_STRING_T_EPS;
+                            const skipLabel = !firstInShapeRun || lastFretForString[cn.s] === cn.f;
+                            drawNote(
+                                { ...cn, t: ch.t, sus: cn.sus || 0 },
+                                now,
+                                cn.f === 0 ? chordCX : undefined,
+                                isNext,
+                                skipLabel,
+                                isRepeat,
+                                CHORD_HWY_LINGER_S,
+                                cn.f === 0 ? laneWForOpenStrings : undefined,
+                                true,
+                                ch.id,
+                                chordSusTrailMatchArpFrame,
+                            );
+                            lastFretForString[cn.s] = cn.f;
+                            // gate by THIS note's own sustain against the
+                            // current render time — drawNote has already
+                            // dropped short-sustain notes whose ringing has
+                            // ended, so they should not keep pulling the
+                            // camera frame wider than the notes actually
+                            // still on screen (chord-wide maxSus would
+                            // over-pullback for mixed-sustain chords).
+                            if (!(cameraMode === 'lookahead')) {
+                            const cnSustainOk = chOnsetInWin || (chSusActive && ch.t + (cn.sus || 0) >= now);
+                            if (cn.f > 0 && cnSustainOk) {
+                                camWX += xFretMid(cn.f) * chW;
+                                camWSum += chW;
+                                if (cn.f < camDistMin) camDistMin = cn.f;
+                                if (cn.f > camDistMax) camDistMax = cn.f;
+                                camDistGot = true;
+                            }
+                            }
                         }
                     }
 
@@ -5033,7 +5414,7 @@
                         break;
                     }
                     const chordTailMul = hwyPostHitTailFadeMul(chDt, CHORD_HWY_LINGER_S, chordNextSoon, CHORD_HWY_FADE_S);
-                    if (chordNotes.length > 1 && chDt > -CHORD_HWY_LINGER_S && chDt < AHEAD && chordOpenBoxW != null) {
+                    if (chShape.size > 1 && chDt > -CHORD_HWY_LINGER_S && chDt < AHEAD && chordOpenBoxW != null) {
                         const z = Math.min(0, dZ(chDt));
                         const width = chordOpenBoxW;
                         const xLeft = chordFrameXL;
@@ -5055,6 +5436,11 @@
                         // not bar thickness vs first chord — see CHORD_FRAME_RIM_* tuning.
                         let ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
                         if (chordAccent) ft *= 1.22;
+                        const isArpeggio = chordWireHighDensity(ch)
+                            || hsHintFrame.explicit
+                            || (hsHintFrame.covered && inferredArpPattern);
+                        const ftSide = isArpeggio ? ft * 1.55 : ft;
+                        const rimHex = isArpeggio ? CHARTER_PREVIEW_3D_ARPEGGIO_HEX : CHARTER_CHORD_BOX_HEX;
 
                         const repDim = isRepeat ? 0.78 : 1;
                         const edgeOp = fade * repDim * CHARTER_CHORD_BOX_FRAME_ALPHA * (isRepeat ? 0.85 : 1) * chordTailMul;
@@ -5062,12 +5448,13 @@
                         const drawFrameBox = (px, py, sx, sy, ord) => {
                             const b = pChordBox.get();
                             b.renderOrder = ord;
+                            b.material.color.setHex(rimHex);
                             b.position.set(px, py, z);
                             b.scale.set(sx, sy, thickZ);
                             b.material.opacity = edgeOp;
                         };
 
-                        const innerW = Math.max(width - 2 * ft, width * 0.45);
+                        const innerW = Math.max(width - 2 * ftSide, width * 0.45);
                         const innerH = Math.max(height - 2 * ft, height * 0.3);
                         const fill = pChordFrameFill.get();
                         fill.renderOrder = 10;
@@ -5075,6 +5462,8 @@
                         fill.position.set(cx, cY, z - 0.004 * K);
                         fill.scale.set(innerW, innerH, 1);
                         fill.material.opacity = fade * repDim * chordTailMul;
+                        fill.material.color.setRGB(1, 1, 1);
+                        if (isArpeggio) fill.material.color.setHex(0xf0e8ff);
 
                         drawFrameBox(cx, yBot + ft * 0.5, width, ft, 12);
                         const withTopFrame = !isRepeat;
@@ -5086,11 +5475,11 @@
                         const ySideHi = withTopFrame ? yTop - ft : yTop - ft * 0.15;
                         const sideH = Math.max(ySideHi - ySideLo, ft * 1.25);
                         const sideCy = ySideLo + sideH * 0.5;
-                        drawFrameBox(cx - width * 0.5 + ft * 0.5, sideCy, ft, sideH, 13);
-                        drawFrameBox(cx + width * 0.5 - ft * 0.5, sideCy, ft, sideH, 13);
+                        drawFrameBox(cx - width * 0.5 + ftSide * 0.5, sideCy, ftSide, sideH, 13);
+                        drawFrameBox(cx + width * 0.5 - ftSide * 0.5, sideCy, ftSide, sideH, 13);
 
                         const chordName = bundle.chordTemplates?.[ch.id]?.name;
-                        if (chordName && firstInShapeRun) {
+                        if (chordName && firstInShapeRun && !chordWireHighDensity(ch)) {
                             const lblW = 28 * K, lblH = 9 * K;
                             const lbl = pChordLbl.get();
                             const mat = txtMat(chordName, '#e8d080', true, 'chord');
@@ -5125,9 +5514,11 @@
                         // correctly produce no indicator.
                         {
                             let bFret = Infinity;
-                            for (const cn of chordNotes) if (cn.f > 0) bFret = Math.min(bFret, cn.f);
+                            for (const [, f] of chShape) {
+                                if (f > 0) bFret = Math.min(bFret, f);
+                            }
                             const atMinFretStrings = bFret < Infinity
-                                ? chordNotes.filter(cn => cn.f === bFret).map(cn => cn.s).sort((a, b) => a - b)
+                                ? [...chShape].filter(([, f]) => f === bFret).map(([s]) => s).sort((a, b) => a - b)
                                 : [];
                             const barreRun3d = longestConsecutiveRun(atMinFretStrings);
                             let is3dBarre    = barreRun3d.length >= 2;   // PATH A
@@ -5140,7 +5531,10 @@
                                 const minS = atMinFretStrings[0];
                                 const maxS = atMinFretStrings[atMinFretStrings.length - 1];
                                 if (maxS - minS >= MIN_BARRE_SPAN_3D) {
-                                    const frettedSet = new Set(chordNotes.filter(cn => cn.f > 0).map(cn => cn.s));
+                                    const frettedSet = new Set();
+                                    for (const [s, f] of chShape) {
+                                        if (f > 0) frettedSet.add(s);
+                                    }
                                     let allFretted = true;
                                     for (let si = minS; si <= maxS; si++) {
                                         if (!frettedSet.has(si)) { allFretted = false; break; }
@@ -5173,6 +5567,11 @@
                                 bl.material.opacity = 0.8 * chordTailMul;
                             }
                         }
+
+                        if (isArpeggio) {
+                            placeArpeggioBracketsForShape(
+                                chShape, z, cx, width, fade * repDim * chordTailMul);
+                        }
                     }
                 }
             }
@@ -5182,6 +5581,21 @@
             // band as the blue track — previously markers used every inlay
             // fret and stuck out past the lane whenever the camera narrowed.
             let hwyLaneFretClipMin = null, hwyLaneFretClipMax = null;
+
+            hwyLaneArpOuterDividers = arpeggioLaneOuterRailAtChartTime(
+                now,
+                bundle.handShapes,
+                bundle.chordTemplates,
+                notes,
+            );
+            const arpLaneRimAccentMul = hwyLaneArpOuterDividers
+                ? arpeggioLaneDividerFrameAccentMul(
+                    now, bundle.handShapes, bundle.chordTemplates, notes, chords,
+                )
+                : 1;
+            const arpLaneS = hwyLaneArpOuterDividers
+                ? arpeggioLaneDividerXYScaleMatchFrameRim(arpLaneRimAccentMul)
+                : 1;
 
             // ── Dynamic highway lane ──────────────────────────────────────
             // Chart <anchor> tags drive the lane whenever they exist — do not
@@ -5214,15 +5628,35 @@
                         if (!b) continue;
                         const z0 = dZ(dt0) + TS * BEHIND;
                         const z1 = dZ(dt1) + TS * BEHIND;
+                        const arpSlice = arpeggioLaneOuterRailAtChartTime(
+                            tC, bundle.handShapes, bundle.chordTemplates, notes,
+                        );
                         if (_laneSegLen > 0
                             && _laneSegDMin[_laneSegLen - 1] === b.dMin
-                            && _laneSegDMax[_laneSegLen - 1] === b.dMax) {
+                            && _laneSegDMax[_laneSegLen - 1] === b.dMax
+                            && arpSlice === _laneSegArp[_laneSegLen - 1]) {
                             _laneSegZ1[_laneSegLen - 1] = z1;
+                            _laneSegTHi[_laneSegLen - 1] = tC;
+                        } else if (_laneSegLen > 0
+                            && _laneSegDMin[_laneSegLen - 1] === b.dMin
+                            && _laneSegDMax[_laneSegLen - 1] === b.dMax
+                            && arpSlice !== _laneSegArp[_laneSegLen - 1]) {
+                            _laneSegDMin[_laneSegLen] = b.dMin;
+                            _laneSegDMax[_laneSegLen] = b.dMax;
+                            _laneSegZ0[_laneSegLen] = z0;
+                            _laneSegZ1[_laneSegLen] = z1;
+                            _laneSegTLo[_laneSegLen] = tC;
+                            _laneSegTHi[_laneSegLen] = tC;
+                            _laneSegArp[_laneSegLen] = arpSlice;
+                            _laneSegLen++;
                         } else {
                             _laneSegDMin[_laneSegLen] = b.dMin;
                             _laneSegDMax[_laneSegLen] = b.dMax;
                             _laneSegZ0[_laneSegLen] = z0;
                             _laneSegZ1[_laneSegLen] = z1;
+                            _laneSegTLo[_laneSegLen] = tC;
+                            _laneSegTHi[_laneSegLen] = tC;
+                            _laneSegArp[_laneSegLen] = arpSlice;
                             _laneSegLen++;
                         }
                     }
@@ -5256,6 +5690,12 @@
                     {
                         const yPos = boardY + 0.03 * K;
                         const divOp = 0.02 + highwayIntensity * 0.1;
+                        const divOpArp = Math.min(0.92, 0.16 + highwayIntensity * 0.42);
+                        if (mLaneDivider && mLaneDividerArp) {
+                            mLaneDivider.opacity = divOp;
+                            mLaneDividerArp.opacity = divOpArp;
+                        }
+
                         for (let s = 0; s < _laneSegLen; s++) {
                             const segZ0 = _laneSegZ0[s];
                             const segZ1 = _laneSegZ1[s];
@@ -5263,11 +5703,37 @@
                             const zMid = (segZ0 + segZ1) * 0.5;
                             const dMinSeg = _laneSegDMin[s];
                             const dMaxSeg = _laneSegDMax[s];
-                            for (let f = Math.floor(dMinSeg); f <= Math.ceil(dMaxSeg); f++) {
+                            const fDiv0 = Math.floor(dMinSeg);
+                            const fDiv1 = Math.ceil(dMaxSeg);
+                            for (let f = fDiv0; f <= fDiv1; f++) {
+                                if (_laneSegArp[s] && (f === fDiv0 || f === fDiv1)) continue;
                                 const div = pLaneDivider.get();
                                 div.position.set(xFret(f), yPos, zMid);
+                                div.material = mLaneDivider;
                                 div.scale.set(1, 1, dz);
-                                div.material.opacity = divOp;
+                                div.renderOrder = 2;
+                            }
+                        }
+                        for (let s = 0; s < _laneSegLen; s++) {
+                            if (!_laneSegArp[s]) continue;
+                            const dMinSeg = _laneSegDMin[s];
+                            const dMaxSeg = _laneSegDMax[s];
+                            const fL = Math.floor(dMinSeg);
+                            const fR = Math.ceil(dMaxSeg);
+                            const segZ0 = _laneSegZ0[s];
+                            const segZ1 = _laneSegZ1[s];
+                            const arpRailLen = Math.max(Math.abs(segZ1 - segZ0), 1e-6);
+                            const zArpMid = (segZ0 + segZ1) * 0.5;
+                            const tMidSeg = (_laneSegTLo[s] + _laneSegTHi[s]) * 0.5;
+                            const arpMulSeg = arpeggioLaneDividerFrameAccentMul(
+                                tMidSeg, bundle.handShapes, bundle.chordTemplates, notes, chords,
+                            );
+                            const arpSSeg = arpeggioLaneDividerXYScaleMatchFrameRim(arpMulSeg);
+                            for (const xf of [fL, fR]) {
+                                const div = pLaneDivider.get();
+                                div.position.set(xFret(xf), yPos, zArpMid);
+                                div.material = mLaneDividerArp;
+                                div.scale.set(arpSSeg, arpSSeg, arpRailLen);
                                 div.renderOrder = 2;
                             }
                         }
@@ -5327,12 +5793,30 @@
                     if (highwayIntensity > 0.05) {
                         const divLen = TS * (AHEAD + BEHIND) * 0.6;
                         const yPos = boardY + 0.03 * K;
-                        for (let f = Math.floor(divMin); f <= Math.ceil(divMax); f++) {
+                        const divOp2 = 0.02 + highwayIntensity * 0.1;
+                        const divOpArp2 = Math.min(0.92, 0.16 + highwayIntensity * 0.42);
+                        if (mLaneDivider && mLaneDividerArp) {
+                            mLaneDivider.opacity = divOp2;
+                            mLaneDividerArp.opacity = divOpArp2;
+                        }
+                        const fDivA = Math.floor(divMin);
+                        const fDivB = Math.ceil(divMax);
+                        for (let f = fDivA; f <= fDivB; f++) {
+                            if (hwyLaneArpOuterDividers && (f === fDivA || f === fDivB)) continue;
                             const div = pLaneDivider.get();
                             div.position.set(xFret(f), yPos, dZ(0) - divLen * 0.5 + TS * BEHIND);
+                            div.material = mLaneDivider;
                             div.scale.set(1, 1, divLen);
-                            div.material.opacity = 0.02 + highwayIntensity * 0.1;
                             div.renderOrder = 2;
+                        }
+                        if (hwyLaneArpOuterDividers) {
+                            for (const xf of [fDivA, fDivB]) {
+                                const div = pLaneDivider.get();
+                                div.position.set(xFret(xf), yPos, zLane);
+                                div.material = mLaneDividerArp;
+                                div.scale.set(arpLaneS, arpLaneS, laneLen);
+                                div.renderOrder = 2;
+                            }
                         }
                     }
                 }
@@ -5777,7 +6261,7 @@
         }
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
-        function drawNote(n, now, openX, _isNextLegacy, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false, chordId) {
+        function drawNote(n, now, openX, _isNextLegacy, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false, chordId, susTrailMatchArpFrame = false) {
             const s = n.s;
             // Belt + suspenders: callers already gate via validString(),
             // but drawNote is also entered through { ...cn } chord-note
@@ -5937,8 +6421,22 @@
                     const remSus = susEnd - susStart;
                     if (remSus > 0.01) {
                         const sliceDur = Math.min(remSus, AHEAD);
-                        const tw = NW * 0.85 * (n.f === 0 ? openWScale : 1);
-                        const th = NH * 0.12 * (n.f === 0 ? openWScale : 1) * openSlabThickMul;
+                        let tw = NW * 0.85 * (n.f === 0 ? openWScale : 1);
+                        let th = NH * 0.12 * (n.f === 0 ? openWScale : 1) * openSlabThickMul;
+                        if (susTrailMatchArpFrame) {
+                            const yA = sY(0), yB = sY(nStr - 1);
+                            const yMinF = Math.min(yA, yB) - S_GAP * 0.8;
+                            const yMaxF = Math.max(yA, yB) + S_GAP * 0.8;
+                            const fullChordBoxH = yMaxF - yMinF;
+                            const ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
+                            const ftSide = ft * 1.55;
+                            if (n.f > 0) {
+                                th = ftSide;
+                            } else {
+                                th = Math.max(th, ftSide * openSlabThickMul);
+                            }
+                            tw = Math.max(tw, ftSide * 1.05);
+                        }
                         // Open strings get two parallel trails offset along
                         // X — visually echoes the wide flat open-note body.
                         // Fretted notes keep the single-trail path. Offsets
@@ -6396,8 +6894,8 @@
             _renderScale = 1;
             mBeatM = mBeatQ = null;
             pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
-            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = pAccentHalo = null;
-            mLaneOdd = mLaneEven = gLanePlane = gGhostFretPlane = null;
+            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pArpBracket = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = pAccentHalo = null;
+            mLaneOdd = mLaneEven = mLaneDivider = mLaneDividerArp = gLanePlane = gGhostFretPlane = null;
             chordFrameGradTex = null;
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
