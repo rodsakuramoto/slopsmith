@@ -466,7 +466,10 @@
     const CHARTER_CHORD_BOX_FRAME_ALPHA = 128 / 255;
     /** Interior strip uses ARGB 32 on both stops in Charter (see drawChordBoxFilling). */
     const CHARTER_CHORD_BOX_FILL_TEX_ALPHA = 32 / 255;
-    /** Arpeggio tint (Charter) for outer lane dividers — thickness tracks chord rim ``ftSide``. */
+    /** Arpeggio interior wash — charter-style light lavender (fill uses dedicated tex, not × ciano). */
+    const CHARTER_ARPEGGIO_FILL_HEX = 0xf0e8ff;
+    const CHARTER_ARPEGGIO_FILL_DARK_HEX = 0xd8c8f0;
+    /** Arpeggio rim / highway lane tint (Charter preview magenta). */
     const CHARTER_PREVIEW_3D_ARPEGGIO_HEX = 0xc040ff;
 
     /** 3D chord-box rim bars (thin on all chords, including repeats in a sequence). */
@@ -1864,6 +1867,8 @@
         let pFretColMarker;
         /** Horizontal gradient (Charter chord box fill). */
         let chordFrameGradTex = null;
+        /** Lavender gradient for arpeggio box interior (normal map is ciano × lavanda → segue ciano). */
+        let chordFrameGradTexArp = null;
 
         // Dynamic glowing string meshes (BoxGeometry, one per string)
         let stringLines = [];
@@ -3347,6 +3352,22 @@
             chordFrameGradTex.colorSpace = T.SRGBColorSpace;
             chordFrameGradTex.needsUpdate = true;
 
+            const arR = CHARTER_ARPEGGIO_FILL_HEX >> 16 & 255;
+            const arG = CHARTER_ARPEGGIO_FILL_HEX >> 8 & 255;
+            const arB = CHARTER_ARPEGGIO_FILL_HEX & 255;
+            const arDR = CHARTER_ARPEGGIO_FILL_DARK_HEX >> 16 & 255;
+            const arDG = CHARTER_ARPEGGIO_FILL_DARK_HEX >> 8 & 255;
+            const arDB = CHARTER_ARPEGGIO_FILL_DARK_HEX & 255;
+            chordFrameGradTexArp = new T.DataTexture(
+                new Uint8Array([ arR, arG, arB, aFill, arDR, arDG, arDB, aFill, arR, arG, arB, aFill ]),
+                3, 1, T.RGBAFormat);
+            chordFrameGradTexArp.magFilter = T.LinearFilter;
+            chordFrameGradTexArp.minFilter = T.LinearFilter;
+            chordFrameGradTexArp.wrapS = T.ClampToEdgeWrapping;
+            chordFrameGradTexArp.wrapT = T.ClampToEdgeWrapping;
+            chordFrameGradTexArp.colorSpace = T.SRGBColorSpace;
+            chordFrameGradTexArp.needsUpdate = true;
+
             pChordFrameFill = pool(noteG, () => new T.Mesh(
                 new T.PlaneGeometry(1, 1),
                 new T.MeshBasicMaterial({
@@ -4708,71 +4729,11 @@
         }
 
         /**
-         * Charter Preview3DFingeringDrawer addArpeggioBrackets: corner
-         * ticks on fretted strings and paired edge hooks for open strings.
-         * Uses the merged **shape** (full template), not just chordNote rows.
+         * Arpeggio corner L-brackets (Charter Preview3DFingeringDrawer style) — disabled:
+         * they read as unwanted arrow-like marks on the frame.
          */
-        function placeArpeggioBracketsForShape(shape, zBoard, cxBox, fullWidth, fadeMul) {
-            if (!pArpBracket || !shape || shape.size === 0) return;
-            if (T && !_paletteColorTmp) _paletteColorTmp = new T.Color();
-            if (!_paletteColorTmp) return;
-            const L = NW * 0.42;
-            const t = Math.max(0.09 * K, NW * 0.11);
-            const z = zBoard - 0.0035 * K;
-            const boxL = cxBox - fullWidth * 0.5;
-            const boxR = cxBox + fullWidth * 0.5;
-            const plen = Math.max(1, activePalette.length);
-            for (const [st, fv] of shape) {
-                if (!validString(st)) continue;
-                const yS = sY(st);
-                const pc = activePalette[st % plen];
-                _paletteColorTmp.setHex(typeof pc === 'number' ? pc : new T.Color(pc).getHex());
-                const op0 = fadeMul;
-                if (fv > 0) {
-                    const xm = xFretMid(fv);
-                    const h = pArpBracket.get();
-                    h.renderOrder = 15;
-                    h.rotation.set(0, 0, 0);
-                    h.position.set(xm + L * 0.5, yS, z);
-                    h.scale.set(L, t, t);
-                    h.material.color.copy(_paletteColorTmp);
-                    h.material.opacity = 0.93 * op0;
-                    const v = pArpBracket.get();
-                    v.renderOrder = 15;
-                    v.position.set(xm, yS - L * 0.5, z);
-                    v.scale.set(t, L, t);
-                    v.material.color.copy(_paletteColorTmp);
-                    v.material.opacity = 0.93 * op0;
-                } else if (fv === 0) {
-                    const inset = t * 0.55;
-                    const xl = boxL + inset;
-                    const hL = pArpBracket.get();
-                    hL.renderOrder = 15;
-                    hL.position.set(xl - L * 0.5, yS, z);
-                    hL.scale.set(L, t, t);
-                    hL.material.color.copy(_paletteColorTmp);
-                    hL.material.opacity = 0.88 * op0;
-                    const vL = pArpBracket.get();
-                    vL.renderOrder = 15;
-                    vL.position.set(xl, yS - L * 0.5, z);
-                    vL.scale.set(t, L, t);
-                    vL.material.color.copy(_paletteColorTmp);
-                    vL.material.opacity = 0.88 * op0;
-                    const xr = boxR - inset;
-                    const hR = pArpBracket.get();
-                    hR.renderOrder = 15;
-                    hR.position.set(xr + L * 0.5, yS, z);
-                    hR.scale.set(L, t, t);
-                    hR.material.color.copy(_paletteColorTmp);
-                    hR.material.opacity = 0.88 * op0;
-                    const vR = pArpBracket.get();
-                    vR.renderOrder = 15;
-                    vR.position.set(xr, yS - L * 0.5, z);
-                    vR.scale.set(t, L, t);
-                    vR.material.color.copy(_paletteColorTmp);
-                    vR.material.opacity = 0.88 * op0;
-                }
-            }
+        function placeArpeggioBracketsForShape(_shape, _zBoard, _cxBox, _fullWidth, _fadeMul) {
+            return;
         }
 
         /* ── Per-frame rendering ─────────────────────────────────────────── */
@@ -5361,8 +5322,8 @@
                         if (fretted > 0) chordCX = (cxL + cxR) / 2;
                     }
 
-                    // Horizontals for chord frame + max width for open-string meshes
-                    // (same outer width as pChordBox, including padX).
+                    // Horizontals for chord frame + open-string mesh width. With anchors,
+                    // span matches HWY lane columns (wire dMin..dMax); no extra pad.
                     let chordFrameXL = null, chordFrameXR = null, chordOpenBoxW = null;
                     if (chShape.size > 1) {
                         if (chAncB) {
@@ -5389,8 +5350,14 @@
                         if (chordFrameXL != null && chordFrameXR != null) {
                             const span = Math.abs(chordFrameXR - chordFrameXL);
                             if (span > 1e-8) {
-                                const padX = NW * 0.4;
-                                chordOpenBoxW = span + padX * 2;
+                                // Anchor-driven lane stripes span [dMin..dMax] wire-to-wire with
+                                // no horizontal pad — match that so the 3D frame doesn’t spill past
+                                // the blue dynamic highway columns.
+                                if (chAncB) chordOpenBoxW = span;
+                                else {
+                                    const padX = NW * 0.4;
+                                    chordOpenBoxW = span + padX * 2;
+                                }
                             }
                         }
                     }
@@ -5498,11 +5465,11 @@
                         // not bar thickness vs first chord — see CHORD_FRAME_RIM_* tuning.
                         let ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
                         if (chordAccent) ft *= 1.22;
-                        const isArpeggio = chordWireHighDensity(ch)
-                            || hsHintFrame.explicit
-                            || (hsHintFrame.covered && inferredArpPattern);
-                        const ftSide = isArpeggio ? ft * 1.55 : ft;
-                        const rimHex = isArpeggio ? CHARTER_PREVIEW_3D_ARPEGGIO_HEX : CHARTER_CHORD_BOX_HEX;
+                        // Same gate as gems/sustain trail so the approaching box reads arpeggio
+                        // like the neck; interior uses lavender gradient (not ciano map × tint).
+                        const isArpeggioFrame = !isRepeat && chordSusTrailMatchArpFrame;
+                        const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
+                        const rimHex = isArpeggioFrame ? CHARTER_PREVIEW_3D_ARPEGGIO_HEX : CHARTER_CHORD_BOX_HEX;
 
                         const repDim = isRepeat ? 0.78 : 1;
                         const edgeOp = fade * repDim * CHARTER_CHORD_BOX_FRAME_ALPHA * (isRepeat ? 0.85 : 1) * chordTailMul;
@@ -5524,8 +5491,9 @@
                         fill.position.set(cx, cY, z - 0.004 * K);
                         fill.scale.set(innerW, innerH, 1);
                         fill.material.opacity = fade * repDim * chordTailMul;
+                        fill.material.map = isArpeggioFrame ? chordFrameGradTexArp : chordFrameGradTex;
                         fill.material.color.setRGB(1, 1, 1);
-                        if (isArpeggio) fill.material.color.setHex(0xf0e8ff);
+                        fill.material.needsUpdate = true;
 
                         drawFrameBox(cx, yBot + ft * 0.5, width, ft, 12);
                         const withTopFrame = !isRepeat;
@@ -5630,10 +5598,6 @@
                             }
                         }
 
-                        if (isArpeggio) {
-                            placeArpeggioBracketsForShape(
-                                chShape, z, cx, width, fade * repDim * chordTailMul);
-                        }
                     }
                 }
             }
@@ -6889,6 +6853,7 @@
                 // Shared chord-frame fill gradient — not owned by txtCache;
                 // MeshBasicMaterial.dispose() does not release maps.
                 chordFrameGradTex?.dispose?.();
+                chordFrameGradTexArp?.dispose?.();
             }
             gNote?.dispose?.(); gSus?.dispose?.(); gBeat?.dispose?.(); gTechArrow?.dispose?.(); gTapChevron?.dispose?.();
             for (const m of mStr) m?.dispose?.();
@@ -6959,7 +6924,7 @@
             pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
             pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pArpBracket = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = pAccentHalo = null;
             mLaneOdd = mLaneEven = mLaneDivider = mLaneDividerArp = gLanePlane = gGhostFretPlane = null;
-            chordFrameGradTex = null;
+            chordFrameGradTex = chordFrameGradTexArp = null;
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
             gNote = gSus = gBeat = gTechArrow = gTapChevron = null;
