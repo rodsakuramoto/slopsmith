@@ -844,14 +844,15 @@ async function showScreen(id) {
         if (window._juceMode) {
             // HTML5 emits 'pause' via the media-element listener below;
             // JUCE doesn't, so plugins would stay stuck in "playing".
-            // Snapshot the position before stop() resets it, then emit
-            // song:pause to mirror the HTML5 contract.
-            const pausedAt = jucePlayer.currentTime;
+            // Snapshot the canonical payload BEFORE stop() resets _pos
+            // to 0, then emit AFTER stop completes. Mirrors the HTML5
+            // pause contract via _songEventPayload (audioT/chartT/perfNow).
+            const payload = _songEventPayload();
             const wasPlaying = isPlaying;
             await jucePlayer.stop().catch(() => {});
             if (wasPlaying && window.slopsmith) {
                 window.slopsmith.isPlaying = false;
-                window.slopsmith.emit('song:pause', { time: pausedAt });
+                window.slopsmith.emit('song:pause', payload);
             }
             window._juceMode = false;
             window._juceAudioUrl = null;
@@ -2686,7 +2687,7 @@ let _resetJuceAudioShimChain = function () {};
                     const sm = window.slopsmith;
                     if (sm) {
                         sm.isPlaying = false;
-                        sm.emit('song:pause', { time: jucePlayer.currentTime });
+                        sm.emit('song:pause', _songEventPayload());
                     }
                 }
                 audio.dispatchEvent(new Event('seeked'));
@@ -2702,7 +2703,7 @@ let _resetJuceAudioShimChain = function () {};
                 const sm = window.slopsmith;
                 if (sm) {
                     sm.isPlaying = false;
-                    sm.emit('song:pause', { time: jucePlayer.currentTime });
+                    sm.emit('song:pause', _songEventPayload());
                 }
             });
             return;
@@ -2782,7 +2783,7 @@ let _resetJuceAudioShimChain = function () {};
                 const sm = window.slopsmith;
                 if (sm) {
                     sm.isPlaying = true;
-                    sm.emit('song:play', { time: jucePlayer.currentTime });
+                    sm.emit('song:play', _songEventPayload());
                 }
             });
             return p.then(() => undefined);
@@ -2793,6 +2794,20 @@ let _resetJuceAudioShimChain = function () {};
 
 function _audioTime() { return window._juceMode ? jucePlayer.currentTime : audio.currentTime; }
 function _audioDuration() { return window._juceMode ? jucePlayer.duration : audio.duration; }
+// Canonical payload for song:play/song:pause/song:ended. Plugins anchor
+// their own clocks against `perfNow` (a monotonic timestamp at the same
+// moment audio reports `audioT`) so they don't have to chase the chart
+// clock with a follow-up call. `time` is kept as an alias for `audioT`
+// because pre-existing plugins read e.detail.time.
+function _songEventPayload() {
+    const audioT = _audioTime();
+    return {
+        time: audioT,
+        audioT,
+        chartT: highway.getTime(),
+        perfNow: performance.now(),
+    };
+}
 // Serializes seeks so concurrent callers (e.g. user ⏪ during a loop wrap)
 // don't interleave their from/to reads — each call captures `from` only
 // once the previous seek + emit have completed. The generation token
@@ -2810,16 +2825,6 @@ function _resetAudioSeekState() {
     // guard the moment its predecessor resolves.
     _audioSeekGen++;
 }
-// Resolves to `{ completed, from, to }`:
-//   - completed: true if the seek ran to completion and emitted song:seek;
-//                false if cancelled by a teardown gen bump (or threw).
-//   - from: chart clock just before the seek (NaN on cancel before from-read).
-//   - to:   verified post-seek clock (NaN on cancel/throw).
-// Callers that fire follow-up work after the seek (count-in, arrangement
-// restore, etc.) should check `completed` so they don't act on a torn-down
-// session. Callers that need the actual landed position (because JUCE may
-// clamp or HTML5 may snap to the seekable range) should read `to` rather
-// than re-using the requested `s`.
 // Time-box the JUCE IPC so a single hung seek can't block the global
 // _audioSeekChain forever (which would freeze every subsequent reposition
 // path: seekBy, loop-wrap, jump-fix, shimmed audio.currentTime).
@@ -2835,6 +2840,16 @@ function _juceSeekWithTimeout(s) {
     // an unawaited promise) even after a successful seek.
     return Promise.race([seekP, timeoutP]).finally(() => clearTimeout(timer));
 }
+// Resolves to `{ completed, from, to }`:
+//   - completed: true if the seek ran to completion and emitted song:seek;
+//                false if cancelled by a teardown gen bump (or threw).
+//   - from: chart clock just before the seek (NaN on cancel before from-read).
+//   - to:   verified post-seek clock (NaN on cancel/throw).
+// Callers that fire follow-up work after the seek (count-in, arrangement
+// restore, etc.) should check `completed` so they don't act on a torn-down
+// session. Callers that need the actual landed position (because JUCE may
+// clamp or HTML5 may snap to the seekable range) should read `to` rather
+// than re-using the requested `s`.
 async function _audioSeek(s, reason) {
     // Single funnel for every audio repositioning. Emits song:seek so
     // plugins (notedetect detection-suppression during seek transients,
@@ -2857,6 +2872,13 @@ async function _audioSeek(s, reason) {
         // legitimate far seek (e.g. saved-loop jump > 30s) as a browser
         // bug and revert it.
         lastAudioTime = to;
+        // Sync the chart clock too so any song:* emit fired right after
+        // _audioSeek resolves (e.g. the auto-resume song:play in
+        // changeArrangement) sees an in-sync chartT via _songEventPayload.
+        // Without this, chartT lags by one 60Hz tick after a seek.
+        if (typeof highway !== 'undefined' && highway && typeof highway.setTime === 'function') {
+            highway.setTime(to);
+        }
         window.slopsmith.emit('song:seek', { from, to, reason: reason || null });
         return { completed: true, from, to };
     }).catch((err) => {
@@ -2954,16 +2976,16 @@ audio.addEventListener('ended', () => {
     console.log('Audio ended'); isPlaying = false;
     document.getElementById('btn-play').textContent = '▶ Play';
     window.slopsmith.isPlaying = false;
-    window.slopsmith.emit('song:ended', { time: audio.currentTime });
+    window.slopsmith.emit('song:ended', _songEventPayload());
 });
 audio.addEventListener('play', () => {
     window.slopsmith.isPlaying = true;
-    window.slopsmith.emit('song:play', { time: audio.currentTime });
+    window.slopsmith.emit('song:play', _songEventPayload());
 });
 audio.addEventListener('pause', () => {
     if (!isPlaying) return;
     window.slopsmith.isPlaying = false;
-    window.slopsmith.emit('song:pause', { time: audio.currentTime });
+    window.slopsmith.emit('song:pause', _songEventPayload());
 });
 
 // Abort controller for cancelling pending requests when entering player
@@ -2993,12 +3015,14 @@ async function playSong(filename, arrangement) {
         // Mirror the showScreen teardown: emit song:pause for the JUCE
         // path so plugins don't see a stale "playing" state on song
         // change. (HTML5 fires it via the audio element 'pause' event.)
-        const pausedAt = jucePlayer.currentTime;
+        // Snapshot payload BEFORE stop() resets _pos so audioT/chartT
+        // capture the actual paused position.
+        const payload = _songEventPayload();
         const wasPlaying = isPlaying;
         await jucePlayer.stop().catch(() => {});
         if (wasPlaying && window.slopsmith) {
             window.slopsmith.isPlaying = false;
-            window.slopsmith.emit('song:pause', { time: pausedAt });
+            window.slopsmith.emit('song:pause', payload);
         }
         window._juceMode = false;
         window._juceAudioUrl = null;
@@ -3076,7 +3100,7 @@ async function changeArrangement(index) {
                     document.getElementById('btn-play').textContent = '▶ Play';
                     if (window.slopsmith) {
                         window.slopsmith.isPlaying = false;
-                        window.slopsmith.emit('song:pause', { time: _audioTime() });
+                        window.slopsmith.emit('song:pause', _songEventPayload());
                     }
                 }
                 highway._onReady = null;
@@ -3088,7 +3112,7 @@ async function changeArrangement(index) {
                     if (started) {
                         isPlaying = true;
                         window.slopsmith.isPlaying = true;
-                        window.slopsmith.emit('song:play', { time: jucePlayer.currentTime });
+                        window.slopsmith.emit('song:play', _songEventPayload());
                     }
                 } else audio.play().then(() => { isPlaying = true; }).catch(() => {});
             }
@@ -3107,14 +3131,14 @@ async function togglePlay() {
             isPlaying = false;
             document.getElementById('btn-play').textContent = '▶ Play';
             window.slopsmith.isPlaying = false;
-            window.slopsmith.emit('song:pause', { time: jucePlayer.currentTime });
+            window.slopsmith.emit('song:pause', _songEventPayload());
         } else {
             const started = await jucePlayer.play();
             if (!started) return; // startBacking() failed — IPC error already logged
             isPlaying = true;
             document.getElementById('btn-play').textContent = '⏸ Pause';
             window.slopsmith.isPlaying = true;
-            window.slopsmith.emit('song:play', { time: jucePlayer.currentTime });
+            window.slopsmith.emit('song:play', _songEventPayload());
         }
         return;
     }
@@ -3989,7 +4013,7 @@ async function startCountIn() {
                         document.getElementById('btn-play').textContent = '▶ Play';
                         if (window.slopsmith) {
                             window.slopsmith.isPlaying = false;
-                            window.slopsmith.emit('song:pause', { time: _audioTime() });
+                            window.slopsmith.emit('song:pause', _songEventPayload());
                         }
                     }
                     return;
@@ -4027,7 +4051,7 @@ async function startCountIn() {
                         isPlaying = true;
                         document.getElementById('btn-play').textContent = '⏸ Pause';
                         window.slopsmith.isPlaying = true;
-                        window.slopsmith.emit('song:play', { time: jucePlayer.currentTime });
+                        window.slopsmith.emit('song:play', _songEventPayload());
                     }).catch((err) => console.error('[app] jucePlayer.play error:', err));
                 } else {
                     audio.play();
@@ -4055,7 +4079,7 @@ setInterval(() => {
             isPlaying = false;
             document.getElementById('btn-play').textContent = '▶ Play';
             window.slopsmith.isPlaying = false;
-            window.slopsmith.emit('song:ended', { time: ct });
+            window.slopsmith.emit('song:ended', _songEventPayload());
             jucePlayer.pause().catch((err) => console.warn('[app] end-of-track pause error:', err));
         }
         // A-B loop: count-in then seek back to A
