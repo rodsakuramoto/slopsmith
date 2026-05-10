@@ -180,8 +180,10 @@
     const CHORD_HWY_FADE_S = 0.32;
     const GHOST_HOLD_AFTER_ONSET = CHORD_HWY_LINGER_S;
     const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
-    /** Purple lane rails: tight end tail only (no ``CHORD_HWY_LINGER_S`` — avoids bleeding past the highway). */
-    const ARP_HWY_RAIL_END_TAIL_S = 0.1;
+    /** Purple lane rails: extend past last matched chord/note so Z reaches frame end. */
+    const ARP_HWY_RAIL_END_TAIL_S = 0.38;
+    /** Keep 0 — chord/note-based ``shapeLo`` already aligns to the visible frame. */
+    const ARP_HWY_RAIL_START_LEAD_S = 0;
     /** Drives emissive (`mGlow` / accent fill) for notes with `.ac`; matches drawNote `linger` cutoff (0.05). */
     const ACCENT_NOTE_STR_GLOW = 3.55;
     const ACCENT_NOTE_LINGER_EPS = 0.05;
@@ -4567,28 +4569,100 @@
             return null;
         }
 
+        function handShapeIsArpeggioForLaneRail(hs, chordTemplates, notesArr) {
+            if (hs.arp === true || hs.arp === 1 || hs.arpeggio === true) return true;
+            const cid = hs.chord_id;
+            if (cid == null || !chordTemplates) return false;
+            const synthNotes = chordNotesFromTemplate(cid, chordTemplates);
+            if (synthNotes.length === 0) return false;
+            const fakeCh = { t: hs.start_time, id: cid, notes: synthNotes };
+            const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
+            if (shape.size < 2) return false;
+            const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
+            return inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw);
+        }
+
+        /**
+         * Chart-time window for purple rails: hand-shape span clipped to matching
+         * ``chords[].t`` and template notes in the passage — same times that drive
+         * the 3D arpeggio frame (``ch.t`` + note stream), avoiding rails that start
+         * before the box or end before the last arpeggiated note.
+         */
+        function effectiveArpRailChartBoundsForHandShape(hs, chords, chordTemplates, notesArr) {
+            let shapeLo = hs.start_time;
+            let shapeHi = hs.end_time;
+            const cid = hs.chord_id;
+            if (notesArr && notesArr.length > 0 && chordTemplates && cid != null) {
+                const tmpl = chordTemplates[cid] ?? chordTemplates[Number(cid)];
+                if (tmpl && Array.isArray(tmpl.frets)) {
+                    let tFirst = null;
+                    let tLast = null;
+                    for (let i = 0; i < notesArr.length; i++) {
+                        const n = notesArr[i];
+                        if (n.t + 1e-4 < hs.start_time - 0.18 || n.t > hs.end_time + 0.45) continue;
+                        if (!validString(n.s)) continue;
+                        const tf = tmpl.frets[n.s];
+                        if (typeof tf !== 'number' || tf < 0 || n.f !== tf) continue;
+                        if (tFirst === null || n.t < tFirst) tFirst = n.t;
+                        if (tLast === null || n.t > tLast) tLast = n.t;
+                    }
+                    if (tFirst != null) shapeLo = Math.max(shapeLo, tFirst);
+                    if (tLast != null) shapeHi = Math.max(shapeHi, tLast);
+                }
+            }
+            if (chords && chords.length && cid != null) {
+                let tMinC = null;
+                let tMaxC = null;
+                for (let j = 0; j < chords.length; j++) {
+                    const ch = chords[j];
+                    if (ch.id !== cid && Number(ch.id) !== Number(cid)) continue;
+                    if (ch.t + 1e-4 < hs.start_time || ch.t > hs.end_time + 0.28) continue;
+                    if (tMinC === null || ch.t < tMinC) tMinC = ch.t;
+                    if (tMaxC === null || ch.t > tMaxC) tMaxC = ch.t;
+                }
+                if (tMinC != null) shapeLo = Math.max(shapeLo, tMinC);
+                if (tMaxC != null) shapeHi = Math.max(shapeHi, tMaxC);
+            }
+            shapeLo -= ARP_HWY_RAIL_START_LEAD_S;
+            shapeHi += ARP_HWY_RAIL_END_TAIL_S;
+            return { shapeLo, shapeHi };
+        }
+
+        /** ``[tChartLo,tChartHi]`` chart times that a lane slice covers (see module ``BEHIND`` / approach ``dt``). */
+        function arpeggioLaneOuterRailChartIntervalOverlaps(tChartLo, tChartHi, handShapes, chordTemplates, notesArr, chords) {
+            if (!handShapes || handShapes.length === 0) return false;
+            if (tChartHi < tChartLo) {
+                const s = tChartLo;
+                tChartLo = tChartHi;
+                tChartHi = s;
+            }
+            for (let i = 0; i < handShapes.length; i++) {
+                const hs = handShapes[i];
+                if (!handShapeIsArpeggioForLaneRail(hs, chordTemplates, notesArr)) continue;
+                const { shapeLo, shapeHi } = effectiveArpRailChartBoundsForHandShape(
+                    hs, chords, chordTemplates, notesArr,
+                );
+                if (tChartHi < shapeLo - 1e-4 || tChartLo > shapeHi + 1e-4) continue;
+                return true;
+            }
+            return false;
+        }
+
+        function arpeggioLaneOuterRailLaneSlice(dt0, dt1, nowClock, handShapes, chordTemplates, notesArr, chords) {
+            const tLo = nowClock + Math.min(dt0, dt1) - BEHIND;
+            const tHi = nowClock + Math.max(dt0, dt1) - BEHIND;
+            return arpeggioLaneOuterRailChartIntervalOverlaps(tLo, tHi, handShapes, chordTemplates, notesArr, chords);
+        }
+
         /**
          * True when **chart time** ``chartT`` falls inside an arpeggio hand-shape.
          * Uses a short end tail only — no ``CHORD_HWY_LINGER_S`` — so purple lane
          * rails match visible highway slices and do not leak after shapes end.
          */
-        function arpeggioLaneOuterRailAtChartTime(chartT, handShapes, chordTemplates, notesArr) {
-            if (!handShapes || handShapes.length === 0) return false;
-            for (let i = 0; i < handShapes.length; i++) {
-                const hs = handShapes[i];
-                if (chartT + 1e-4 < hs.start_time - 0.1 || chartT > hs.end_time + ARP_HWY_RAIL_END_TAIL_S) continue;
-                if (hs.arp === true || hs.arp === 1 || hs.arpeggio === true) return true;
-                const cid = hs.chord_id;
-                if (cid == null || !chordTemplates) continue;
-                const synthNotes = chordNotesFromTemplate(cid, chordTemplates);
-                if (synthNotes.length === 0) continue;
-                const fakeCh = { t: hs.start_time, id: cid, notes: synthNotes };
-                const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
-                if (shape.size < 2) continue;
-                const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
-                if (inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw)) return true;
-            }
-            return false;
+        function arpeggioLaneOuterRailAtChartTime(chartT, handShapes, chordTemplates, notesArr, chords) {
+            return arpeggioLaneOuterRailChartIntervalOverlaps(
+                chartT, chartT, handShapes, chordTemplates, notesArr, chords,
+            );
         }
 
         /**
@@ -4600,23 +4674,11 @@
             if (!handShapes || handShapes.length === 0 || !chords || chords.length === 0) return 1;
             for (let i = 0; i < handShapes.length; i++) {
                 const hs = handShapes[i];
-                if (nowT + 1e-4 < hs.start_time - 0.1 || nowT > hs.end_time + ARP_HWY_RAIL_END_TAIL_S) continue;
-
-                const explicitArp = hs.arp === true || hs.arp === 1 || hs.arpeggio === true;
-                let inArp = explicitArp;
-                if (!inArp) {
-                    const cid0 = hs.chord_id;
-                    if (cid0 == null || !chordTemplates) continue;
-                    const synthNotes = chordNotesFromTemplate(cid0, chordTemplates);
-                    if (synthNotes.length === 0) continue;
-                    const fakeCh = { t: hs.start_time, id: cid0, notes: synthNotes };
-                    const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
-                    if (shape.size < 2) continue;
-                    const tw = { tLo: hs.start_time - 0.06, tHi: hs.end_time + 0.06 };
-                    if (!inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw)) continue;
-                    inArp = true;
-                }
-                if (!inArp) continue;
+                if (!handShapeIsArpeggioForLaneRail(hs, chordTemplates, notesArr)) continue;
+                const { shapeLo, shapeHi } = effectiveArpRailChartBoundsForHandShape(
+                    hs, chords, chordTemplates, notesArr,
+                );
+                if (nowT + 1e-4 < shapeLo || nowT > shapeHi + 1e-4) continue;
 
                 const cid = hs.chord_id;
                 if (cid == null) return 1;
@@ -5587,6 +5649,7 @@
                 bundle.handShapes,
                 bundle.chordTemplates,
                 notes,
+                chords,
             );
             const arpLaneRimAccentMul = hwyLaneArpOuterDividers
                 ? arpeggioLaneDividerFrameAccentMul(
@@ -5628,8 +5691,8 @@
                         if (!b) continue;
                         const z0 = dZ(dt0) + TS * BEHIND;
                         const z1 = dZ(dt1) + TS * BEHIND;
-                        const arpSlice = arpeggioLaneOuterRailAtChartTime(
-                            tC, bundle.handShapes, bundle.chordTemplates, notes,
+                        const arpSlice = arpeggioLaneOuterRailLaneSlice(
+                            dt0, dt1, now, bundle.handShapes, bundle.chordTemplates, notes, chords,
                         );
                         if (_laneSegLen > 0
                             && _laneSegDMin[_laneSegLen - 1] === b.dMin
