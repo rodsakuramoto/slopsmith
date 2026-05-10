@@ -3194,14 +3194,18 @@
             // hands out fresh meshes that all reference the same material,
             // so a dense HO/PO passage doesn't churn N MeshLambertMaterial
             // allocations and N GPU material switches.
+            // Transparent + no depth write/test so HO/PO draws in the transparent
+            // pass where drawNote assigns renderOrder 1000 — otherwise an opaque
+            // arrow renders before mStr core and gets fully covered (# technique).
             mTechArrow = new T.MeshLambertMaterial({
                 color: 0xffffff,
                 emissive: 0xffffff,
                 emissiveIntensity: 0.9,
-                transparent: false,
+                transparent: true,
                 opacity: 1.0,
                 side: T.DoubleSide,
-                depthWrite: true,
+                depthWrite: false,
+                depthTest: false,
             });
             mTapChevron = new T.MeshLambertMaterial({
                 color: 0xd4d4d4,
@@ -3211,6 +3215,7 @@
                 opacity: 0.85,
                 side: T.DoubleSide,
                 depthWrite: false,
+                depthTest: false,
             });
             pTechArrow = pool(noteG, () => new T.Mesh(gTechArrow, mTechArrow));
             pTapChevron = pool(noteG, () => new T.Mesh(gTapChevron, mTapChevron));
@@ -5769,6 +5774,7 @@
                     lb.material = txtMat(0, hit ? '#fff' : '#ddd', false, 'open');
                     lb.scale.set(NW * 0.7 * _textSizeMul * openWScale, NH * 0.8 * _textSizeMul * openWScale, 1);
                     lb.position.set(x, y + vibrato, noteZ + 0.01 * K);
+                    lb.renderOrder = 1000;
                 }
 
                 // ── Sustain trail ─────────────────────────────────────────
@@ -5880,11 +5886,17 @@
                 // labels (bend, H/P/T arrows, accent, tremolo, palm mute,
                 // pinch harmonic) all scale alongside the rest.
                 const sLbl = LBL_MULT * distFactor * _textSizeMul;
+                // txtMat(..., 'technique') disables depthTest; without a high
+                // renderOrder the transparent note core (mStr) can still paint
+                // afterward and hide H/P/T, PM X, bends, etc. Same contract as
+                // fret-row labels (issue #35, CLAUDE pitfall #7 corollary).
+                const TECH_RO = 1000;
                 let yo = y + NH * 0.8 * sLbl;
                 if (n.bn > 0) {
                     const l = pLbl.get();
                     l.material = txtMat('↑' + bendText(n.bn), '#fff', true, 'technique');
                     l.scale.set(NH * 3.6 * sLbl, NH * 1.5 * sLbl, 1); l.position.set(x, yo, noteZ); yo += NH * 1.2 * sLbl;
+                    l.renderOrder = TECH_RO;
                 }
                 if (n.ho || n.po || n.tp) {
                     if (n.ho || n.po) {
@@ -5897,25 +5909,27 @@
                         // PO descends in pitch → flip y-scale negative so the
                         // arrow points down.
                         arrow.scale.set(arrowScale, n.ho ? arrowScale : -arrowScale, 1);
-                        arrow.renderOrder = 2;
+                        arrow.renderOrder = TECH_RO;
                     } else {
                         const chevron = pTapChevron.get();
                         const chevronScale = NH * 0.8 * sLbl; // Slightly increased for readability
                         chevron.position.set(x, y + vibrato, noteZ + 1.1 * K);
                         chevron.rotation.z = (isHarm ? Math.PI / 4 : 0);
                         chevron.scale.set(chevronScale, chevronScale, 1);
-                        chevron.renderOrder = 2;
+                        chevron.renderOrder = TECH_RO;
                     }
                 }
                 if (n.ac) {
                     const l = pLbl.get();
                     l.material = txtMat('>', '#fff', false, 'technique');
                     l.scale.set(NH * 1.6 * sLbl, NH * 1.6 * sLbl, 1); l.position.set(x, yo, noteZ); yo += NH * 1.2 * sLbl;
+                    l.renderOrder = TECH_RO;
                 }
                 if (n.tr) {
                     const l = pLbl.get();
                     l.material = txtMat('~~~', '#ff0', true, 'technique');
                     l.scale.set(NH * 3.0 * sLbl, NH * 1.2 * sLbl, 1); l.position.set(x, yo, noteZ);
+                    l.renderOrder = TECH_RO;
                 }
                 if (n.pm) {
                     // Palm mute: "X" overlay on the note body — bumped
@@ -5931,11 +5945,13 @@
                     const pmScale = NH * 1.35 * LBL_MULT * _textSizeMul;
                     pmMark.scale.set(pmScale, pmScale, 1);
                     pmMark.material.opacity = hit ? 1.0 : 0.8;
+                    pmMark.renderOrder = TECH_RO;
                 }
                 if (n.hp) {
                     const l = pLbl.get();
                     l.material = txtMat('PH', '#ff0', true, 'technique');
                     l.scale.set(NH * 2.1 * sLbl, NH * 1.2 * sLbl, 1); l.position.set(x, y - NH * 1.1 * sLbl, noteZ);
+                    l.renderOrder = TECH_RO;
                 }
 
                 // ── Per-note fret connector label ─────────────────────────
