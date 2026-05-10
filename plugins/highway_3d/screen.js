@@ -4728,12 +4728,20 @@
             return { shapeLo, shapeHi };
         }
 
-        function fillLaneRailHandShapeFlags(handShapes, chordTemplates, notesArr, chords, outFlags) {
+        /**
+         * ``ghostInferFlags``: per-hand-shape note-stream arpeggio inference
+         * (``fillArpeggioGhostInferFlags``) — same wide window as board ghosts.
+         * OR-ing it restores purple dynamic-highway rails when authored rows use
+         * ``h3dSynth`` or the chord-loop path misses staggered picks.
+         */
+        function fillLaneRailHandShapeFlags(
+            handShapes, chordTemplates, notesArr, chords, outFlags, ghostInferFlags,
+        ) {
             const nHs = handShapes.length;
             for (let i = 0; i < nHs; i++) {
                 outFlags[i] = handShapeIsArpeggioForLaneRail(
                     handShapes[i], handShapes, chordTemplates, notesArr, chords,
-                );
+                ) || !!(ghostInferFlags && ghostInferFlags[i]);
             }
         }
 
@@ -4927,7 +4935,12 @@
                     _arpRailBoundHiScratch.push(0);
                 }
                 fillLaneRailHandShapeFlags(
-                    hsLaneRail, bundle.chordTemplates, notesArrForRails, chordArrForRails, _arpLaneRailHsScratch,
+                    hsLaneRail,
+                    bundle.chordTemplates,
+                    notesArrForRails,
+                    chordArrForRails,
+                    _arpLaneRailHsScratch,
+                    arpGhostHsInfer,
                 );
                 fillArpeggioRailShapeBoundsCaches(
                     hsLaneRail,
@@ -5625,18 +5638,12 @@
                         // not bar thickness vs first chord — see CHORD_FRAME_RIM_* tuning.
                         let ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
                         if (chordAccent) ft *= 1.22;
-                        // For synth chord rows (hand-shape only), note-stream inference often
-                        // matches successive lead picks to the template and looks like arpeggio.
-                        const inferredFromNotesForFrame = !ch.h3dSynth && inferArpeggioFromNotePattern(
-                            ch, chShape, notes,
-                            { tLo: ch.t - ARP_FRAME_ONSET_PAD_S,
-                              tHi: ch.t + ARP_FRAME_ONSET_CLUSTER_S });
-                        // Lavender frame: high-density flag, or staggered picks in a short window
-                        // around an authored chord row (not hand-shape synthesis).
-                        const isArpeggioFrame = !isRepeat && (
-                            chordWireHighDensity(ch)
-                            || (inferredFromNotesForFrame && (hsHintFrame.explicit || hsHintFrame.covered))
-                        );
+                        // Lavender frame: match ``chordSusTrailMatchArpFrame`` (gems / sustain
+                        // trail) — same ``hd`` / hand-shape explicit / covered + wide-window
+                        // ``inferredArpPattern``. The old path gated inference on ``!h3dSynth``
+                        // and a tight ``ch.t`` cluster window, which hid the rim + fill on
+                        // many real arpeggio passages (especially synth chord rows).
+                        const isArpeggioFrame = !isRepeat && chordSusTrailMatchArpFrame;
                         const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
                         const rimHex = isArpeggioFrame ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
 
