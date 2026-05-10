@@ -459,18 +459,18 @@
     const DIAG_CELL_MAX    = 34;
     const CHORD_DIAG_POSITION_IDS = ['tl', 'tr', 'bl', 'br'];
 
-    /** Charter `Preview3DChordBoxDrawer` / `ChartPanelColors` PREVIEW_3D_CHORD_BOX. */
-    const CHARTER_CHORD_BOX_HEX = 0x00d2d5;
-    const CHARTER_CHORD_BOX_DARK_HEX = 0x003c3d;
-    /** `colorWithAlpha(128)` on frame quads. */
-    const CHARTER_CHORD_BOX_FRAME_ALPHA = 128 / 255;
-    /** Interior strip uses ARGB 32 on both stops in Charter (see drawChordBoxFilling). */
-    const CHARTER_CHORD_BOX_FILL_TEX_ALPHA = 32 / 255;
-    /** Arpeggio interior wash — charter-style light lavender (fill uses dedicated tex, not × ciano). */
-    const CHARTER_ARPEGGIO_FILL_HEX = 0xf0e8ff;
-    const CHARTER_ARPEGGIO_FILL_DARK_HEX = 0xd8c8f0;
-    /** Arpeggio rim / highway lane tint (Charter preview magenta). */
-    const CHARTER_PREVIEW_3D_ARPEGGIO_HEX = 0xc040ff;
+    /** Default chord-box rim / fill gradient (teal family). */
+    const CHORD_BOX_TEAL_HEX = 0x00d2d5;
+    const CHORD_BOX_TEAL_DARK_HEX = 0x003c3d;
+    /** Frame edge quads: premultiplied-ish alpha match (~128/255). */
+    const CHORD_BOX_EDGE_ALPHA = 128 / 255;
+    /** Interior gradient strip alpha on both stops (~32/255). */
+    const CHORD_BOX_FILL_GRAD_ALPHA = 32 / 255;
+    /** Arpeggio interior wash; dedicated gradient tex so teal map doesn’t dominate. */
+    const ARPEGGIO_BOX_LAVENDER_HEX = 0xf0e8ff;
+    const ARPEGGIO_BOX_LAVENDER_DARK_HEX = 0xd8c8f0;
+    /** Arpeggio rim accent and lane tint (magenta). */
+    const ARPEGGIO_MAGENTA_RIM_HEX = 0xc040ff;
 
     /** 3D chord-box rim bars (thin on all chords, including repeats in a sequence). */
     const CHORD_FRAME_RIM_MIN = 0.055;       // × K — floor thickness
@@ -1865,7 +1865,7 @@
         let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron, pAccentHalo;
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
-        /** Horizontal gradient (Charter chord box fill). */
+        /** Horizontal gradient for chord box interior fill. */
         let chordFrameGradTex = null;
         /** Lavender gradient for arpeggio box interior (normal map is ciano × lavanda → segue ciano). */
         let chordFrameGradTexArp = null;
@@ -3324,21 +3324,20 @@
                 color: 0xffffff, transparent: true, opacity: 0.08, fog: false, depthWrite: false,
             });
             mLaneDividerArp = new T.MeshBasicMaterial({
-                color: CHARTER_PREVIEW_3D_ARPEGGIO_HEX,
+                color: ARPEGGIO_MAGENTA_RIM_HEX,
                 transparent: true, opacity: 0.08, fog: false, depthWrite: false,
             });
             _ownedSharedMats.push(mLaneDivider, mLaneDividerArp);
             pLaneDivider = pool(noteG, () => new T.Mesh(gLaneDivider, mLaneDivider));
 
-            // Chord frame — Charter Preview3DChordBoxDrawer palette & layout hints
-            // (frame alpha 128, fill gradient alpha 32; MeshBasic = lighting-independent).
-            const chR = CHARTER_CHORD_BOX_HEX >> 16 & 255;
-            const chG = CHARTER_CHORD_BOX_HEX >> 8 & 255;
-            const chB = CHARTER_CHORD_BOX_HEX & 255;
-            const dkR = CHARTER_CHORD_BOX_DARK_HEX >> 16 & 255;
-            const dkG = CHARTER_CHORD_BOX_DARK_HEX >> 8 & 255;
-            const dkB = CHARTER_CHORD_BOX_DARK_HEX & 255;
-            const aFill = Math.round(CHARTER_CHORD_BOX_FILL_TEX_ALPHA * 255);
+            // Chord frame palette (frame alpha 128, fill gradient alpha 32; MeshBasic).
+            const chR = CHORD_BOX_TEAL_HEX >> 16 & 255;
+            const chG = CHORD_BOX_TEAL_HEX >> 8 & 255;
+            const chB = CHORD_BOX_TEAL_HEX & 255;
+            const dkR = CHORD_BOX_TEAL_DARK_HEX >> 16 & 255;
+            const dkG = CHORD_BOX_TEAL_DARK_HEX >> 8 & 255;
+            const dkB = CHORD_BOX_TEAL_DARK_HEX & 255;
+            const aFill = Math.round(CHORD_BOX_FILL_GRAD_ALPHA * 255);
             chordFrameGradTex = new T.DataTexture(
                 new Uint8Array([ chR, chG, chB, aFill, dkR, dkG, dkB, aFill, chR, chG, chB, aFill ]),
                 3, 1, T.RGBAFormat);
@@ -3347,17 +3346,16 @@
             chordFrameGradTex.wrapS = T.ClampToEdgeWrapping;
             chordFrameGradTex.wrapT = T.ClampToEdgeWrapping;
             // DataTexture defaults to linear color space; flag this gradient
-            // as sRGB so the Charter chord-box hex values land at the same
-            // perceived colour as the rest of the renderer's color textures.
+            // as sRGB so the chord-box hex values match other sRGB color textures.
             chordFrameGradTex.colorSpace = T.SRGBColorSpace;
             chordFrameGradTex.needsUpdate = true;
 
-            const arR = CHARTER_ARPEGGIO_FILL_HEX >> 16 & 255;
-            const arG = CHARTER_ARPEGGIO_FILL_HEX >> 8 & 255;
-            const arB = CHARTER_ARPEGGIO_FILL_HEX & 255;
-            const arDR = CHARTER_ARPEGGIO_FILL_DARK_HEX >> 16 & 255;
-            const arDG = CHARTER_ARPEGGIO_FILL_DARK_HEX >> 8 & 255;
-            const arDB = CHARTER_ARPEGGIO_FILL_DARK_HEX & 255;
+            const arR = ARPEGGIO_BOX_LAVENDER_HEX >> 16 & 255;
+            const arG = ARPEGGIO_BOX_LAVENDER_HEX >> 8 & 255;
+            const arB = ARPEGGIO_BOX_LAVENDER_HEX & 255;
+            const arDR = ARPEGGIO_BOX_LAVENDER_DARK_HEX >> 16 & 255;
+            const arDG = ARPEGGIO_BOX_LAVENDER_DARK_HEX >> 8 & 255;
+            const arDB = ARPEGGIO_BOX_LAVENDER_DARK_HEX & 255;
             chordFrameGradTexArp = new T.DataTexture(
                 new Uint8Array([ arR, arG, arB, aFill, arDR, arDG, arDB, aFill, arR, arG, arB, aFill ]),
                 3, 1, T.RGBAFormat);
@@ -3385,9 +3383,9 @@
             pChordBox = pool(noteG, () => new T.Mesh(
                 new T.BoxGeometry(1, 1, 1),
                 new T.MeshBasicMaterial({
-                    color: CHARTER_CHORD_BOX_HEX,
+                    color: CHORD_BOX_TEAL_HEX,
                     transparent: true,
-                    opacity: CHARTER_CHORD_BOX_FRAME_ALPHA,
+                    opacity: CHORD_BOX_EDGE_ALPHA,
                     depthWrite: false,
                     fog: false,
                     side: T.DoubleSide,
@@ -3403,7 +3401,7 @@
             // recycled / future-allocated barre mesh picks up the change.
             mBarre = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.9 * glowMul, transparent: true, depthWrite: false });
             pBarreLine  = pool(noteG, () => new T.Mesh(new T.BoxGeometry(1, 1, 1), mBarre));
-            // Charter Preview3DFingeringDrawer arpeggio brackets (per-string L-glyph meshes).
+            // Arpeggio corner brackets (per-string L-glyph meshes).
             pArpBracket = pool(noteG, () => new T.Mesh(
                 new T.BoxGeometry(1, 1, 1),
                 new T.MeshBasicMaterial({
@@ -4729,7 +4727,7 @@
         }
 
         /**
-         * Arpeggio corner L-brackets (Charter Preview3DFingeringDrawer style) — disabled:
+         * Arpeggio corner L-brackets — disabled:
          * they read as unwanted arrow-like marks on the frame.
          */
         function placeArpeggioBracketsForShape(_shape, _zBoard, _cxBox, _fullWidth, _fadeMul) {
@@ -5430,7 +5428,7 @@
                         }
                     }
 
-                    // Chord frame-box — Charter Preview3DChordBoxDrawer-style rim + fill.
+                    // Chord frame-box: rim bars + interior fill gradient.
                     const chDt = ch.t - now;
                     let chordNextSoon = false;
                     for (let j = ci + 1; j < chords.length; j++) {
@@ -5469,10 +5467,10 @@
                         // like the neck; interior uses lavender gradient (not ciano map × tint).
                         const isArpeggioFrame = !isRepeat && chordSusTrailMatchArpFrame;
                         const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
-                        const rimHex = isArpeggioFrame ? CHARTER_PREVIEW_3D_ARPEGGIO_HEX : CHARTER_CHORD_BOX_HEX;
+                        const rimHex = isArpeggioFrame ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
 
                         const repDim = isRepeat ? 0.78 : 1;
-                        const edgeOp = fade * repDim * CHARTER_CHORD_BOX_FRAME_ALPHA * (isRepeat ? 0.85 : 1) * chordTailMul;
+                        const edgeOp = fade * repDim * CHORD_BOX_EDGE_ALPHA * (isRepeat ? 0.85 : 1) * chordTailMul;
                         const thickZ = Math.max(CHORD_FRAME_RIM_Z_MIN * K, ft * CHORD_FRAME_RIM_Z_SCAL);
                         const drawFrameBox = (px, py, sx, sy, ord) => {
                             const b = pChordBox.get();
