@@ -5657,6 +5657,33 @@
                     // ch.t (not per-note onset) since chord notes
                     // share a strum time.
                     const chW          = chWindowed ? Math.exp(-Math.abs(ch.t - now) / camTau) : 0;
+                    // Next-chord tail: same voicing (``highDensity`` gallop) keeps full linger + optional
+                    // fade suppression inside [hold−fade, hold]; a voicing change clips the tail to the
+                    // chart gap so D5→D#5 (~185 ms) does not stack two cyan frames (Frantic ~2:47).
+                    let cjNext = null;
+                    for (let j = ci + 1; j < chords.length; j++) {
+                        const cj = chords[j];
+                        if (!cj?.notes) continue;
+                        if (filterValidNotes(cj.notes).length === 0) continue;
+                        cjNext = cj;
+                        break;
+                    }
+                    let chordTailHoldS = CHORD_HWY_LINGER_S;
+                    let chordNextSoon = false;
+                    if (cjNext && cjNext.t > ch.t + 1e-6) {
+                        const nextSig = chordShapeSignature(cjNext);
+                        const sameVoicingNext = runSig !== null && nextSig !== null && nextSig === runSig;
+                        if (sameVoicingNext) {
+                            const chordFadeWinLo = ch.t + (CHORD_HWY_LINGER_S - CHORD_HWY_FADE_S);
+                            const chordFadeWinHi = ch.t + CHORD_HWY_LINGER_S;
+                            if (cjNext.t >= chordFadeWinLo - 1e-6 && cjNext.t <= chordFadeWinHi + 1e-6) {
+                                chordNextSoon = true;
+                            }
+                        } else {
+                            chordTailHoldS = Math.min(CHORD_HWY_LINGER_S, Math.max(cjNext.t - ch.t, 1e-3));
+                        }
+                    }
+                    const chordTailFadeS = Math.min(CHORD_HWY_FADE_S, chordTailHoldS);
                     if (!deferChordGems) {
                         for (const cn of chordNotes) {
                             const isNext = nextNoteByString[cn.s] &&
@@ -5669,7 +5696,7 @@
                                 isNext,
                                 skipLabel,
                                 isRepeat,
-                                CHORD_HWY_LINGER_S,
+                                chordTailHoldS,
                                 cn.f === 0 ? laneWForOpenStrings : undefined,
                                 true,
                                 ch.id,
@@ -5698,22 +5725,8 @@
 
                     // Chord frame-box: rim bars + interior fill gradient.
                     const chDt = ch.t - now;
-                    let chordNextSoon = false;
-                    const chordFadeWinLo = ch.t + (CHORD_HWY_LINGER_S - CHORD_HWY_FADE_S);
-                    const chordFadeWinHi = ch.t + CHORD_HWY_LINGER_S;
-                    for (let j = ci + 1; j < chords.length; j++) {
-                        const cj = chords[j];
-                        if (!cj?.notes) continue;
-                        if (filterValidNotes(cj.notes).length === 0) continue;
-                        if (cj.t > ch.t + 1e-6
-                            && cj.t >= chordFadeWinLo - 1e-6
-                            && cj.t <= chordFadeWinHi + 1e-6) {
-                            chordNextSoon = true;
-                        }
-                        break;
-                    }
-                    const chordTailMul = hwyPostHitTailFadeMul(chDt, CHORD_HWY_LINGER_S, chordNextSoon, CHORD_HWY_FADE_S);
-                    if (chShape.size > 1 && chDt > -CHORD_HWY_LINGER_S && chDt < AHEAD && chordOpenBoxW != null) {
+                    const chordTailMul = hwyPostHitTailFadeMul(chDt, chordTailHoldS, chordNextSoon, chordTailFadeS);
+                    if (chShape.size > 1 && chDt > -chordTailHoldS && chDt < AHEAD && chordOpenBoxW != null) {
                         const z = Math.min(0, dZ(chDt));
                         const width = chordOpenBoxW;
                         const xLeft = chordFrameXL;
@@ -6571,8 +6584,9 @@
             if (!validString(s)) return;
             const nxFrame = _drawNextByString && _drawNextByString[s];
             const dt = n.t - now;
+            const ghostHold = fromChord ? linger : GHOST_HOLD_AFTER_ONSET;
             const nextTAligned = nxFrame != null && Math.abs(nxFrame.t - n.t) < NEXT_ON_STRING_T_EPS;
-            const ghostPastHold = dt <= 0 && dt > -GHOST_HOLD_AFTER_ONSET
+            const ghostPastHold = dt <= 0 && dt > -ghostHold
                 && (nxFrame == null || nxFrame.t > n.t - 1e-6);
             const isNextOnString = nextTAligned || ghostPastHold;
             const y = sY(s);
@@ -6644,7 +6658,7 @@
                 }
                 const PROJ_WIN_G = 0.6;
                 const projFactorG = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN_G));
-                const inGhostWin = n.f > 0 && isNextOnString && dt > -GHOST_HOLD_AFTER_ONSET && dt < PROJ_WIN_G &&
+                const inGhostWin = n.f > 0 && isNextOnString && dt > -ghostHold && dt < PROJ_WIN_G &&
                     projFactorG > 0.001;
 
                 const rimXY = n.ac ? ACCENT_RIM_XY_SCALE_MUL : 1;
@@ -6922,7 +6936,7 @@
             // ── Board ghost: filled rim at Z=0 (always drawn for isNext) ─
             const PROJ_WIN = 0.6;
             const projFactor = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN));
-            if (n.f > 0 && isNextOnString && dt > -GHOST_HOLD_AFTER_ONSET && dt < PROJ_WIN && projFactor > 0.001) {
+            if (n.f > 0 && isNextOnString && dt > -ghostHold && dt < PROJ_WIN && projFactor > 0.001) {
                 // Ghost stays at final "on the board" orientation — not the
                 // incoming approachRot sweep — so it nests with the note at impact.
                 const projRim = isHarm ? Math.PI / 4 : 0;
@@ -6959,7 +6973,8 @@
                     if (ghostPastHold) {
                         const nextSoon = nxFrame != null && nxFrame.t > n.t + 1e-6
                             && (nxFrame.t - now) <= GHOST_FRET_LBL_FADE_S;
-                        ghostFretLblAlpha = hwyPostHitTailFadeMul(dt, GHOST_HOLD_AFTER_ONSET, nextSoon);
+                        const ghostFadeS = Math.min(GHOST_FRET_LBL_FADE_S, ghostHold);
+                        ghostFretLblAlpha = hwyPostHitTailFadeMul(dt, ghostHold, nextSoon, ghostFadeS);
                     }
                     let instMat = lb.userData.h3dGhostFretLblInstMat;
                     if (!instMat || instMat.map !== baseGhostMat.map) {
