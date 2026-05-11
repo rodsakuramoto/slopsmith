@@ -39,6 +39,8 @@ class ChordTemplate:
     name: str
     fingers: list[int]
     frets: list[int]
+    display_name: str = ""
+    arpeggio: bool = False
 
 
 @dataclass
@@ -351,7 +353,13 @@ def arrangement_to_wire(arr: Arrangement) -> dict:
             for h in arr.hand_shapes
         ],
         "templates": [
-            {"name": ct.name, "fingers": list(ct.fingers), "frets": list(ct.frets)}
+            {
+                "name": ct.name,
+                "displayName": ct.display_name,
+                "arp": ct.arpeggio,
+                "fingers": list(ct.fingers),
+                "frets": list(ct.frets),
+            }
             for ct in arr.chord_templates
         ],
     }
@@ -388,6 +396,8 @@ def arrangement_from_wire(d: dict) -> Arrangement:
         ],
         chord_templates=[
             ChordTemplate(name=ct.get("name", ""),
+                          display_name=ct.get("displayName", ct.get("name", "")),
+                          arpeggio=bool(ct.get("arp", False)),
                           fingers=list(ct.get("fingers", [-1] * 6)),
                           frets=list(ct.get("frets", [-1] * 6)))
             for ct in d.get("templates", [])
@@ -427,6 +437,19 @@ def _hand_shape_arpeggio_flag(elem) -> bool:
     """Rocksmith / EOF may mark arpeggio on ``<handShape>`` (various casings)."""
     for attr in ("arpeggio", "Arpeggio", "arp", "Arp"):
         if _bool(elem, attr):
+            return True
+    return False
+
+
+def _chord_template_arpeggio_flag(elem) -> bool:
+    """Rocksmith commonly tags arpeggio templates in ``displayName`` via ``-arp``."""
+    for attr in ("arpeggio", "Arpeggio", "arp", "Arp"):
+        if _bool(elem, attr):
+            return True
+    display_name = elem.get("displayName", "")
+    if isinstance(display_name, str):
+        lowered = display_name.lower()
+        if "-arp" in lowered or "arpeggio" in lowered:
             return True
     return False
 
@@ -494,9 +517,13 @@ def parse_arrangement(xml_path: str) -> Arrangement:
     container = root.find("chordTemplates")
     if container is not None:
         for ct in container.findall("chordTemplate"):
+            chord_name = ct.get("chordName", "")
+            display_name = ct.get("displayName", chord_name)
             chord_templates.append(
                 ChordTemplate(
-                    name=ct.get("chordName", ""),
+                    name=chord_name,
+                    display_name=display_name,
+                    arpeggio=_chord_template_arpeggio_flag(ct),
                     fingers=[_int(ct, f"finger{i}", -1) for i in range(6)],
                     frets=[_int(ct, f"fret{i}", -1) for i in range(6)],
                 )

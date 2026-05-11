@@ -3106,6 +3106,8 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         for ct in arr.chord_templates:
             templates.append({
                 "name": ct.name,
+                "displayName": ct.display_name,
+                "arp": ct.arpeggio,
                 "fingers": ct.fingers,
                 "frets": ct.frets,
             })

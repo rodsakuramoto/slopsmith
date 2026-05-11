@@ -45,6 +45,31 @@ def test_hand_shape_parses_arpeggio_attribute(tmp_path):
     assert arr.hand_shapes[0].arpeggio is True
 
 
+def test_chord_template_parses_display_name_arpeggio_marker(tmp_path):
+    xml = (
+        "<song>"
+        + '<tuning string0="0" string1="0" string2="0" string3="0" string4="0" string5="0"/>'
+        + '<chordTemplates count="1">'
+        + '<chordTemplate chordName="Amin" displayName="Amin-arp" '
+        + 'finger1="1" finger2="2" fret1="5" fret2="7"/>'
+        + "</chordTemplates>"
+        + '<levels count="1">'
+        + '<level difficulty="0">'
+        + '<notes count="0"/>'
+        + '<chords count="0"/>'
+        + '<anchors count="0"/>'
+        + '<handShapes count="0"/>'
+        + "</level>"
+        + "</levels>"
+        + "</song>"
+    )
+    arr = parse_arrangement(_write_xml(tmp_path, xml))
+    assert len(arr.chord_templates) == 1
+    assert arr.chord_templates[0].name == "Amin"
+    assert arr.chord_templates[0].display_name == "Amin-arp"
+    assert arr.chord_templates[0].arpeggio is True
+
+
 def test_parse_note_parses_vibrato_attribute(tmp_path):
     xml = (
         "<song>"
