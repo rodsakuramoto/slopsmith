@@ -181,10 +181,10 @@
     const GHOST_HOLD_AFTER_ONSET = CHORD_HWY_LINGER_S;
     const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
     /**
-     * When the previous chord (different voicing) is still in its post-hit tail, hide the
-     * incoming chord’s cyan frame only while it is closer than this many seconds to its hit —
-     * roughly the chart gap D5→D#5. Gems/ghost keep full ``AHEAD``; only the 3D rim/fill mutexes.
-     * Epsilon avoids z-fighting the handoff frame.
+     * Mutex between adjacent chord frames of different voicings.
+     * Keep it narrow: only very close chord changes should suppress the
+     * incoming frame. Wider gaps should keep their normal long-range preview,
+     * otherwise frames coming from the background disappear too early.
      */
     const CHORD_FRAME_MUTEX_TAIL_EPS = 1.2e-3;
     /** Purple lane rails: extend past last matched chord/note so Z reaches frame end. */
@@ -5777,12 +5777,16 @@
                             const prevSig = chordShapeSignature(cpPrev);
                             const sameVoicingPrev = runSig !== null && prevSig !== null && prevSig === runSig;
                             if (!sameVoicingPrev) {
-                                const gapClip = Math.min(CHORD_HWY_LINGER_S, Math.max(ch.t - cpPrev.t, 1e-3));
-                                const prevInPostHitTail = now >= cpPrev.t - 1e-6 && now < cpPrev.t + gapClip - CHORD_FRAME_MUTEX_TAIL_EPS;
-                                const dtToHit = ch.t - now;
-                                if (prevInPostHitTail && dtToHit > 0
-                                    && dtToHit < gapClip - CHORD_FRAME_MUTEX_TAIL_EPS) {
-                                    skipNeckMutexChordFrame = true;
+                                const chordGap = ch.t - cpPrev.t;
+                                if (chordGap < CHORD_HWY_LINGER_S - CHORD_FRAME_MUTEX_TAIL_EPS) {
+                                    const gapClip = Math.max(chordGap, 1e-3);
+                                    const prevInPostHitTail = now >= cpPrev.t - 1e-6
+                                        && now < cpPrev.t + gapClip - CHORD_FRAME_MUTEX_TAIL_EPS;
+                                    const dtToHit = ch.t - now;
+                                    if (prevInPostHitTail && dtToHit > 0
+                                        && dtToHit < gapClip - CHORD_FRAME_MUTEX_TAIL_EPS) {
+                                        skipNeckMutexChordFrame = true;
+                                    }
                                 }
                             }
                         }
