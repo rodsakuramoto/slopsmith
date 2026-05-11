@@ -154,6 +154,36 @@ volumes:
   slopsmith-config:
 ```
 
+## Proxmox LXC Container
+
+`build-proxmox-ct.sh` builds a self-contained Proxmox LXC rootfs tarball from WSL2. It bootstraps a Debian Trixie rootfs, installs the runtime dependencies (Python, FFmpeg, fluidsynth, vgmstream) plus a build-only .NET SDK, builds RsCli, copies the app, removes the .NET SDK, and packages the result as a `.tar.zst` importable by `pct restore`.
+
+```bash
+# Prerequisites (WSL2):
+sudo apt install debootstrap systemd-container tar zstd curl unzip git
+
+# Build (run from repo root):
+sudo bash build-proxmox-ct.sh amd64 slopsmith-ct
+
+# Transfer + import on Proxmox:
+scp slopsmith-ct.tar.zst root@proxmox:/var/lib/vz/template/cache/
+pct restore 200 /var/lib/vz/template/cache/slopsmith-ct.tar.zst \
+    --storage local-lvm --rootfs 8 --memory 2048 --cores 2 \
+    --net0 name=eth0,bridge=vmbr0,ip=dhcp --unprivileged 1 --start 1
+```
+
+Override the Rocksmith install root (the directory that contains both `dlc/` and `songs.psarc`) via environment, using `sudo env` so the variable survives `sudo`: `sudo env ROCKSMITH_SRC_DIR=/path/to/Rocksmith2014 bash build-proxmox-ct.sh amd64 slopsmith-ct`.
+
+The build copies `*_p.psarc` files from `${ROCKSMITH_SRC_DIR}/dlc/` and `songs.psarc` from `${ROCKSMITH_SRC_DIR}/` — point the variable at the install root, not at the `dlc/` folder. .NET is installed only as a build dependency; RsCli is published with `--self-contained`, so the system-wide .NET tree is removed before the rootfs is packaged (the runtime ships bundled inside `RsCli`).
+
+The build verifies downloaded files (vgmstream, dotnet-install.sh) against pinned SHA256 hashes. Set `SKIP_HASH_CHECK=1` to bypass verification — useful when an upstream artifact (e.g. `dot.net/v1/dotnet-install.sh`) rolls and the pinned hash hasn't been refreshed yet:
+
+```bash
+sudo env SKIP_HASH_CHECK=1 bash build-proxmox-ct.sh amd64 slopsmith-ct
+```
+
+The script is linted with `shellcheck`. Only `amd64` is supported out of the box; `arm64` requires `qemu-user-static` + binfmt registration.
+
 ## Windows 11 install tutorial
 
 https://youtu.be/bIz8pbTFiV8
@@ -268,6 +298,7 @@ Routes are registered under `/api/plugins/{plugin_id}/` to avoid conflicts.
 | [Guitar Theory Lab](https://github.com/topkoa/slopsmith-plugin-guitar-theory) | Explore scales, chords, intervals, tunings, and voicings on a fully interactive fretboard  | `git clone ...slopsmith-plugin-nam-tone.git guitar-theory-lab` |
 | [Themes](https://github.com/masc0t/slopsmith-plugin-themes) | Offers several basic recolorings of the interface  | `git clone ...slopsmith-plugin-themes.git themes` |
 | [Update Manager](https://github.com/masc0t/slopsmith-update-manager) | Installs, updates, and uninstalls other plugins and the slopsmith core itself   | `git clone ...slopsmith-update-manager.git update_manager` |
+| [Tuner](https://github.com/OmikronApex/slopsmith-plugin-tuner) | Floating tuner with customizable tunings   | `git clone ...slopsmith-plugin-tuner.git tuner` |
 
 Install any plugin by cloning it into your `plugins/` directory and restarting:
 
