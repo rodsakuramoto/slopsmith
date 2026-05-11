@@ -48,8 +48,8 @@ function _readSongVolume() {
     }
 }
 
-function _writeSongVolume(v) {
-    const normalized = _clampSongVolume(v);
+function _applySongVolume(v) {
+    const normalized = _clampSongVolume(v == null ? _readSongVolume() : v);
     _songVolumeMemory = normalized;
     const a = _audioEl();
     if (a) a.volume = normalized / 100;
@@ -58,9 +58,17 @@ function _writeSongVolume(v) {
     if (window._juceMode) {
         const setGain = window.slopsmithDesktop?.audio?.setGain;
         if (typeof setGain === 'function') {
-            Promise.resolve(setGain('backing', linear)).catch(function () { /* IPC unavailable */ });
+            return Promise.resolve(setGain('backing', linear))
+                .catch(function () { /* IPC unavailable */ })
+                .then(function () { return normalized; });
         }
     }
+    return Promise.resolve(normalized);
+}
+
+function _writeSongVolume(v) {
+    const normalized = _clampSongVolume(v);
+    void _applySongVolume(normalized);
     try {
         localStorage.setItem('volume', String(normalized));
     } catch (e) {
@@ -308,6 +316,7 @@ function _init() {
 window.slopsmith.audio = Object.assign(window.slopsmith.audio || {}, {
     registerFader, unregisterFader, getFaders,
     openMixer, closeMixer, toggleMixer,
+    applySongVolume: _applySongVolume,
     readSongVolume: _readSongVolume,
 });
 

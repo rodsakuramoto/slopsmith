@@ -2265,22 +2265,13 @@ function createHighway() {
                                                         if (gen !== _wsGen) return; // stale
                                                         window._juceMode = true;
                                                         window._juceAudioUrl = audioUrl;
-                                                        // Match native backing gain to the Song mixer / persisted volume
-                                                        // (default engine backing is ~0.7 linear; HTML path uses audio.volume).
-                                                        let songPct = window.slopsmith?.audio?.readSongVolume?.();
-                                                        if (!Number.isFinite(songPct)) {
-                                                            try {
-                                                                songPct = parseFloat(localStorage.getItem('volume'));
-                                                            } catch (_e) { songPct = NaN; }
-                                                        }
-                                                        if (!Number.isFinite(songPct)) songPct = 80;
-                                                        songPct = Math.min(100, Math.max(0, songPct));
-                                                        // Don't let setGain failures flip routing back to HTML5 —
-                                                        // the backing track already loaded successfully. Wrap in
-                                                        // its own try/catch and re-check generation after the
-                                                        // await so a reconnect mid-flight can't apply stale state.
+                                                        // Re-apply the active Song fader whenever a new backing
+                                                        // track is loaded so song-to-song switches keep the same
+                                                        // user-selected level instead of the engine default.
                                                         try {
-                                                            await juceApi.setGain('backing', songPct / 100);
+                                                            if (typeof window.slopsmith?.audio?.applySongVolume === 'function') {
+                                                                await window.slopsmith.audio.applySongVolume();
+                                                            }
                                                         } catch (gainErr) {
                                                             console.warn('[highway] JUCE setGain backing failed', gainErr);
                                                         }
@@ -2297,18 +2288,24 @@ function createHighway() {
                                                 }
                                                 // HTML5 fallback (isAudioRunning false, or JUCE error)
                                                 if (gen !== _wsGen) return; // stale
-                                                audio.src = audioUrl;
-                                                audio.load();
                                                 window._juceMode = false;
                                                 window._juceAudioUrl = null;
+                                                audio.src = audioUrl;
+                                                if (typeof window.slopsmith?.audio?.applySongVolume === 'function') {
+                                                    void window.slopsmith.audio.applySongVolume();
+                                                }
+                                                audio.load();
                                                 _showAudioBufferingOverlay(audio);
                                             })();
                                         } else {
                                             // Non-JUCE path: sloppak stems, or no JUCE API present
-                                            audio.src = msg.audio_url;
-                                            audio.load();
                                             window._juceMode = false;
                                             window._juceAudioUrl = null;
+                                            audio.src = msg.audio_url;
+                                            if (typeof window.slopsmith?.audio?.applySongVolume === 'function') {
+                                                void window.slopsmith.audio.applySongVolume();
+                                            }
+                                            audio.load();
                                             _showAudioBufferingOverlay(audio);
                                         }
                                     }
