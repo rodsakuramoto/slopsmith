@@ -6936,7 +6936,7 @@
                 }
 
                 // ── Lane drop line (anchors note to its lane) ─────────────
-                if (dt > 0) {
+                if (dt > 0 && !fromChord) {
                     const boardY = S_BASE - NH / 2 - 2 * K;
                     const lineTop = y - NH / 2 - NH * 0.4;
                     const lineBot = boardY + NH * 0.5;
