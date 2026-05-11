@@ -2150,7 +2150,7 @@
                 wideFont: 'bold 64px sans-serif',
                 srcH: 128, stroke: '#0a1018', strokeW: 6, shadow: null,
             },
-            // Technique markers (PH, PM, AC, H/P/T, etc.).
+            // Technique markers (pinch-harmonic icon, PM, AC, H/P/T, etc.).
             technique: {
                 font:     'bold 80px sans-serif',
                 wideFont: 'bold 64px sans-serif',
@@ -2247,6 +2247,258 @@
                 map: new T.CanvasTexture(c),
                 transparent: true,
                 depthTest: false,
+            });
+            txtCache[k] = mat;
+            return mat;
+        }
+
+        function pinchHarmonicMat(col) {
+            const baseCol = new T.Color(col != null ? col : '#ffd84d');
+            // Versioned cache key so icon-shape tweaks take effect even in
+            // long-lived panels that already cached an older PH sprite.
+            const k = 'technique|pinchHarmonicIcon|rs2014-v2|' + baseCol.getHexString();
+            if (txtCache[k]) return txtCache[k];
+
+            const h = 256;
+            const c = document.createElement('canvas');
+            c.width = h; c.height = h;
+            const x = c.getContext('2d');
+            const cx = h / 2;
+            const cy = h / 2;
+            const r = Math.round(baseCol.r * 255);
+            const g = Math.round(baseCol.g * 255);
+            const b = Math.round(baseCol.b * 255);
+            const hiR = Math.min(255, Math.round(r + (255 - r) * 0.28));
+            const hiG = Math.min(255, Math.round(g + (255 - g) * 0.28));
+            const hiB = Math.min(255, Math.round(b + (255 - b) * 0.28));
+            const dkR = Math.max(0, Math.round(r * 0.38));
+            const dkG = Math.max(0, Math.round(g * 0.38));
+            const dkB = Math.max(0, Math.round(b * 0.38));
+            const midR = Math.min(255, Math.round(r * 0.82 + 22));
+            const midG = Math.min(255, Math.round(g * 0.82 + 18));
+            const midB = Math.min(255, Math.round(b * 0.82 + 10));
+            const rgba = (rr, gg, bb, a) => `rgba(${rr},${gg},${bb},${a})`;
+            const TAU = Math.PI * 2;
+            const outerRx = h * 0.39;
+            const outerRy = h * 0.23;
+            const ringRx = h * 0.245;
+            const ringRy = h * 0.155;
+            const irisRx = h * 0.145;
+            const irisRy = h * 0.145;
+            const pupilRx = h * 0.062;
+            const pupilRy = h * 0.062;
+            const black = rgba(0, 0, 0, 1);
+            const white = rgba(255, 255, 255, 1);
+            const sideWing = (dir, sx = 1, sy = 1) => {
+                const s = dir < 0 ? -1 : 1;
+                x.beginPath();
+                x.moveTo(s * outerRx * 0.88 * sx, -outerRy * 0.13 * sy);
+                x.bezierCurveTo(
+                    s * outerRx * 1.18 * sx, -outerRy * 0.52 * sy,
+                    s * outerRx * 1.34 * sx, -outerRy * 0.2 * sy,
+                    s * outerRx * 1.28 * sx, 0
+                );
+                x.bezierCurveTo(
+                    s * outerRx * 1.34 * sx, outerRy * 0.2 * sy,
+                    s * outerRx * 1.18 * sx, outerRy * 0.52 * sy,
+                    s * outerRx * 0.88 * sx, outerRy * 0.13 * sy
+                );
+                x.closePath();
+            };
+            const innerSide = (dir) => {
+                const s = dir < 0 ? -1 : 1;
+                x.beginPath();
+                x.moveTo(s * outerRx * 0.71, -outerRy * 0.03);
+                x.bezierCurveTo(
+                    s * outerRx * 0.58, -outerRy * 0.54,
+                    s * outerRx * 0.33, -outerRy * 0.58,
+                    s * outerRx * 0.16, 0
+                );
+                x.bezierCurveTo(
+                    s * outerRx * 0.33, outerRy * 0.58,
+                    s * outerRx * 0.58, outerRy * 0.54,
+                    s * outerRx * 0.71, outerRy * 0.03
+                );
+                x.closePath();
+            };
+
+            x.clearRect(0, 0, h, h);
+            x.save();
+            x.translate(cx, cy);
+
+            const glow = x.createRadialGradient(0, 0, h * 0.04, 0, 0, h * 0.48);
+            glow.addColorStop(0, rgba(hiR, hiG, hiB, 0.24));
+            glow.addColorStop(0.56, rgba(r, g, b, 0.13));
+            glow.addColorStop(1, 'rgba(0,0,0,0)');
+            x.fillStyle = glow;
+            x.beginPath();
+            x.ellipse(0, 0, h * 0.47, h * 0.29, 0, 0, TAU);
+            x.fill();
+
+            x.lineCap = 'round';
+            x.fillStyle = black;
+            sideWing(-1, 1.06, 1.08);
+            x.fill();
+            sideWing(1, 1.06, 1.08);
+            x.fill();
+            x.beginPath();
+            x.ellipse(0, 0, outerRx * 1.05, outerRy * 1.08, 0, 0, TAU);
+            x.fill();
+
+            x.shadowColor = rgba(r, g, b, 0.28);
+            x.shadowBlur = 10;
+            x.fillStyle = rgba(midR, midG, midB, 0.98);
+            sideWing(-1);
+            x.fill();
+            sideWing(1);
+            x.fill();
+            x.beginPath();
+            x.ellipse(0, 0, outerRx * 0.96, outerRy * 0.94, 0, 0, TAU);
+            x.fill();
+
+            x.shadowBlur = 0;
+            x.fillStyle = rgba(dkR, dkG, dkB, 0.82);
+            x.beginPath();
+            x.ellipse(0, 0, outerRx * 0.84, outerRy * 0.79, 0, 0, TAU);
+            x.fill();
+
+            x.fillStyle = rgba(255, 255, 255, 0.96);
+            x.beginPath();
+            x.ellipse(0, 0, outerRx * 0.69, outerRy * 0.63, 0, 0, TAU);
+            x.fill();
+
+            x.fillStyle = black;
+            innerSide(-1);
+            x.fill();
+            innerSide(1);
+            x.fill();
+
+            x.fillStyle = rgba(midR, midG, midB, 0.96);
+            x.beginPath();
+            x.ellipse(0, 0, ringRx, ringRy, 0, 0, TAU);
+            x.fill();
+
+            x.strokeStyle = black;
+            x.lineWidth = 7;
+            x.beginPath();
+            x.ellipse(0, 0, ringRx * 1.02, ringRy * 1.02, 0, 0, TAU);
+            x.stroke();
+
+            x.strokeStyle = white;
+            x.lineWidth = 6;
+            x.beginPath();
+            x.ellipse(0, 0, ringRx, ringRy, 0, 0, TAU);
+            x.stroke();
+
+            x.fillStyle = rgba(r, g, b, 0.94);
+            x.beginPath();
+            x.ellipse(0, 0, irisRx, irisRy, 0, 0, TAU);
+            x.fill();
+
+            x.strokeStyle = black;
+            x.lineWidth = 5;
+            x.beginPath();
+            x.ellipse(0, 0, irisRx, irisRy, 0, 0, TAU);
+            x.stroke();
+
+            x.strokeStyle = white;
+            x.lineWidth = 2.5;
+            x.beginPath();
+            x.ellipse(0, 0, irisRx, irisRy, 0, 0, TAU);
+            x.stroke();
+
+            x.shadowColor = rgba(r, g, b, 0.24);
+            x.shadowBlur = 6;
+            x.fillStyle = black;
+            x.beginPath();
+            x.ellipse(0, 0, pupilRx, pupilRy, 0, 0, TAU);
+            x.fill();
+
+            x.shadowBlur = 0;
+            x.strokeStyle = white;
+            x.lineWidth = 3;
+            x.beginPath();
+            x.ellipse(0, 0, pupilRx * 1.28, pupilRy * 1.28, 0, 0, TAU);
+            x.stroke();
+
+            x.strokeStyle = black;
+            x.lineWidth = 4;
+            sideWing(-1);
+            x.stroke();
+            sideWing(1);
+            x.stroke();
+
+            x.restore();
+
+            const mat = new T.SpriteMaterial({
+                map: new T.CanvasTexture(c),
+                transparent: true,
+                depthTest: false,
+                depthWrite: false,
+                opacity: 0.9,
+            });
+            txtCache[k] = mat;
+            return mat;
+        }
+
+        function naturalHarmonicMat() {
+            const k = 'technique|naturalHarmonicIcon|pink-ring-v3';
+            if (txtCache[k]) return txtCache[k];
+
+            const h = 256;
+            const c = document.createElement('canvas');
+            c.width = h; c.height = h;
+            const x = c.getContext('2d');
+            const cx = h / 2;
+            const cy = h / 2;
+            const TAU = Math.PI * 2;
+
+            x.clearRect(0, 0, h, h);
+
+            const glow = x.createRadialGradient(cx, cy, h * 0.03, cx, cy, h * 0.47);
+            glow.addColorStop(0, 'rgba(255,170,255,0.14)');
+            glow.addColorStop(0.55, 'rgba(0,0,0,0.22)');
+            glow.addColorStop(1, 'rgba(0,0,0,0)');
+            x.fillStyle = glow;
+            x.beginPath();
+            x.arc(cx, cy, h * 0.44, 0, TAU);
+            x.fill();
+
+            x.shadowColor = 'rgba(0,0,0,0.85)';
+            x.shadowBlur = 14;
+            x.fillStyle = 'rgba(255, 255, 255, 0.96)';
+            x.beginPath();
+            x.arc(cx, cy, h * 0.31, 0, TAU);
+            x.fill();
+
+            // Punch out the inner gap so the icon reads as a bright ring.
+            x.shadowBlur = 0;
+            x.globalCompositeOperation = 'destination-out';
+            x.beginPath();
+            x.arc(cx, cy, h * 0.20, 0, TAU);
+            x.fill();
+            x.globalCompositeOperation = 'source-over';
+
+            x.shadowColor = 'rgba(0, 0, 0, 0.7)';
+            x.shadowBlur = 10;
+            x.strokeStyle = 'rgba(255, 255, 255, 0.98)';
+            x.lineWidth = 8;
+            x.beginPath();
+            x.arc(cx, cy, h * 0.255, 0, TAU);
+            x.stroke();
+
+            x.shadowColor = 'rgba(0,0,0,0)';
+            x.fillStyle = 'rgba(255, 255, 255, 0.98)';
+            x.beginPath();
+            x.arc(cx, cy, h * 0.12, 0, TAU);
+            x.fill();
+
+            const mat = new T.SpriteMaterial({
+                map: new T.CanvasTexture(c),
+                transparent: true,
+                depthTest: false,
+                depthWrite: false,
+                opacity: 0.96,
             });
             txtCache[k] = mat;
             return mat;
@@ -6890,20 +7142,6 @@
                     }
                 }
 
-                // ── Lane drop line (anchors note to its lane) ─────────────
-                if (dt > 0 && !fromChord) {
-                    const boardY = S_BASE - NH / 2 - 2 * K;
-                    const lineTop = y - NH / 2 - NH * 0.4;
-                    const lineBot = boardY + NH * 0.5;
-                    const lineLen = lineTop - lineBot;
-                    if (lineLen > 0.001) {
-                        const dl = pDropLine.get();
-                        dl.material.color.set(activePalette[s]);
-                        dl.position.set(x, lineBot, noteZ);
-                        dl.scale.set(1, lineLen, 1);
-                    }
-                }
-
                 // ── Technique labels ──────────────────────────────────────
                 // Label scale = base × LBL_MULT × distFactor.
                 // distFactor compensates for perspective shrink so a
@@ -6923,7 +7161,8 @@
                 const LBL_MULT = 1.6;
                 const distFactor = 1 + Math.max(0, Math.min(1, dt / AHEAD)) * 1.5;
                 // Fold the user's text-size multiplier into sLbl so technique
-                // labels (bend, H/P/T arrows, tremolo, palm mute, pinch harmonic)
+                // labels (bend, H/P/T arrows, tremolo) plus on-body markers
+                // such as palm mute and the pinch-harmonic icon.
                 // all scale alongside the rest (`ac` accent → brighter body via mGlow).
                 const sLbl = LBL_MULT * distFactor * _textSizeMul;
                 // txtMat(..., 'technique') disables depthTest; without a high
@@ -6981,11 +7220,27 @@
                     pmMark.material.opacity = hit ? 1.0 : 0.8;
                     pmMark.renderOrder = TECH_RO;
                 }
+                if (n.hm) {
+                    const nhMark = pLbl.get();
+                    nhMark.material = naturalHarmonicMat();
+                    nhMark.position.set(x, y + techniqueYNow, noteZ + 0.22 * K);
+                    const nhScale = n.f === 0
+                        ? NH * 1.5 * sLbl * openWScale
+                        : NH * 1.5 * sLbl;
+                    nhMark.scale.set(nhScale, nhScale, 1);
+                    nhMark.material.opacity = hit ? 1.0 : 0.95;
+                    nhMark.renderOrder = TECH_RO + 1;
+                }
                 if (n.hp) {
-                    const l = pLbl.get();
-                    l.material = txtMat('PH', '#ff0', true, 'technique');
-                    l.scale.set(NH * 2.1 * sLbl, NH * 1.2 * sLbl, 1); l.position.set(x, y + techniqueYNow - NH * 1.1 * sLbl, noteZ);
-                    l.renderOrder = TECH_RO;
+                    const phMark = pLbl.get();
+                    phMark.material = pinchHarmonicMat(activePalette[s]);
+                    phMark.position.set(x, y + techniqueYNow, noteZ + 0.22 * K);
+                    const phScale = n.f === 0
+                        ? NH * 1.5 * sLbl * openWScale
+                        : NH * 1.5 * sLbl;
+                    phMark.scale.set(phScale, phScale, 1);
+                    phMark.material.opacity = hit ? 1.0 : 0.95;
+                    phMark.renderOrder = TECH_RO + 1;
                 }
 
                 // ── Per-note fret connector label ─────────────────────────
