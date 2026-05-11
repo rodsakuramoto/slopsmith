@@ -181,6 +181,29 @@ def chord_to_wire(c: Chord) -> dict:
     }
 
 
+def anchor_to_wire(a: Anchor) -> dict:
+    return {"time": a.time, "fret": a.fret, "width": a.width}
+
+
+def hand_shape_to_wire(h: HandShape) -> dict:
+    return {
+        "chord_id": h.chord_id,
+        "start_time": h.start_time,
+        "end_time": h.end_time,
+        "arp": h.arpeggio,
+    }
+
+
+def chord_template_to_wire(ct: ChordTemplate) -> dict:
+    return {
+        "name": ct.name,
+        "displayName": ct.display_name,
+        "arp": ct.arpeggio,
+        "fingers": list(ct.fingers),
+        "frets": list(ct.frets),
+    }
+
+
 def note_from_wire(d: dict, time: float | None = None) -> Note:
     return Note(
         time=float(d.get("t", time if time is not None else 0.0)),
@@ -218,11 +241,8 @@ def phrase_level_to_wire(pl: PhraseLevel) -> dict:
         "difficulty": pl.difficulty,
         "notes": [note_to_wire(n) for n in pl.notes],
         "chords": [chord_to_wire(c) for c in pl.chords],
-        "anchors": [{"time": a.time, "fret": a.fret, "width": a.width} for a in pl.anchors],
-        "handshapes": [
-            {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time, "arp": h.arpeggio}
-            for h in pl.hand_shapes
-        ],
+        "anchors": [anchor_to_wire(a) for a in pl.anchors],
+        "handshapes": [hand_shape_to_wire(h) for h in pl.hand_shapes],
     }
 
 
@@ -347,21 +367,9 @@ def arrangement_to_wire(arr: Arrangement) -> dict:
         "capo": arr.capo,
         "notes": [note_to_wire(n) for n in arr.notes],
         "chords": [chord_to_wire(c) for c in arr.chords],
-        "anchors": [{"time": a.time, "fret": a.fret, "width": a.width} for a in arr.anchors],
-        "handshapes": [
-            {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time, "arp": h.arpeggio}
-            for h in arr.hand_shapes
-        ],
-        "templates": [
-            {
-                "name": ct.name,
-                "displayName": ct.display_name,
-                "arp": ct.arpeggio,
-                "fingers": list(ct.fingers),
-                "frets": list(ct.frets),
-            }
-            for ct in arr.chord_templates
-        ],
+        "anchors": [anchor_to_wire(a) for a in arr.anchors],
+        "handshapes": [hand_shape_to_wire(h) for h in arr.hand_shapes],
+        "templates": [chord_template_to_wire(ct) for ct in arr.chord_templates],
     }
     # phrases is additive — only include the key when the source had
     # multi-level data. Treat an empty list the same as None ("slider

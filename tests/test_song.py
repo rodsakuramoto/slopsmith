@@ -387,6 +387,8 @@ def test_note_to_wire_is_json_safe():
 def test_note_from_wire_accepts_vibrato_flag():
     n = note_from_wire({"t": 1.0, "s": 2, "f": 7, "vb": True})
     assert n.vibrato is True
+    legacy = note_from_wire({"t": 1.0, "s": 2, "f": 7, "vibrato": True})
+    assert legacy.vibrato is True
 
 
 def test_chord_to_wire_is_json_safe():
