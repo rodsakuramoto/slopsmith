@@ -515,6 +515,17 @@
     const ARP_INFER_MULTI_STRUM_HIT_SLACK = 2;
     /** ``timeWin`` span above which we apply the multi-strum hit-count cap. */
     const ARP_INFER_MULTI_STRUM_WIN_MIN_S = 0.26;
+    /**
+     * Minimum staggered hits inside a hand-shape window for note-stream arpeggio
+     * inference. A genuine arpeggio sweeps several strings of the held shape;
+     * a 2-note melodic motif inside a multi-string ``<handShape>`` (e.g. Jackson 5
+     * "I Want You Back" ~0:27 — Fm7 transition fingering with two plucks on
+     * strings 4–5) earlier registered as arpeggio and produced a stray lavender
+     * chord frame + purple lane outer dividers. Cap at ``min(shape.size, 3)``
+     * so 2-string voicings still infer normally and 3+ string templates need
+     * a real sweep.
+     */
+    const ARP_INFER_MIN_HITS_VS_SHAPE_CAP = 3;
 
     /* ======================================================================
      *  Pure helpers
@@ -4521,6 +4532,23 @@
             const synth = [];
             const seenSynth = new Set();
             const tol = 0.028;
+            /**
+             * Suppress a synth chord box when a real chord with the **same trimmed
+             * display name** played within this window — RS CDLC commonly authors
+             * several ``<chordTemplate>`` rows that share a display name (with
+             * trailing-whitespace IDs) for fingering variants. The follow-up
+             * hand-shape with no chord row is a fingering hint, not a new strum
+             * (e.g. Jackson 5 "I Want You Back" ~0:27 — Fm7 cid=18 strum followed
+             * by Fm7 cid=19 hand-shape, which earlier produced a stacked second
+             * "Fm7" label and an extra chord frame).
+             */
+            const SAME_NAME_RUN_S = 0.5;
+            const trimmedTemplateName = (cid) => {
+                if (cid == null || !chordTemplates) return '';
+                const tmpl = chordTemplates[cid] ?? chordTemplates[Number(cid)];
+                const n = tmpl && tmpl.name;
+                return typeof n === 'string' ? n.trim() : '';
+            };
             outer: for (let i = 0; i < handShapes.length; i++) {
                 const hs = handShapes[i];
                 const cid = hs.chord_id != null ? hs.chord_id : hs.chordId;
@@ -4529,11 +4557,20 @@
                 const key = `${cid}|${Number(st).toFixed(3)}`;
                 if (seenSynth.has(key)) continue;
                 seenSynth.add(key);
+                const myName = trimmedTemplateName(cid);
                 for (let j = 0; j < reals.length; j++) {
                     const ch = reals[j];
                     const rid = ch.id;
-                    if (rid !== cid && Number(rid) !== Number(cid)) continue;
-                    if (Math.abs(ch.t - st) <= tol) continue outer;
+                    const sameId = rid === cid || Number(rid) === Number(cid);
+                    if (sameId && Math.abs(ch.t - st) <= tol) continue outer;
+                    if (!sameId && myName !== '') {
+                        const otherName = trimmedTemplateName(rid);
+                        if (otherName === myName
+                            && st > ch.t
+                            && st - ch.t <= SAME_NAME_RUN_S) {
+                            continue outer;
+                        }
+                    }
                 }
                 const notes = chordNotesFromTemplate(cid, chordTemplates);
                 if (notes.length === 0) continue;
@@ -4653,6 +4690,10 @@
                     const spread = hitTimes[hitTimes.length - 1] - hitTimes[0];
                     if (spread < ARP_INFER_STRUM_VS_ARP_SPREAD_MIN_S) return false;
                 }
+                // Reject when too few staggered hits for a genuine sweep across
+                // the held shape — see ARP_INFER_MIN_HITS_VS_SHAPE_CAP.
+                const minHits = Math.min(shape.size, ARP_INFER_MIN_HITS_VS_SHAPE_CAP);
+                if (hitTimes.length < minHits) return false;
             }
             return true;
         }
