@@ -1650,14 +1650,14 @@ function createHighway() {
     }
 
     // True if a chord note carries per-strum technique data (bend,
-    // hammer/pull/tap, slide, palm-mute, tremolo, accent, harmonic, pinch
+    // hammer/pull/tap, slide, palm-mute, vibrato, tremolo, accent, harmonic, pinch
     // harmonic, dead note). drawNote shows these in 3D (`ac` accent is a brighter
     // gem instead of a glyph there). Alternate render paths (repeat box,
     // open-string-in-chord wide bar)
     // bypass drawNote and so must fall back to the full path whenever a
     // technique flag is present, otherwise authored cues vanish silently.
     function _noteHasTechniqueFlags(n) {
-        if (n.bn || n.ho || n.po || n.tp || n.pm || n.tr || n.ac || n.hm || n.hp || n.mt) return true;
+        if (n.bn || n.ho || n.po || n.tp || n.pm || n.vb || n.tr || n.ac || n.hm || n.hp || n.mt) return true;
         if (typeof n.sl === 'number' && n.sl >= 0) return true;
         return false;
     }
@@ -1691,7 +1691,7 @@ function createHighway() {
         // per-chord WeakMap entry. A chain breaks when the next chord has a
         // different id OR the time gap is >= CHAIN_GAP_THRESHOLD.
         // Chords that carry per-strum technique flags (bend / palm-mute /
-        // hammer / pull / tap / slide / tremolo / accent / harmonic / mute)
+        // hammer / pull / tap / slide / vibrato / tremolo / accent / harmonic / mute)
         // never collapse to a repeat box — those cues are authored on each
         // strum and must stay visible.
         let chainStart = 0;

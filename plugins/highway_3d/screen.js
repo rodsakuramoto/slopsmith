@@ -239,8 +239,11 @@
     // fretted notes get a single centered trail.
     const OPEN_SUS_OFFSETS = Object.freeze([-NW * 3, NW * 3]);
     const SINGLE_SUS_OFFSETS = Object.freeze([0]);
+    const BEND_HALFSTEP_WORLD_Y = S_GAP * 0.8;
+    const VIBRATO_HALF_WAVE_S = 0.08;
+    const TREMOLO_BUMP_S = 0.06;
 
-    /** Longitudinal samples for slide-sustain prism (indexed BufferGeometry). */
+    /** Longitudinal samples for sustain-technique prism (indexed BufferGeometry). */
     const SLIDE_RIBBON_SAMPLES = 96;
     /** Pre-built index buffer: `SLIDE_RIBBON_SAMPLES` × 8 tris × 3 verts. */
     const SLIDE_RIBBON_INDICES = (() => {
@@ -6608,8 +6611,9 @@
         }
 
         /**
-         * Indexed slide-sustain prism (~SLIDE_RIBBON_SAMPLES longitudinal
-         * slices) — smooth contour vs stacked BoxGeometry segments.
+         * Indexed sustain ribbon (~SLIDE_RIBBON_SAMPLES longitudinal slices)
+         * for slides, bends, vibrato and tremolo — smooth contour vs stacked
+         * BoxGeometry segments.
          */
         function slideRibbonUpdatePositions(geom, strandBaseX, tw, th, y, sliceDur, susStart, now, n, slideSt) {
             const pa = geom.attributes.position.array;
@@ -6624,15 +6628,57 @@
             for (let k = 0; k <= S; k++) {
                 const Tk = susStart + (k / S) * sliceDur;
                 const zk = dZ(Tk - now);
-                const xc = strandBaseX + dirMul * slideOffsetWorldX(n, Tk, slideSt);
-                pa[v++] = xc - tw * 0.5; pa[v++] = y - th * 0.5; pa[v++] = zk;
-                pa[v++] = xc + tw * 0.5; pa[v++] = y - th * 0.5; pa[v++] = zk;
-                pa[v++] = xc + tw * 0.5; pa[v++] = y + th * 0.5; pa[v++] = zk;
-                pa[v++] = xc - tw * 0.5; pa[v++] = y + th * 0.5; pa[v++] = zk;
+                const xc = strandBaseX
+                    + dirMul * slideOffsetWorldX(n, Tk, slideSt)
+                    + tremoloOffsetWorldX(n, Tk, tw);
+                const yc = y + techniqueYOffsetWorld(n, Tk);
+                pa[v++] = xc - tw * 0.5; pa[v++] = yc - th * 0.5; pa[v++] = zk;
+                pa[v++] = xc + tw * 0.5; pa[v++] = yc - th * 0.5; pa[v++] = zk;
+                pa[v++] = xc + tw * 0.5; pa[v++] = yc + th * 0.5; pa[v++] = zk;
+                pa[v++] = xc - tw * 0.5; pa[v++] = yc + th * 0.5; pa[v++] = zk;
             }
             geom.attributes.position.needsUpdate = true;
             // Normals are pre-baked at geometry creation (see mkSlideRibbonGeo);
             // axis-aligned cross-section means they don't need per-frame recompute.
+        }
+
+        function noteHasVibrato(n) {
+            return !!(n && (n.vb || n.vibrato));
+        }
+
+        function bendVisualDirY(stringIdx) {
+            if (!Number.isFinite(stringIdx) || nStr <= 1) return 1;
+            const visualIdx = _invertedCached ? stringIdx : (nStr - 1 - stringIdx);
+            return visualIdx >= (nStr - 1) * 0.5 ? -1 : 1;
+        }
+
+        function bendSemisAtTime(n, chartTime) {
+            const bn = Number(n?.bn) || 0;
+            if (!(bn > 0) || !(n?.sus > 0)) return 0;
+            const p = Math.max(0, Math.min(1, (chartTime - n.t) / Math.max(n.sus, 1e-6)));
+            return bn * p;
+        }
+
+        function vibratoSemisAtTime(n, chartTime) {
+            if (!noteHasVibrato(n) || !(n?.sus > 0)) return 0;
+            const elapsed = Math.max(0, chartTime - n.t);
+            return Math.sin(elapsed * Math.PI / VIBRATO_HALF_WAVE_S);
+        }
+
+        function techniqueYOffsetWorld(n, chartTime) {
+            if (!(n?.sus > 0)) return 0;
+            const bendSemi = bendSemisAtTime(n, chartTime);
+            const vibratoSemi = vibratoSemisAtTime(n, chartTime);
+            if (bendSemi === 0 && vibratoSemi === 0) return 0;
+            return bendVisualDirY(n.s) * BEND_HALFSTEP_WORLD_Y * (bendSemi + vibratoSemi);
+        }
+
+        function tremoloOffsetWorldX(n, chartTime, trailW) {
+            if (!(n?.tr) || !(n?.sus > 0)) return 0;
+            const elapsed = Math.max(0, chartTime - n.t);
+            const phase = (elapsed % TREMOLO_BUMP_S) / TREMOLO_BUMP_S;
+            const tri = (Math.abs(phase - 0.5) - 0.25) * 3;
+            return trailW * 0.5 * tri;
         }
 
         /* ── Note renderer ───────────────────────────────────────────────── */
@@ -6671,7 +6717,8 @@
             const hitDist = Math.abs(dt);
             const hit = hitDist < 0.15 || sustained;
             const hitFade = sustained ? 0.7 : (hitDist < 0.15 ? 1 - hitDist / 0.15 : 0);
-            const vibrato = sustained ? Math.sin(now * 30) * 0.3 * K : 0;
+            const hasTechniqueVibrato = noteHasVibrato(n);
+            const techniqueYNow = sustained ? techniqueYOffsetWorld(n, now) : 0;
             const noteZ = sustained ? 0 : Math.min(0, dZ(dt));
             const x = n.f === 0 ? (openX !== undefined ? openX : curX) : xFretMid(n.f);
             const isHarm = n.hm || n.hp;
@@ -6751,7 +6798,7 @@
                         const glow = pAccentHalo.get();
                         glow.material = sh.mat;
                         glow.rotation.z = rZ;
-                        glow.position.set(x, y + vibrato, noteZ - sh.zK * K);
+                        glow.position.set(x, y + techniqueYNow, noteZ - sh.zK * K);
                         if (n.f === 0) {
                             const slabPuff = Math.max(2.4, 1 + (sh.ixy - 1) * 3.2);
                             glow.scale.set(
@@ -6768,7 +6815,7 @@
                 const outline = pNote.get();
                 outline.material = _ndMatchedMark != null ? _ndOutline
                     : (n.ac ? mAccentOutline[s] : _ndOutline);
-                outline.position.set(x, y + vibrato, noteZ);
+                outline.position.set(x, y + techniqueYNow, noteZ);
                 outline.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
                     outline.scale.set(
@@ -6784,7 +6831,7 @@
                 const core = pNote.get();
                 core.material = n.ac ? mAccentCore[s]
                     : ((hit || (n.f > 0 && inGhostWin)) ? mGlow[s] : mStr[s]);
-                core.position.set(x, y + vibrato, noteZ + 0.001);
+                core.position.set(x, y + techniqueYNow, noteZ + 0.001);
                 core.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
                     core.scale.set(
@@ -6839,7 +6886,12 @@
                             offsets = SINGLE_SUS_OFFSETS;
                         }
                         const slideSt = slideTrailEnd(n);
-                        const slideSegTrail = !!(slideSt && n.f > 0 && (n.sus || 0) > 1e-4);
+                        const ribbonSusTrail = !!(
+                            (slideSt && n.f > 0 && (n.sus || 0) > 1e-4)
+                            || (Number(n.bn) > 0)
+                            || n.tr
+                            || hasTechniqueVibrato
+                        );
                         const emitSusStrip = (xCenter, segLen, zCenter) => {
                             for (let i = 0; i < offsets.length; i++) {
                                 const xOff = xCenter + offsets[i];
@@ -6852,7 +6904,7 @@
                                 tr.scale.set(tw, th, segLen);
                             }
                         };
-                        if (!slideSegTrail) {
+                        if (!ribbonSusTrail) {
                             const len = sliceDur * TS;
                             const zPos = dZ(susStart - now) - len / 2;
                             emitSusStrip(x, len, zPos);
@@ -6924,7 +6976,7 @@
                 // afterward and hide H/P/T, PM X, bends, etc. Same contract as
                 // fret-row labels (issue #35, CLAUDE pitfall #7 corollary).
                 const TECH_RO = 1000;
-                let yo = y + NH * 0.8 * sLbl;
+                let yo = y + techniqueYNow + NH * 0.8 * sLbl;
                 if (n.bn > 0) {
                     const l = pLbl.get();
                     l.material = txtMat('↑' + bendText(n.bn), '#fff', true, 'technique');
@@ -6935,7 +6987,7 @@
                     if (n.ho || n.po) {
                         const arrow = pTechArrow.get();
                         const arrowScale = NH * 0.75 * sLbl;
-                        arrow.position.set(x, y + vibrato, noteZ + 1.1 * K);
+                        arrow.position.set(x, y + techniqueYNow, noteZ + 1.1 * K);
                         arrow.rotation.z = (isHarm ? Math.PI / 4 : 0);
                         // gTechArrow points UP in local space (apex at +y).
                         // HO ascends in pitch → arrow stays up (positive y-scale).
@@ -6946,7 +6998,7 @@
                     } else {
                         const chevron = pTapChevron.get();
                         const chevronScale = NH * 0.8 * sLbl; // Slightly increased for readability
-                        chevron.position.set(x, y + vibrato, noteZ + 1.1 * K);
+                        chevron.position.set(x, y + techniqueYNow, noteZ + 1.1 * K);
                         chevron.rotation.z = (isHarm ? Math.PI / 4 : 0);
                         chevron.scale.set(chevronScale, chevronScale, 1);
                         chevron.renderOrder = TECH_RO;
@@ -6968,7 +7020,7 @@
                         _ownedClonedMats.push(pmMark._pmMat);
                     }
                     pmMark.material = pmMark._pmMat;
-                    pmMark.position.set(x, y + vibrato, noteZ + 0.1 * K);
+                    pmMark.position.set(x, y + techniqueYNow, noteZ + 0.1 * K);
                     const pmScale = NH * 1.35 * LBL_MULT * _textSizeMul;
                     pmMark.scale.set(pmScale, pmScale, 1);
                     pmMark.material.opacity = hit ? 1.0 : 0.8;
@@ -6977,7 +7029,7 @@
                 if (n.hp) {
                     const l = pLbl.get();
                     l.material = txtMat('PH', '#ff0', true, 'technique');
-                    l.scale.set(NH * 2.1 * sLbl, NH * 1.2 * sLbl, 1); l.position.set(x, y - NH * 1.1 * sLbl, noteZ);
+                    l.scale.set(NH * 2.1 * sLbl, NH * 1.2 * sLbl, 1); l.position.set(x, y + techniqueYNow - NH * 1.1 * sLbl, noteZ);
                     l.renderOrder = TECH_RO;
                 }
 

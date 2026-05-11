@@ -185,6 +185,7 @@ Field names are short on purpose — these get streamed thousands of times per s
   "hp": false,    // pinch harmonic
   "pm": false,    // palm mute
   "mt": false,    // string mute
+  "vb": false,    // vibrato
   "tr": false,    // tremolo
   "ac": false,    // accent
   "tp": false     // tap

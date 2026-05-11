@@ -41,6 +41,7 @@ A real-time note highway that renders Rocksmith arrangements as they would appea
 - Slides (diagonal arrow)
 - Hammer-ons / Pull-offs / Taps (H/P/T labels)
 - Palm mutes (PM label)
+- Vibrato (animated sustain)
 - Tremolo (wavy line)
 - Accents (> marker)
 - Harmonics (diamond shape)

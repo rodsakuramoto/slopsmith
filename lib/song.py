@@ -27,6 +27,7 @@ class Note:
     harmonic_pinch: bool = False
     palm_mute: bool = False
     mute: bool = False
+    vibrato: bool = False
     tremolo: bool = False
     accent: bool = False
     link_next: bool = False
@@ -157,6 +158,7 @@ def note_to_wire(n: Note) -> dict:
         "ho": n.hammer_on, "po": n.pull_off,
         "hm": n.harmonic, "hp": n.harmonic_pinch,
         "pm": n.palm_mute, "mt": n.mute,
+        "vb": n.vibrato,
         "tr": n.tremolo, "ac": n.accent, "tp": n.tap,
     }
 
@@ -192,6 +194,7 @@ def note_from_wire(d: dict, time: float | None = None) -> Note:
         harmonic_pinch=bool(d.get("hp", False)),
         palm_mute=bool(d.get("pm", False)),
         mute=bool(d.get("mt", False)),
+        vibrato=bool(d.get("vb", d.get("vibrato", False))),
         tremolo=bool(d.get("tr", False)),
         accent=bool(d.get("ac", False)),
         tap=bool(d.get("tp", False)),
@@ -451,6 +454,7 @@ def _parse_note(n) -> Note:
         harmonic_pinch=_bool(n, "harmonicPinch"),
         palm_mute=_bool(n, "palmMute"),
         mute=_bool(n, "mute"),
+        vibrato=_bool(n, "vibrato"),
         tremolo=_bool(n, "tremolo"),
         accent=_bool(n, "accent"),
         link_next=_bool(n, "linkNext"),

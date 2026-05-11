@@ -3243,6 +3243,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                 "ho": n.hammer_on, "po": n.pull_off,
                 "hm": n.harmonic, "hp": n.harmonic_pinch,
                 "pm": n.palm_mute, "mt": n.mute,
+                "vb": n.vibrato,
                 "tr": n.tremolo, "ac": n.accent, "tp": n.tap,
             })
         # Send in chunks of 500
@@ -3264,6 +3265,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                 "ho": cn.hammer_on, "po": cn.pull_off,
                 "hm": cn.harmonic, "hp": cn.harmonic_pinch,
                 "pm": cn.palm_mute, "mt": cn.mute,
+                "vb": cn.vibrato,
                 "tr": cn.tremolo, "ac": cn.accent, "tp": cn.tap,
             } for cn in c.notes]
             chords.append({

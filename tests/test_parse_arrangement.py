@@ -45,6 +45,27 @@ def test_hand_shape_parses_arpeggio_attribute(tmp_path):
     assert arr.hand_shapes[0].arpeggio is True
 
 
+def test_parse_note_parses_vibrato_attribute(tmp_path):
+    xml = (
+        "<song>"
+        + _TUNING_AND_TEMPLATES
+        + '<levels count="1">'
+        + '<level difficulty="0">'
+        + '<notes count="1">'
+        + '<note time="1.0" string="0" fret="5" sustain="0.5" vibrato="1"/>'
+        + "</notes>"
+        + '<chords count="0"/>'
+        + '<anchors count="0"/>'
+        + '<handShapes count="0"/>'
+        + "</level>"
+        + "</levels>"
+        + "</song>"
+    )
+    arr = parse_arrangement(_write_xml(tmp_path, xml))
+    assert len(arr.notes) == 1
+    assert arr.notes[0].vibrato is True
+
+
 def _song(levels_xml: str, phrases_xml: str = "", iters_xml: str = "") -> str:
     return (
         "<song>"

@@ -35,6 +35,7 @@ class RsNote:
     harmonic_pinch: bool = False
     palm_mute: bool = False
     mute: bool = False
+    vibrato: bool = False
     accent: bool = False
     tremolo: bool = False
     tap: bool = False
@@ -298,6 +299,8 @@ def convert_track(
                         rn.accent = True
                     if eff.ghostNote:
                         rn.mute = True
+                    if getattr(eff, "vibrato", False):
+                        rn.vibrato = True
                     if eff.tremoloPicking:
                         rn.tremolo = True
 
@@ -466,6 +469,7 @@ def _build_xml(
             "harmonicPinch": "1" if n.harmonic_pinch else "0",
             "palmMute": "1" if n.palm_mute else "0",
             "mute": "1" if n.mute else "0",
+            "vibrato": "1" if n.vibrato else "0",
             "tremolo": "1" if n.tremolo else "0",
             "accent": "1" if n.accent else "0",
             "linkNext": "1" if n.link_next else "0",
@@ -487,14 +491,20 @@ def _build_xml(
                           string=str(cn.string),
                           fret=str(cn.fret),
                           sustain=f"{cn.sustain:.3f}",
-                          bend="0",
-                          hammerOn="0", pullOff="0",
-                          slideTo="-1", slideUnpitchTo="-1",
-                          harmonic="0", harmonicPinch="0",
+                          bend=f"{cn.bend:.1f}" if cn.bend else "0",
+                          hammerOn="1" if cn.hammer_on else "0",
+                          pullOff="1" if cn.pull_off else "0",
+                          slideTo=str(cn.slide_to),
+                          slideUnpitchTo=str(cn.slide_unpitch_to),
+                          harmonic="1" if cn.harmonic else "0",
+                          harmonicPinch="1" if cn.harmonic_pinch else "0",
                           palmMute="1" if cn.palm_mute else "0",
                           mute="1" if cn.mute else "0",
-                          tremolo="0", accent="0",
-                          linkNext="0", tap="0", ignore="0")
+                          vibrato="1" if cn.vibrato else "0",
+                          tremolo="1" if cn.tremolo else "0",
+                          accent="1" if cn.accent else "0",
+                          linkNext="1" if cn.link_next else "0",
+                          tap="1" if cn.tap else "0", ignore="0")
 
     # Anchors
     anchors_el = ET.SubElement(level, "anchors", count=str(len(anchors)))
