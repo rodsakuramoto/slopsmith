@@ -2504,6 +2504,39 @@
             return mat;
         }
 
+        function muteXMat(fillCol, strokeCol) {
+            const k = 'technique|muteX|v1|' + String(fillCol) + '|' + String(strokeCol);
+            if (txtCache[k]) return txtCache[k];
+
+            const h = 256;
+            const c = document.createElement('canvas');
+            c.width = h; c.height = h;
+            const x = c.getContext('2d');
+            const str = 'X';
+            const font = '900 180px "Arial Black", "Helvetica Neue", Arial, sans-serif';
+
+            x.clearRect(0, 0, h, h);
+            x.font = font;
+            x.textAlign = 'center';
+            x.textBaseline = 'middle';
+            x.lineJoin = 'round';
+            x.miterLimit = 2;
+            x.lineWidth = 18;
+            x.strokeStyle = strokeCol;
+            x.strokeText(str, h / 2, h / 2);
+            x.fillStyle = fillCol;
+            x.fillText(str, h / 2, h / 2);
+
+            const mat = new T.SpriteMaterial({
+                map: new T.CanvasTexture(c),
+                transparent: true,
+                depthTest: false,
+                depthWrite: false,
+            });
+            txtCache[k] = mat;
+            return mat;
+        }
+
         /** MeshBasicMaterial sharing txtMat canvas texture — sits in board plane (not billboard). */
         function _meshMatForGhostFretDigit(spriteMat) {
             let mb = spriteMat.userData.h3dGhostFretMeshMat;
@@ -7204,21 +7237,19 @@
                     l.scale.set(NH * 3.0 * sLbl, NH * 1.2 * sLbl, 1); l.position.set(x, yo, noteZ);
                     l.renderOrder = TECH_RO;
                 }
-                if (n.pm) {
-                    // Palm mute: "X" overlay on the note body — bumped
-                    // by LBL_MULT but not by distFactor since it's
-                    // anchored to the body not floating above.
-                    const pmMark = pLbl.get();
-                    if (!pmMark._pmMat) {
-                        pmMark._pmMat = txtMat('X', '#ffffff', false, 'technique').clone();
-                        _ownedClonedMats.push(pmMark._pmMat);
-                    }
-                    pmMark.material = pmMark._pmMat;
-                    pmMark.position.set(x, y + techniqueYNow, noteZ + 0.1 * K);
-                    const pmScale = NH * 1.35 * LBL_MULT * _textSizeMul;
-                    pmMark.scale.set(pmScale, pmScale, 1);
-                    pmMark.material.opacity = hit ? 1.0 : 0.8;
-                    pmMark.renderOrder = TECH_RO;
+                if (n.pm || n.mt) {
+                    // Muted notes: on-body X overlay. Palm mute = black X with
+                    // white border; fret-hand mute = white X with black border.
+                    const muteMark = pLbl.get();
+                    const fretHandMute = !!n.mt;
+                    muteMark.material = fretHandMute
+                        ? muteXMat('#ffffff', '#000000')
+                        : muteXMat('#000000', '#ffffff');
+                    muteMark.position.set(x, y + techniqueYNow, noteZ + 0.1 * K);
+                    const muteScale = NH * 1.35 * LBL_MULT * _textSizeMul;
+                    muteMark.scale.set(muteScale, muteScale, 1);
+                    muteMark.material.opacity = hit ? 1.0 : 0.8;
+                    muteMark.renderOrder = TECH_RO;
                 }
                 if (n.hm) {
                     const nhMark = pLbl.get();
