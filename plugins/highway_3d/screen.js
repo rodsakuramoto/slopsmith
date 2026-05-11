@@ -7204,6 +7204,9 @@
                 // fret-row labels (issue #35, CLAUDE pitfall #7 corollary).
                 const TECH_RO = 1000;
                 let yo = y + techniqueYNow + NH * 0.8 * sLbl;
+                const specialMarkerScale = n.f === 0
+                    ? NH * 1.5 * sLbl * openWScale
+                    : NH * 1.5 * sLbl;
                 if (n.bn > 0) {
                     const l = pLbl.get();
                     l.material = txtMat('↑' + bendText(n.bn), '#fff', true, 'technique');
@@ -7246,8 +7249,7 @@
                         ? muteXMat('#ffffff', '#000000')
                         : muteXMat('#000000', '#ffffff');
                     muteMark.position.set(x, y + techniqueYNow, noteZ + 0.1 * K);
-                    const muteScale = NH * 1.35 * LBL_MULT * _textSizeMul;
-                    muteMark.scale.set(muteScale, muteScale, 1);
+                    muteMark.scale.set(specialMarkerScale, specialMarkerScale, 1);
                     muteMark.material.opacity = hit ? 1.0 : 0.8;
                     muteMark.renderOrder = TECH_RO;
                 }
@@ -7255,10 +7257,7 @@
                     const nhMark = pLbl.get();
                     nhMark.material = naturalHarmonicMat();
                     nhMark.position.set(x, y + techniqueYNow, noteZ + 0.22 * K);
-                    const nhScale = n.f === 0
-                        ? NH * 1.5 * sLbl * openWScale
-                        : NH * 1.5 * sLbl;
-                    nhMark.scale.set(nhScale, nhScale, 1);
+                    nhMark.scale.set(specialMarkerScale, specialMarkerScale, 1);
                     nhMark.material.opacity = hit ? 1.0 : 0.95;
                     nhMark.renderOrder = TECH_RO + 1;
                 }
@@ -7266,10 +7265,7 @@
                     const phMark = pLbl.get();
                     phMark.material = pinchHarmonicMat(activePalette[s]);
                     phMark.position.set(x, y + techniqueYNow, noteZ + 0.22 * K);
-                    const phScale = n.f === 0
-                        ? NH * 1.5 * sLbl * openWScale
-                        : NH * 1.5 * sLbl;
-                    phMark.scale.set(phScale, phScale, 1);
+                    phMark.scale.set(specialMarkerScale, specialMarkerScale, 1);
                     phMark.material.opacity = hit ? 1.0 : 0.95;
                     phMark.renderOrder = TECH_RO + 1;
                 }
