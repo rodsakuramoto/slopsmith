@@ -4477,20 +4477,46 @@
             return lockActive;
         }
 
+        /** Tolerate RS/sloppak boolean-ish ``true`` / ``1`` forms. */
+        function truthyChartFlag(v) {
+            if (v === true || v === 1) return true;
+            if (v === '1') return true;
+            return typeof v === 'string' && v.toLowerCase() === 'true';
+        }
+
         /** RS / sloppak `hd` (highDensity); tolerate occasional string forms. */
         function chordWireHighDensity(ch) {
-            const h = ch && ch.hd;
-            if (h === true || h === 1) return true;
-            if (h === '1') return true;
-            if (typeof h === 'string' && h.toLowerCase() === 'true') return true;
-            return false;
+            return truthyChartFlag(ch && ch.hd);
         }
 
         /**
-         * Rocksmith ``<handShape>``: optional ``arpeggio`` / ``arp``; also use
-         * shape window + staggered note picks when the chart omits flags.
+         * Arpeggio styling is driven by authored metadata, not by post-hoc
+         * note-stream inference. Prefer explicit hand-shape flags and fall back
+         * to template markers when present.
          */
-        function chordHandShapeArpeggioHint(ch, hss) {
+        function chordTemplateMarkedArpeggio(cid, chordTemplates) {
+            if (cid == null || !chordTemplates) return false;
+            const tmpl = chordTemplates[cid] ?? chordTemplates[Number(cid)];
+            if (!tmpl) return false;
+            if (truthyChartFlag(tmpl.arp) || truthyChartFlag(tmpl.arpeggio)) return true;
+            const displayName = typeof tmpl.displayName === 'string' ? tmpl.displayName.toLowerCase() : '';
+            if (displayName.includes('-arp')) return true;
+            const name = typeof tmpl.name === 'string' ? tmpl.name.toLowerCase() : '';
+            return name.endsWith('(arp)') || name.includes(' arpeggio');
+        }
+
+        function handShapeMarkedArpeggio(hs, chordTemplates) {
+            if (!hs) return false;
+            if (truthyChartFlag(hs.arp) || truthyChartFlag(hs.arpeggio)) return true;
+            return chordTemplateMarkedArpeggio(hsChordIdNorm(hs), chordTemplates);
+        }
+
+        /**
+         * Matching hand-shape metadata for a chord onset. ``explicit`` follows
+         * authored arpeggio markers only; note inference is handled separately
+         * by the callers that still need it for non-visual behavior.
+         */
+        function chordHandShapeArpeggioHint(ch, hss, chordTemplates) {
             if (!hss || hss.length === 0) {
                 return { explicit: false, covered: false, hs: null };
             }
@@ -4504,7 +4530,7 @@
                 if (t + 1e-4 < tLo || t > tHi + 1e-4) continue;
                 const hsCid = hsChordIdNorm(hs);
                 if (hsCid !== cid && Number(hsCid) !== Number(cid)) continue;
-                const explicit = hs.arp === true || hs.arp === 1 || hs.arpeggio === true;
+                const explicit = handShapeMarkedArpeggio(hs, chordTemplates);
                 return { explicit, covered: true, hs };
             }
             return { explicit: false, covered: false, hs: null };
@@ -4577,7 +4603,7 @@
                 }
                 const notes = chordNotesFromTemplate(cid, chordTemplates);
                 if (notes.length === 0) continue;
-                const explicitArp = hs.arp === true || hs.arp === 1 || hs.arpeggio === true;
+                const explicitArp = handShapeMarkedArpeggio(hs, chordTemplates);
                 synth.push({
                     t: st,
                     id: cid,
@@ -4787,31 +4813,8 @@
             return null;
         }
 
-        function handShapeIsArpeggioForLaneRail(hs, handShapes, chordTemplates, notesArr, chords) {
-            if (hs.arp === true || hs.arp === 1 || hs.arpeggio === true) return true;
-            const cid = hsChordIdNorm(hs);
-            if (cid == null || !chords || chords.length === 0 || !handShapes) return false;
-            const hsSpanOk = handShapeChartSpanSec(hs) >= ARP_INFER_MIN_HAND_SHAPE_SPAN_S;
-            const tHsLo = hsStart(hs) - 1e-4;
-            const tHsHi = hsEnd(hs) + 1e-4;
-            if (Number.isNaN(tHsLo) || Number.isNaN(tHsHi)) return false;
-            for (let j = 0; j < chords.length; j++) {
-                const ch = chords[j];
-                if (ch.id !== cid && Number(ch.id) !== Number(cid)) continue;
-                if (ch.t < tHsLo || ch.t > tHsHi) continue;
-                if (!ch.notes) continue;
-                const chordNotes = filterValidNotes(ch.notes);
-                if (chordNotes.length === 0) continue;
-                const hsHint = chordHandShapeArpeggioHint(ch, handShapes);
-                const chShape = mergeChordShape(ch, chordNotes, chordTemplates);
-                const inferredFromNotes = hsSpanOk && !ch.h3dSynth && inferArpeggioFromNotePattern(
-                    ch, chShape, notesArr,
-                    { tLo: ch.t - ARP_FRAME_ONSET_PAD_S, tHi: ch.t + ARP_FRAME_ONSET_CLUSTER_S });
-                if ((inferredFromNotes && (hsHint.explicit || hsHint.covered))) {
-                    return true;
-                }
-            }
-            return false;
+        function handShapeIsArpeggioForLaneRail(hs, chordTemplates) {
+            return handShapeMarkedArpeggio(hs, chordTemplates);
         }
 
         /**
@@ -4863,20 +4866,11 @@
             return { shapeLo, shapeHi };
         }
 
-        /**
-         * ``ghostInferFlags``: per-hand-shape note-stream arpeggio inference
-         * (``fillArpeggioGhostInferFlags``) — same wide window as board ghosts.
-         * OR-ing it restores purple dynamic-highway rails when authored rows use
-         * ``h3dSynth`` or the chord-loop path misses staggered picks.
-         */
-        function fillLaneRailHandShapeFlags(
-            handShapes, chordTemplates, notesArr, chords, outFlags, ghostInferFlags,
-        ) {
+        /** Cache the authored arpeggio marker per hand shape. */
+        function fillLaneRailHandShapeFlags(handShapes, chordTemplates, outFlags) {
             const nHs = handShapes.length;
             for (let i = 0; i < nHs; i++) {
-                outFlags[i] = handShapeIsArpeggioForLaneRail(
-                    handShapes[i], handShapes, chordTemplates, notesArr, chords,
-                ) || !!(ghostInferFlags && ghostInferFlags[i]);
+                outFlags[i] = handShapeIsArpeggioForLaneRail(handShapes[i], chordTemplates);
             }
         }
 
@@ -5055,12 +5049,11 @@
                 arpGhostHsInfer = _arpGhostHsInferScratch;
             }
 
-            /** Arpeggio lane purple rails — per-frame inferred/bounds caches (avoid 96 × hs × infer). */
+            /** Arpeggio lane purple rails — authored-marker cache + bounds cache. */
             let laneRailArpHsFlags = null;
             let laneRailBoundLo = null;
             let laneRailBoundHi = null;
             const hsLaneRail = bundle.handShapes;
-            const chordArrForRails = chords ?? [];
             const notesArrForRails = notes || [];
             if (hsLaneRail && hsLaneRail.length) {
                 const nHsL = hsLaneRail.length;
@@ -5069,17 +5062,10 @@
                     _arpRailBoundLoScratch.push(0);
                     _arpRailBoundHiScratch.push(0);
                 }
-                fillLaneRailHandShapeFlags(
-                    hsLaneRail,
-                    bundle.chordTemplates,
-                    notesArrForRails,
-                    chordArrForRails,
-                    _arpLaneRailHsScratch,
-                    arpGhostHsInfer,
-                );
+                fillLaneRailHandShapeFlags(hsLaneRail, bundle.chordTemplates, _arpLaneRailHsScratch);
                 fillArpeggioRailShapeBoundsCaches(
                     hsLaneRail,
-                    chordArrForRails,
+                    chords ?? [],
                     bundle.chordTemplates,
                     notesArrForRails,
                     _arpLaneRailHsScratch,
@@ -5674,7 +5660,7 @@
                         ? chordOpenBoxW
                         : openNoteLaneBoxW(ch.t);
 
-                    const hsHintFrame = chordHandShapeArpeggioHint(ch, bundle.handShapes);
+                    const hsHintFrame = chordHandShapeArpeggioHint(ch, bundle.handShapes, bundle.chordTemplates);
                     const hsTimeWinFrame = hsHintFrame.hs
                         ? { tLo: hsStart(hsHintFrame.hs) - 0.06, tHi: hsEnd(hsHintFrame.hs) + 0.06 }
                         : null;
@@ -5685,13 +5671,13 @@
                     const deferChordGems = inferredArpPattern
                         || (hsHintFrame.explicit && hsHintFrame.covered);
                     /**
-                     * Lavender chord frame + purple highway rails: ``<handShape>`` arp flags
-                     * or note-stream inference only. RS ``highDensity`` marks gallops /
-                     * repeated strums on the same voicing (e.g. Frantic ~2:46) — not arpeggio;
-                     * keep ``hd`` for sustain-ribbon width via ``chordSusTrailMatchArpFrame``.
+                     * Lavender chord frame + purple highway rails: authored
+                     * arpeggio metadata only. RS ``highDensity`` marks gallops /
+                     * repeated strums on the same voicing (e.g. Frantic ~2:46) —
+                     * not arpeggio; keep ``hd`` for sustain-ribbon width via
+                     * ``chordSusTrailMatchArpFrame``.
                      */
-                    const chordHighwayLavenderArpVisual = hsHintFrame.explicit
-                        || (hsHintFrame.covered && inferredArpPattern);
+                    const chordHighwayLavenderArpVisual = hsHintFrame.explicit;
                     const chordSusTrailMatchArpFrame = chordWireHighDensity(ch)
                         || chordHighwayLavenderArpVisual;
 
@@ -5824,9 +5810,9 @@
                         // not bar thickness vs first chord — see CHORD_FRAME_RIM_* tuning.
                         let ft = Math.max(CHORD_FRAME_RIM_MIN * K, fullChordBoxH * CHORD_FRAME_RIM_FRAC_H);
                         if (chordAccent) ft *= 1.22;
-                        // Lavender frame: ``chordHighwayLavenderArpVisual`` only (explicit
-                        // ``<handShape>`` arp / inferred stagger). RS ``highDensity`` is kept
-                        // out — it tags gallops & repeated strums (Frantic ~2:46), not arpeggio.
+                        // Lavender frame: authored arpeggio marker only.
+                        // RS ``highDensity`` is kept out — it tags gallops & repeated
+                        // strums (Frantic ~2:46), not arpeggio.
                         const isArpeggioFrame = !isRepeat && chordHighwayLavenderArpVisual;
                         const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
                         const rimHex = isArpeggioFrame ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
