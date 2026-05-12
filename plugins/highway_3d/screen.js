@@ -1951,7 +1951,7 @@
         const _laneSegTHi = [];
         const _laneSegArp = [];
         let _laneSegLen = 0;
-        let pChordBox, pChordFrameFill, pChordLbl, pBarreLine, pArpBracket;
+        let pChordBox, pChordFrameFill, pChordLbl, pBarreLine;
         let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron, pAccentHalo;
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
@@ -3840,14 +3840,6 @@
             // recycled / future-allocated barre mesh picks up the change.
             mBarre = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.9 * glowMul, transparent: true, depthWrite: false });
             pBarreLine  = pool(noteG, () => new T.Mesh(new T.BoxGeometry(1, 1, 1), mBarre));
-            // Arpeggio corner brackets (per-string L-glyph meshes).
-            pArpBracket = pool(noteG, () => new T.Mesh(
-                new T.BoxGeometry(1, 1, 1),
-                new T.MeshBasicMaterial({
-                    transparent: true, opacity: 1, depthWrite: false, fog: false,
-                    polygonOffset: true, polygonOffsetFactor: -0.4, polygonOffsetUnits: 1,
-                }),
-            ));
 
             // Per-note fret number below note with connector line
             pNoteFretLabel = pool(lblG, () => new T.Sprite(txtMat('0', '#ffffff', false, 'noteFret').clone()));
@@ -5360,14 +5352,6 @@
             return ftSide / (0.15 * K);
         }
 
-        /**
-         * Arpeggio corner L-brackets — disabled:
-         * they read as unwanted arrow-like marks on the frame.
-         */
-        function placeArpeggioBracketsForShape(_shape, _zBoard, _cxBox, _fullWidth, _fadeMul) {
-            return;
-        }
-
         /* ── Per-frame rendering ─────────────────────────────────────────── */
         function update(bundle) {
             // Materialize the text-size multiplier from the user's slider.
@@ -5390,7 +5374,6 @@
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
             if (pGhostFretLbl) pGhostFretLbl.reset();
             pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset();
-            if (pArpBracket) pArpBracket.reset();
             pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
             pFretColMarker.reset();
             _ndLabels = [];
@@ -6198,9 +6181,11 @@
                         fill.position.set(cx, cY, z - 0.004 * K);
                         fill.scale.set(innerW, innerH, 1);
                         fill.material.opacity = fade * repDim * chordTailMul;
+                        // Swapping `map` between two non-null gradient textures
+                        // doesn't change shader-defining state, so no needsUpdate
+                        // — that flag would otherwise force a recompile per frame.
                         fill.material.map = isArpeggioFrame ? chordFrameGradTexArp : chordFrameGradTex;
                         fill.material.color.setRGB(1, 1, 1);
-                        fill.material.needsUpdate = true;
 
                         drawFrameBox(cx, yBot + ft * 0.5, width, ft, 12);
                         const withTopFrame = !isRepeat;
@@ -7519,12 +7504,15 @@
                         if (instMat) {
                             try { instMat.dispose(); } catch (_) { /* idempotent */ }
                         }
+                        // Set shader-defining state (transparent) once at clone
+                        // time with needsUpdate; per-frame opacity updates after
+                        // this don't need the recompile flag.
                         instMat = baseGhostMat.clone();
+                        instMat.transparent = true;
+                        instMat.needsUpdate = true;
                         lb.userData.h3dGhostFretLblInstMat = instMat;
                     }
                     instMat.opacity = ghostFretLblAlpha;
-                    instMat.transparent = true;
-                    instMat.needsUpdate = true;
                     lb.material = instMat;
                     const ghostOuterL = Math.max(NW * 1.1, NH * 1.1);
                     // Scale by the *displayed* fret so chord-template ghosts
@@ -7846,7 +7834,7 @@
             _renderScale = 1;
             mBeatM = mBeatQ = null;
             pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
-            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pArpBracket = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = pAccentHalo = null;
+            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = pAccentHalo = null;
             mLaneOdd = mLaneEven = mLaneDivider = mLaneDividerArp = gLanePlane = gGhostFretPlane = null;
             chordFrameGradTex = chordFrameGradTexArp = null;
             pFretColMarker = null;

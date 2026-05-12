@@ -2471,8 +2471,26 @@ function createHighway() {
                                                         // track is loaded so song-to-song switches keep the same
                                                         // user-selected level instead of the engine default.
                                                         try {
-                                                            if (typeof window.slopsmith?.audio?.applySongVolume === 'function') {
-                                                                await window.slopsmith.audio.applySongVolume();
+                                                            const apply = window.slopsmith?.audio?.applySongVolume;
+                                                            if (typeof apply === 'function') {
+                                                                await apply();
+                                                            } else {
+                                                                // audio-mixer.js registers applySongVolume but is
+                                                                // loaded after highway.js in index.html. In JUCE
+                                                                // mode the HTML5 <audio> element is cleared, so
+                                                                // there is no later `loadedmetadata` event to
+                                                                // correct an unset gain. Read the persisted volume
+                                                                // and call juceApi.setGain directly so the backing
+                                                                // gain matches the user-selected level even when
+                                                                // the mixer module hasn't registered yet.
+                                                                let storedPct = 80;
+                                                                try {
+                                                                    const s = parseFloat(localStorage.getItem('volume'));
+                                                                    if (Number.isFinite(s)) storedPct = Math.min(100, Math.max(0, s));
+                                                                } catch (_) { /* localStorage may be blocked */ }
+                                                                if (typeof juceApi.setGain === 'function') {
+                                                                    try { await juceApi.setGain('backing', storedPct / 100); } catch (_) { /* IPC unavailable */ }
+                                                                }
                                                             }
                                                         } catch (gainErr) {
                                                             console.warn('[highway] JUCE setGain backing failed', gainErr);
