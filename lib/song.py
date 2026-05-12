@@ -197,7 +197,12 @@ def hand_shape_to_wire(h: HandShape) -> dict:
 def chord_template_to_wire(ct: ChordTemplate) -> dict:
     return {
         "name": ct.name,
-        "displayName": ct.display_name,
+        # ChordTemplate.display_name defaults to "" on the dataclass, but
+        # the spec defaults displayName to name. Fall back here so
+        # templates that don't set display_name still serialize with a
+        # usable label (matches `ct.get("displayName", name)` on the
+        # parsing side, both XML and wire).
+        "displayName": ct.display_name or ct.name,
         "arp": ct.arpeggio,
         "fingers": list(ct.fingers),
         "frets": list(ct.frets),

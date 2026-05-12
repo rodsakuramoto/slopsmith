@@ -159,8 +159,13 @@ def test_arrangement_full_round_trip():
             HandShape(chord_id=1, start_time=2.0, end_time=2.5),
         ],
         chord_templates=[
+            # Spec defaults displayName to name on the wire, so the round-trip
+            # surfaces an explicit display_name="Em" on the deserialised side
+            # even when none was set on the source dataclass. Make it explicit
+            # here so the strict-equality assertion captures the contract.
             ChordTemplate(
                 name="Em",
+                display_name="Em",
                 fingers=[-1, -1, 2, 3, -1, -1],
                 frets=[0, 2, 2, 0, 0, 0],
             ),
