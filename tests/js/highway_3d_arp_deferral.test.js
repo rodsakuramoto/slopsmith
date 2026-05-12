@@ -40,7 +40,7 @@ test('noteStreamCoversArpShape is computed lazily (called, not eagerly bound)', 
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
     assert.match(
         src,
-        /const\s+noteStreamCoversArpShape\s*=\s*\(\s*\)\s*=>/,
+        /const\s+noteStreamCoversArpShape\s*=\s*(?:\(\s*\)\s*=>|function(?:\s+\w+)?\s*\(\s*\))/,
         'noteStreamCoversArpShape must be an arrow/function so the scan is lazy',
     );
     assert.doesNotMatch(
