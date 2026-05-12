@@ -7527,7 +7527,10 @@
                     instMat.needsUpdate = true;
                     lb.material = instMat;
                     const ghostOuterL = Math.max(NW * 1.1, NH * 1.1);
-                    const ghostLblS = 0.7 * ghostOuterL * _textSizeMul * fretLabelScaleForFret(n.f);
+                    // Scale by the *displayed* fret so chord-template ghosts
+                    // (which may show a different fret than n.f) aren't sized
+                    // for the wrong column.
+                    const ghostLblS = 0.7 * ghostOuterL * _textSizeMul * fretLabelScaleForFret(ghostFretDisplay);
                     lb.scale.set(ghostLblS, ghostLblS, 1);
                     // Leaf mesh under stationary noteG — no need to recurse children
                     // (true forced a full subgraph walk each ghost label).

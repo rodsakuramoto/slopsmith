@@ -76,7 +76,7 @@ class HandShape:
     chord_id: int
     start_time: float
     end_time: float
-    """EOF / some CDLC emit ``arpeggio`` on ``<handShape>`` (RS14+)."""
+    # EOF / some CDLC emit `arpeggio` on `<handShape>` (RS14+).
     arpeggio: bool = False
 
 
