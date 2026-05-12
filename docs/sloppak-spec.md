@@ -139,7 +139,7 @@ If present, points at a JSON file containing a flat list of syllable objects:
 
 ## 3. Arrangement JSON — the wire format
 
-Arrangement JSON files use the **wire format** produced by `arrangement_to_wire()` — the on-disk representation of a complete arrangement. Slopsmith's `/ws/highway/{filename}` endpoint transports similar data as a sequence of typed messages (`notes`, `chords`, `anchors`, `chord_templates`, `phrases`, …) rather than as one identical top-level JSON object, and individual frames may drop fields the on-disk format keeps (e.g. WS `chord_templates` currently omits `fingers`). In practice, the WebSocket stream reuses the same per-object field names where applicable, but it should not be treated as a byte-for-byte match for `arrangements/*.json`.
+Arrangement JSON files use the **wire format** produced by `arrangement_to_wire()` — the on-disk representation of a complete arrangement. Slopsmith's `/ws/highway/{filename}` endpoint transports similar data as a sequence of typed messages (`notes`, `chords`, `anchors`, `chord_templates`, `phrases`, …) rather than as one identical top-level JSON object. In practice, the WebSocket stream reuses the same per-object field names where applicable, but it should not be treated as a byte-for-byte match for `arrangements/*.json`.
 
 The authoritative serializer/deserializer is in [lib/song.py](../lib/song.py):
 
@@ -185,6 +185,7 @@ Field names are short on purpose — these get streamed thousands of times per s
   "hp": false,    // pinch harmonic
   "pm": false,    // palm mute
   "mt": false,    // string mute
+  "vb": false,    // vibrato
   "tr": false,    // tremolo
   "ac": false,    // accent
   "tp": false     // tap
@@ -224,8 +225,13 @@ Where the fretting hand sits. Drives the highway zoom box.
 Spans during which a chord shape is held:
 
 ```json
-{"chord_id": 12, "start_time": 30.0, "end_time": 31.5}
+{"chord_id": 12, "start_time": 30.0, "end_time": 31.5, "arp": false}
 ```
+
+- `chord_id` (`int`, default `0`) — index into `templates[]`; identifies which chord template the span is holding.
+- `start_time` (`float`, default `0.0`) — start of the span in seconds.
+- `end_time` (`float`, default `0.0`) — end of the span in seconds.
+- `arp` (`bool`, default `false`, allowed values `true`/`false`) — whether this hand shape should be treated as an arpeggio span rather than a fully-strummed chord hold.
 
 ### 3.6. Chord templates
 
@@ -234,12 +240,18 @@ Named shapes referenced by `chord.id` and `handshape.chord_id`:
 ```json
 {
   "name": "Em7",
+  "displayName": "Em7",
+  "arp": false,
   "fingers": [-1,  2,  1, -1, -1, -1],
   "frets":   [ 0,  2,  2,  0,  0,  0]
 }
 ```
 
-Both arrays are 6-long, lowest string first. `-1` = unused string. `frets[s] = 0` is open string.
+- `name` (`string`, default `""`) — canonical template name used by the parser / authoring data.
+- `displayName` (`string`, default `name`) — label shown in the UI; Rocksmith XML may use this for display-specific variants such as `-arp`.
+- `arp` (`bool`, default `false`, allowed values `true`/`false`) — whether the template is flagged as arpeggiated. Parsed from explicit XML attributes (`arpeggio` / `arp`, any common casing) or inferred from `displayName` markers such as `-arp`.
+- `fingers` (`int[6]`, default `[-1, -1, -1, -1, -1, -1]`) — fretting-hand finger numbers, lowest string first. `-1` = unused string, `0` = open string / no fretting finger, `1..4` = index/middle/ring/pinky.
+- `frets` (`int[6]`, default `[-1, -1, -1, -1, -1, -1]`) — fret numbers, lowest string first. `-1` = unused string, `0` = open string, positive values = fretted note.
 
 ### 3.7. Phrases (optional, multi-difficulty data)
 

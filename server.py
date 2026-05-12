@@ -21,7 +21,16 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from psarc import unpack_psarc, read_psarc_entries
-from song import load_song, phrase_to_wire, arrangement_string_count
+from song import (
+    anchor_to_wire,
+    arrangement_string_count,
+    chord_template_to_wire,
+    chord_to_wire,
+    hand_shape_to_wire,
+    load_song,
+    note_to_wire,
+    phrase_to_wire,
+)
 from audio import find_wem_files, convert_wem
 from tunings import tuning_name
 import sloppak as sloppak_mod
@@ -3399,7 +3408,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         await websocket.send_json({"type": "sections", "data": sections})
 
         # Send anchors
-        anchors = [{"time": a.time, "fret": a.fret, "width": a.width} for a in arr.anchors]
+        anchors = [anchor_to_wire(a) for a in arr.anchors]
         await websocket.send_json({"type": "anchors", "data": anchors})
 
         # Send chord templates. Include `fingers` alongside `name` /
@@ -3409,13 +3418,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         # per-string: -1 = unused, 0 = open string, n > 0 = finger
         # number. RS XML sources populate real values; GP imports
         # currently emit all -1 (no finger data available pre-import).
-        templates = []
-        for ct in arr.chord_templates:
-            templates.append({
-                "name": ct.name,
-                "fingers": ct.fingers,
-                "frets": ct.frets,
-            })
+        templates = [chord_template_to_wire(ct) for ct in arr.chord_templates]
         await websocket.send_json({"type": "chord_templates", "data": templates})
 
         # Send lyrics if available
@@ -3551,18 +3554,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                 pass
 
         # Send notes in chunks
-        notes = []
-        for n in arr.notes:
-            notes.append({
-                "t": round(n.time, 3), "s": n.string, "f": n.fret,
-                "sus": round(n.sustain, 3),
-                "sl": n.slide_to, "slu": n.slide_unpitch_to,
-                "bn": round(n.bend, 1) if n.bend else 0,
-                "ho": n.hammer_on, "po": n.pull_off,
-                "hm": n.harmonic, "hp": n.harmonic_pinch,
-                "pm": n.palm_mute, "mt": n.mute,
-                "tr": n.tremolo, "ac": n.accent, "tp": n.tap,
-            })
+        notes = [note_to_wire(n) for n in arr.notes]
         # Send in chunks of 500
         for i in range(0, len(notes), 500):
             await websocket.send_json({
@@ -3572,29 +3564,20 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
             })
 
         # Send chords
-        chords = []
-        for c in arr.chords:
-            chord_notes = [{
-                "s": cn.string, "f": cn.fret,
-                "sus": round(cn.sustain, 3),
-                "bn": round(cn.bend, 1) if cn.bend else 0,
-                "sl": cn.slide_to, "slu": cn.slide_unpitch_to,
-                "ho": cn.hammer_on, "po": cn.pull_off,
-                "hm": cn.harmonic, "hp": cn.harmonic_pinch,
-                "pm": cn.palm_mute, "mt": cn.mute,
-                "tr": cn.tremolo, "ac": cn.accent, "tp": cn.tap,
-            } for cn in c.notes]
-            chords.append({
-                "t": round(c.time, 3),
-                "id": c.chord_id,
-                "hd": c.high_density,
-                "notes": chord_notes,
-            })
+        chords = [chord_to_wire(c) for c in arr.chords]
         for i in range(0, len(chords), 500):
             await websocket.send_json({
                 "type": "chords",
                 "data": chords[i:i+500],
                 "total": len(chords),
+            })
+
+        hand_shapes_out = [hand_shape_to_wire(h) for h in arr.hand_shapes]
+        for i in range(0, len(hand_shapes_out), 500):
+            await websocket.send_json({
+                "type": "handshapes",
+                "data": hand_shapes_out[i:i+500],
+                "total": len(hand_shapes_out),
             })
 
         # Per-phrase difficulty data for the master-difficulty slider

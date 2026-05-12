@@ -27,6 +27,7 @@ class Note:
     harmonic_pinch: bool = False
     palm_mute: bool = False
     mute: bool = False
+    vibrato: bool = False
     tremolo: bool = False
     accent: bool = False
     link_next: bool = False
@@ -38,6 +39,8 @@ class ChordTemplate:
     name: str
     fingers: list[int]
     frets: list[int]
+    display_name: str = ""
+    arpeggio: bool = False
 
 
 @dataclass
@@ -73,6 +76,8 @@ class HandShape:
     chord_id: int
     start_time: float
     end_time: float
+    # EOF / some CDLC emit `arpeggio` on `<handShape>` (RS14+).
+    arpeggio: bool = False
 
 
 @dataclass
@@ -155,6 +160,7 @@ def note_to_wire(n: Note) -> dict:
         "ho": n.hammer_on, "po": n.pull_off,
         "hm": n.harmonic, "hp": n.harmonic_pinch,
         "pm": n.palm_mute, "mt": n.mute,
+        "vb": n.vibrato,
         "tr": n.tremolo, "ac": n.accent, "tp": n.tap,
     }
 
@@ -175,6 +181,34 @@ def chord_to_wire(c: Chord) -> dict:
     }
 
 
+def anchor_to_wire(a: Anchor) -> dict:
+    return {"time": a.time, "fret": a.fret, "width": a.width}
+
+
+def hand_shape_to_wire(h: HandShape) -> dict:
+    return {
+        "chord_id": h.chord_id,
+        "start_time": h.start_time,
+        "end_time": h.end_time,
+        "arp": h.arpeggio,
+    }
+
+
+def chord_template_to_wire(ct: ChordTemplate) -> dict:
+    return {
+        "name": ct.name,
+        # ChordTemplate.display_name defaults to "" on the dataclass, but
+        # the spec defaults displayName to name. Fall back here so
+        # templates that don't set display_name still serialize with a
+        # usable label (matches `ct.get("displayName", name)` on the
+        # parsing side, both XML and wire).
+        "displayName": ct.display_name or ct.name,
+        "arp": ct.arpeggio,
+        "fingers": list(ct.fingers),
+        "frets": list(ct.frets),
+    }
+
+
 def note_from_wire(d: dict, time: float | None = None) -> Note:
     return Note(
         time=float(d.get("t", time if time is not None else 0.0)),
@@ -190,6 +224,7 @@ def note_from_wire(d: dict, time: float | None = None) -> Note:
         harmonic_pinch=bool(d.get("hp", False)),
         palm_mute=bool(d.get("pm", False)),
         mute=bool(d.get("mt", False)),
+        vibrato=bool(d.get("vb", d.get("vibrato", False))),
         tremolo=bool(d.get("tr", False)),
         accent=bool(d.get("ac", False)),
         tap=bool(d.get("tp", False)),
@@ -211,11 +246,8 @@ def phrase_level_to_wire(pl: PhraseLevel) -> dict:
         "difficulty": pl.difficulty,
         "notes": [note_to_wire(n) for n in pl.notes],
         "chords": [chord_to_wire(c) for c in pl.chords],
-        "anchors": [{"time": a.time, "fret": a.fret, "width": a.width} for a in pl.anchors],
-        "handshapes": [
-            {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time}
-            for h in pl.hand_shapes
-        ],
+        "anchors": [anchor_to_wire(a) for a in pl.anchors],
+        "handshapes": [hand_shape_to_wire(h) for h in pl.hand_shapes],
     }
 
 
@@ -241,7 +273,8 @@ def phrase_level_from_wire(d: dict) -> PhraseLevel:
         hand_shapes=[
             HandShape(chord_id=int(h.get("chord_id", 0)),
                       start_time=float(h.get("start_time", 0)),
-                      end_time=float(h.get("end_time", 0)))
+                      end_time=float(h.get("end_time", 0)),
+                      arpeggio=bool(h.get("arp", False)))
             for h in d.get("handshapes", [])
         ],
     )
@@ -339,15 +372,9 @@ def arrangement_to_wire(arr: Arrangement) -> dict:
         "capo": arr.capo,
         "notes": [note_to_wire(n) for n in arr.notes],
         "chords": [chord_to_wire(c) for c in arr.chords],
-        "anchors": [{"time": a.time, "fret": a.fret, "width": a.width} for a in arr.anchors],
-        "handshapes": [
-            {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time}
-            for h in arr.hand_shapes
-        ],
-        "templates": [
-            {"name": ct.name, "fingers": list(ct.fingers), "frets": list(ct.frets)}
-            for ct in arr.chord_templates
-        ],
+        "anchors": [anchor_to_wire(a) for a in arr.anchors],
+        "handshapes": [hand_shape_to_wire(h) for h in arr.hand_shapes],
+        "templates": [chord_template_to_wire(ct) for ct in arr.chord_templates],
     }
     # phrases is additive — only include the key when the source had
     # multi-level data. Treat an empty list the same as None ("slider
@@ -376,11 +403,14 @@ def arrangement_from_wire(d: dict) -> Arrangement:
         hand_shapes=[
             HandShape(chord_id=int(h.get("chord_id", 0)),
                       start_time=float(h.get("start_time", 0)),
-                      end_time=float(h.get("end_time", 0)))
+                      end_time=float(h.get("end_time", 0)),
+                      arpeggio=bool(h.get("arp", False)))
             for h in d.get("handshapes", [])
         ],
         chord_templates=[
             ChordTemplate(name=ct.get("name", ""),
+                          display_name=ct.get("displayName", ct.get("name", "")),
+                          arpeggio=bool(ct.get("arp", False)),
                           fingers=list(ct.get("fingers", [-1] * 6)),
                           frets=list(ct.get("frets", [-1] * 6)))
             for ct in d.get("templates", [])
@@ -411,9 +441,41 @@ def _int(elem, attr, default=0):
         return int(float(v))
 
 
+_FALSE_LITERALS = frozenset({"", "0", "false", "False", "FALSE"})
+
+
 def _bool(elem, attr):
     v = elem.get(attr)
-    return v is not None and v != "0"
+    return v is not None and v not in _FALSE_LITERALS
+
+
+def _hand_shape_arpeggio_flag(elem) -> bool:
+    """Rocksmith / EOF may mark arpeggio on ``<handShape>`` (various casings)."""
+    for attr in ("arpeggio", "Arpeggio", "arp", "Arp"):
+        if _bool(elem, attr):
+            return True
+    return False
+
+
+def _chord_template_arpeggio_flag(elem) -> bool:
+    """Rocksmith commonly tags arpeggio templates in ``displayName`` via ``-arp``."""
+    for attr in ("arpeggio", "Arpeggio", "arp", "Arp"):
+        if _bool(elem, attr):
+            return True
+    display_name = elem.get("displayName", "")
+    if isinstance(display_name, str):
+        lowered = display_name.lower()
+        if "-arp" in lowered or "arpeggio" in lowered:
+            return True
+    return False
+
+
+def _chord_high_density(elem: ET.Element) -> bool:
+    """RS14 uses ``highDensity`` on ``<chord>``; some converters vary casing."""
+    for attr in ("highDensity", "highdensity", "HighDensity"):
+        if _bool(elem, attr):
+            return True
+    return False
 
 
 def _parse_note(n) -> Note:
@@ -431,6 +493,7 @@ def _parse_note(n) -> Note:
         harmonic_pinch=_bool(n, "harmonicPinch"),
         palm_mute=_bool(n, "palmMute"),
         mute=_bool(n, "mute"),
+        vibrato=_bool(n, "vibrato"),
         tremolo=_bool(n, "tremolo"),
         accent=_bool(n, "accent"),
         link_next=_bool(n, "linkNext"),
@@ -480,12 +543,21 @@ def parse_arrangement(xml_path: str) -> Arrangement:
     container = root.find("chordTemplates")
     if container is not None:
         for ct in container.findall("chordTemplate"):
+            chord_name = ct.get("chordName", "")
+            # Spec defaults displayName to name; treat an explicit empty
+            # / whitespace-only displayName attribute the same as a
+            # missing one so the parsed dataclass always has a usable
+            # label (matches the wire emitter's `display_name or name`).
+            display_name_attr = ct.get("displayName", "")
+            display_name = display_name_attr.strip() or chord_name
             width = 6
             while ct.get(f"fret{width}") is not None or ct.get(f"finger{width}") is not None:
                 width += 1
             chord_templates.append(
                 ChordTemplate(
-                    name=ct.get("chordName", ""),
+                    name=chord_name,
+                    display_name=display_name,
+                    arpeggio=_chord_template_arpeggio_flag(ct),
                     fingers=[_int(ct, f"finger{i}", -1) for i in range(width)],
                     frets=[_int(ct, f"fret{i}", -1) for i in range(width)],
                 )
@@ -537,7 +609,7 @@ def parse_arrangement(xml_path: str) -> Arrangement:
                             chord_notes.append(Note(time=t, string=s, fret=ct.frets[s]))
                 lv_chords.append(Chord(
                     time=t, chord_id=cid, notes=chord_notes,
-                    high_density=_bool(c, "highDensity"),
+                    high_density=_chord_high_density(c),
                 ))
         lv_chords.sort(key=lambda c: c.time)
 
@@ -559,6 +631,7 @@ def parse_arrangement(xml_path: str) -> Arrangement:
                     chord_id=_int(hs, "chordId"),
                     start_time=_float(hs, "startTime"),
                     end_time=_float(hs, "endTime"),
+                    arpeggio=_hand_shape_arpeggio_flag(hs),
                 ))
         lv_hand_shapes.sort(key=lambda h: h.start_time)
 

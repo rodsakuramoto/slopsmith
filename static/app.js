@@ -2966,7 +2966,12 @@ function _adjustSongVolume(delta) {
 // (slopsmith#54). Delegates to audio-mixer's readSongVolume when loaded so
 // the in-memory fallback (for storage-blocked contexts) is authoritative.
 audio.addEventListener('loadedmetadata', () => {
-    audio.volume = (window.slopsmith?.audio?.readSongVolume?.() ?? _readSongVolume()) / 100;
+    const applySongVolume = window.slopsmith?.audio?.applySongVolume;
+    if (typeof applySongVolume === 'function') {
+        void applySongVolume();
+    } else {
+        audio.volume = (window.slopsmith?.audio?.readSongVolume?.() ?? _readSongVolume()) / 100;
+    }
 });
 
 // Debug audio issues

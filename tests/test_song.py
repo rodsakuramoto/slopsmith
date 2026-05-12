@@ -42,6 +42,7 @@ def test_note_with_every_technique_round_trip():
         hammer_on=True, pull_off=True,
         harmonic=True, harmonic_pinch=True,
         palm_mute=True, mute=True,
+        vibrato=True,
         tremolo=True, accent=True,
         tap=True,
     )
@@ -61,6 +62,7 @@ def test_note_link_next_is_not_round_tripped():
         "ho": False, "po": False,
         "hm": False, "hp": False,
         "pm": False, "mt": False,
+        "vb": False,
         "tr": False, "ac": False, "tp": False,
     }
     assert note_from_wire(note_to_wire(n)).link_next is False
@@ -157,8 +159,13 @@ def test_arrangement_full_round_trip():
             HandShape(chord_id=1, start_time=2.0, end_time=2.5),
         ],
         chord_templates=[
+            # Spec defaults displayName to name on the wire, so the round-trip
+            # surfaces an explicit display_name="Em" on the deserialised side
+            # even when none was set on the source dataclass. Make it explicit
+            # here so the strict-equality assertion captures the contract.
             ChordTemplate(
                 name="Em",
+                display_name="Em",
                 fingers=[-1, -1, 2, 3, -1, -1],
                 frets=[0, 2, 2, 0, 0, 0],
             ),
@@ -341,6 +348,7 @@ def test_note_defaults():
     assert n.harmonic_pinch is False
     assert n.palm_mute is False
     assert n.mute is False
+    assert n.vibrato is False
     assert n.tremolo is False
     assert n.accent is False
     assert n.link_next is False
@@ -372,12 +380,20 @@ def test_note_to_wire_is_json_safe():
         hammer_on=True, pull_off=True,
         harmonic=True, harmonic_pinch=True,
         palm_mute=True, mute=True,
+        vibrato=True,
         tremolo=True, accent=True, tap=True,
     )
     wire = note_to_wire(n)
     # allow_nan=False rejects Infinity/NaN — which JS JSON.parse
     # also rejects. Keeps the wire strictly browser-compatible.
     assert json.loads(json.dumps(wire, allow_nan=False)) == wire
+
+
+def test_note_from_wire_accepts_vibrato_flag():
+    n = note_from_wire({"t": 1.0, "s": 2, "f": 7, "vb": True})
+    assert n.vibrato is True
+    legacy = note_from_wire({"t": 1.0, "s": 2, "f": 7, "vibrato": True})
+    assert legacy.vibrato is True
 
 
 def test_chord_to_wire_is_json_safe():
