@@ -27,6 +27,7 @@ function createHighway() {
     let chartTime = 0;
     let currentTime = 0;
     let avOffsetSec = 0;
+    let songOffset = 0.0;  // per-song chart offset (loose-folder format only)
     // Monotonic getTime support: between setTime() calls, getTime()
     // interpolates forward using performance.now() so plugins observe a
     // smooth sub-frame clock instead of the coarse step-quantization
@@ -2341,6 +2342,10 @@ function createHighway() {
                             break;
                         case 'song_info':
                             songInfo = msg;
+                            {
+                                const parsedOffset = Number(msg.offset);
+                                songOffset = Number.isFinite(parsedOffset) ? parsedOffset : 0.0;
+                            }
                             // Pick up the active arrangement's string count.
                             // Prefer the explicit `stringCount` field (added
                             // in slopsmith-plugin-3dhighway#7); fall back to
@@ -2586,8 +2591,11 @@ function createHighway() {
         },
 
         setTime(t) {
-            chartTime = t;
-            currentTime = t + avOffsetSec;
+            // chartTime is what getTime() exposes to plugins — bake the
+            // per-song offset in here so plugins (scoring, note detect,
+            // etc.) see the same chart-aligned clock the renderer does.
+            chartTime = t + songOffset;
+            currentTime = chartTime + avOffsetSec;
             // Only re-anchor on a genuinely new audio time. Repeated
             // calls with the same `t` (audio.currentTime hasn't updated
             // yet) keep the anchor's perfNow fixed so interpolation
@@ -2672,8 +2680,12 @@ function createHighway() {
             if (elapsedMs > _CHART_MAX_INTERP_MS) return chartTime;
             // Scale by the observed playback rate so getTime stays
             // accurate across slowdowns / speedups (audio.playbackRate
-            // != 1 is a first-class slopsmith feature).
-            return _chartAnchorAudioT + (_chartObservedRate * elapsedMs) / 1000;
+            // != 1 is a first-class slopsmith feature). Add songOffset
+            // so interpolated chart time stays consistent with the
+            // chartTime that setTime() / the early-return branches
+            // expose — anchors are stored in raw audio time, so the
+            // offset is applied on the way out.
+            return _chartAnchorAudioT + (_chartObservedRate * elapsedMs) / 1000 + songOffset;
         },
         // Returns the slopsmith <audio> element so plugins don't have to
         // reach for `document.getElementById('audio')` directly. In JUCE
@@ -2790,6 +2802,10 @@ function createHighway() {
             ready = false;
             notes = []; chords = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; toneChanges = []; toneBase = "";
             stringCount = 6;  // default until song_info arrives
+            // Drop any per-song offset from the previous load so setTime
+            // calls that fire before the next song_info arrives don't
+            // bias the clock with stale data.
+            songOffset = 0.0;
             // Reset phrase ladder + filter (slopsmith#48). _mastery
             // persists across arrangement switches — the slider's
             // position stays put. Filter rebuilds on the next `ready`
@@ -2811,6 +2827,7 @@ function createHighway() {
         stop() {
             if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
             if (ws) { ws.close(); ws = null; }
+            songOffset = 0.0;  // reset per-song offset so next song starts clean
             if (_resizeHandler) {
                 window.removeEventListener('resize', _resizeHandler);
                 _resizeHandler = null;

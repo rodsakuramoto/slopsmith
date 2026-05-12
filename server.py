@@ -1,8 +1,10 @@
 """Rocksmith Web — FastAPI backend serving highway viewer + library."""
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -23,6 +25,7 @@ from song import load_song, phrase_to_wire, arrangement_string_count
 from audio import find_wem_files, convert_wem
 from tunings import tuning_name
 import sloppak as sloppak_mod
+import loosefolder as loosefolder_mod
 
 import concurrent.futures
 import contextvars
@@ -793,10 +796,131 @@ def _extract_meta_sloppak(path: Path) -> dict:
     return meta
 
 
+def _resolve_dlc_path(dlc: Path, filename: str) -> Path | None:
+    """Resolve `filename` under DLC_DIR and refuse anything that escapes.
+
+    `filename` arrives from `:path` route params and can contain `..`
+    segments. The Sloppak and PSARC paths happen to fail safely later
+    because their loaders raise on missing/invalid files, but loose-
+    folder format detection (`is_loose_song`) globs and parses XML on
+    disk first, which lets a crafted path trigger filesystem reads
+    outside DLC_DIR before any guard fires. Centralise the containment
+    check so every filename-bound handler validates before touching the
+    filesystem.
+
+    Returns the validated resolved Path, or None if the path is empty
+    or escapes the DLC root.
+    """
+    if not filename:
+        return None
+    try:
+        resolved = (dlc / filename).resolve()
+        resolved.relative_to(dlc.resolve())
+    except (ValueError, OSError):
+        return None
+    return resolved
+
+
+def _sanitized_song_offset(song) -> float:
+    """Return song.offset coerced to a finite float, or 0.0.
+
+    Malformed loose-folder XMLs can put `NaN`/`Infinity` into <offset>;
+    Python's `float()` happily accepts those, but Starlette's JSON
+    encoder then emits the literal `NaN` token which is invalid JSON
+    and breaks the frontend's song_info parsing.
+    """
+    try:
+        v = float(getattr(song, "offset", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
+
+
+def _stat_for_cache(f: Path) -> tuple[float, int]:
+    """Return (mtime, size) for cache freshness checks.
+
+    For loose-folder directories the directory's own mtime does not
+    change when inner files (audio.wem / *.xml / manifest.json) are
+    edited in place, so we aggregate over the contents. PSARCs and
+    sloppak files (zip form) use their own stat directly; sloppak
+    directories aren't covered here because `meta_db` already keys them
+    by `.sloppak` path and they aren't subject to the same edit-in-place
+    pattern.
+    """
+    # Aggregate inner stats for loose folders. We detect "loose-shape"
+    # purely by file presence (xml + wem + optional manifest.json) so
+    # this stays O(stat) on the hot path — `/api/song/{filename}` and
+    # the background scan call this on every check, and we avoid
+    # calling `is_loose_song` here because that would parse XML on
+    # every cache lookup.
+    # A sloppak directory has manifest.yaml + arrangement JSON + ogg
+    # stems instead, so it won't match the loose globs and falls
+    # through to the directory-stat path (same behaviour as before
+    # this PR).
+    if f.is_dir():
+        # Skip symlinks pointing outside the song folder — without this
+        # an attacker-crafted CDLC could keep a stale cache hot by
+        # bumping the mtime of an unrelated file via a symlink.
+        root = f.resolve()
+        def _in_folder(p: Path) -> bool:
+            try:
+                p.resolve().relative_to(root)
+            except (OSError, ValueError):
+                return False
+            return True
+        xmls = [p for p in f.glob("*.xml") if _in_folder(p)]
+        wems = [p for p in f.glob("*.wem") if _in_folder(p)]
+        if xmls and wems:
+            inner = xmls + wems + [p for p in f.glob("manifest.json") if _in_folder(p)]
+            # Tolerate files vanishing between glob() and stat() —
+            # otherwise a concurrent edit/move in DLC_DIR can let an
+            # OSError bubble out of _background_scan(), killing the
+            # scan thread while `_scan_status["running"]` stays true.
+            stats = []
+            for p in inner:
+                try:
+                    stats.append(p.stat())
+                except OSError:
+                    continue
+            if stats:
+                return max(s.st_mtime for s in stats), sum(s.st_size for s in stats)
+    st = f.stat()
+    return st.st_mtime, st.st_size
+
+
+def _extract_meta_loosefolder(path: Path) -> dict:
+    """Extract metadata for a loose song folder (raw XMLs + WEM audio)."""
+    # Pass DLC_DIR so artist/album folder inference operates on the
+    # dlc-relative path; otherwise absolute-path parts (e.g. the user's
+    # home dir name) would leak into metadata for songs placed shallow
+    # inside DLC_DIR.
+    meta = loosefolder_mod.extract_meta(path, dlc_root=_get_dlc_dir())
+    offsets = meta.pop("tuning_offsets", None) or [0] * 6
+    name = tuning_name(offsets)
+    meta["tuning"] = name
+    meta["tuning_name"] = name
+    meta["tuning_sort_key"] = sum(offsets)
+    meta["format"] = "loose"
+    meta.setdefault("stem_ids", [])
+    # The library helper exposes absolute filesystem paths for audio/art
+    # so callers inside the server can resolve them. Strip these before
+    # the meta enters the API/DB cache — `/api/song/{filename}` returns
+    # the dict directly on a cache miss, which would otherwise leak
+    # `/home/<user>/...` paths to the frontend.
+    meta.pop("audio_path", None)
+    meta.pop("art_path", None)
+    return meta
+
+
 def _extract_meta_for_file(psarc_path: Path) -> dict:
     """Extract metadata — dispatches on extension; PSARC path tries fast then falls back."""
+    # Sloppak is detected by `.sloppak` suffix only (cheap), so check it
+    # first — that way a user's loose folder named `foo.sloppak` still wins
+    # the sloppak branch instead of being misclassified.
     if sloppak_mod.is_sloppak(psarc_path):
         return _extract_meta_sloppak(psarc_path)
+    if loosefolder_mod.is_loose_song(psarc_path):
+        return _extract_meta_loosefolder(psarc_path)
     try:
         meta = _extract_meta_fast(psarc_path)
         if meta["title"]:
@@ -944,6 +1068,24 @@ def _background_scan():
         # Sloppaks: match both file (zip) and directory form by suffix.
         sloppaks = [f for f in sorted(dlc.rglob("*.sloppak"))
                     if sloppak_mod.is_sloppak(f)]
+
+        # Loose song folders: any directory containing a non-preview *.wem + *.xml.
+        # Skip directories that are actually sloppak bundles — those are
+        # already in `sloppaks`; the dispatcher's sloppak-first precedence
+        # would route them to the sloppak path anyway, but adding them
+        # here would inflate the scan queue and over-count the total.
+        loose_songs = []
+        seen_loose = set()
+        sloppak_dirs = {p for p in sloppaks if p.is_dir()}
+        for wem in sorted(dlc.rglob("*.wem")):
+            if "preview" in wem.stem.lower():
+                continue
+            d = wem.parent
+            if d in sloppak_dirs or d.name.lower().endswith(".sloppak"):
+                continue
+            if d not in seen_loose and loosefolder_mod.is_loose_song(d):
+                loose_songs.append(d)
+                seen_loose.add(d)
     except PermissionError as e:
         msg = (f"Permission denied reading {dlc}. "
                "On macOS: grant Full Disk Access to the app in System Settings → Privacy & Security. "
@@ -956,8 +1098,9 @@ def _background_scan():
         _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": f"Unable to list {dlc}: {e}"}
         return
 
-    all_songs = psarcs + sloppaks
-    log.info("Scan: listed %d PSARCs and %d sloppaks in %s", len(psarcs), len(sloppaks), dlc)
+    all_songs = psarcs + sloppaks + loose_songs
+    log.info("Scan: listed %d PSARCs, %d sloppaks and %d loose folders in %s",
+             len(psarcs), len(sloppaks), len(loose_songs), dlc)
 
     def _rel(f: Path) -> str:
         # Store the path relative to the DLC root so sub-folders (e.g.
@@ -979,9 +1122,17 @@ def _background_scan():
     # Figure out which need scanning
     to_scan = []
     for f in all_songs:
-        stat = f.stat()
-        if not meta_db.get(_rel(f), stat.st_mtime, stat.st_size):
-            to_scan.append((f, stat))
+        # Skip entries that vanish or become unreadable between listing
+        # and stat. Without this, one concurrent move/delete in DLC_DIR
+        # would crash the scan thread and leave `_scan_status["running"]`
+        # stuck true with no path to recover.
+        try:
+            mtime, size = _stat_for_cache(f)
+        except OSError as e:
+            log.debug("scan: skipping %s (%s)", f, e)
+            continue
+        if not meta_db.get(_rel(f), mtime, size):
+            to_scan.append((f, mtime, size))
 
     if not to_scan:
         _scan_status = {**_SCAN_STATUS_INIT, "stage": "complete"}
@@ -993,15 +1144,16 @@ def _background_scan():
     is_first_scan = bool(all_songs) and len(to_scan) == len(all_songs)
     _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "scanning", "total": len(to_scan),
                     "is_first_scan": is_first_scan}
-    log.info("Library: %d PSARCs + %d sloppaks, %d cached, %d to scan", len(psarcs), len(sloppaks), len(all_songs) - len(to_scan), len(to_scan))
+    log.info("Library: %d PSARCs + %d sloppaks + %d loose folders, %d cached, %d to scan",
+             len(psarcs), len(sloppaks), len(loose_songs), len(all_songs) - len(to_scan), len(to_scan))
 
     def _scan_one(item):
-        f, stat = item
+        f, mtime, size = item
         # Per-file log so users running the server / desktop can see live
         # activity and distinguish a stuck scan from a slow one.
         log.debug("scanning %s", f.name)
         meta = _extract_meta_for_file(f)
-        return _rel(f), stat.st_mtime, stat.st_size, meta
+        return _rel(f), mtime, size, meta
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(_scan_one, item): item[0].name for item in to_scan}
@@ -1460,7 +1612,7 @@ def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist
                  has_lyrics: str = "", tunings: str = ""):
     """Paginated library search, queried from SQLite."""
     size = min(size, 100)
-    fmt = format if format in ("psarc", "sloppak") else ""
+    fmt = format if format in ("psarc", "sloppak", "loose") else ""
     songs, total = meta_db.query_page(
         q=q, page=page, size=size, sort=sort,
         direction=dir, favorites_only=bool(favorites), format_filter=fmt,
@@ -1481,7 +1633,7 @@ def list_artists(letter: str = "", q: str = "", favorites: int = 0, page: int = 
                  stems_has: str = "", stems_lacks: str = "",
                  has_lyrics: str = "", tunings: str = ""):
     """Get artists grouped by letter with albums and songs (for tree view)."""
-    fmt = format if format in ("psarc", "sloppak") else ""
+    fmt = format if format in ("psarc", "sloppak", "loose") else ""
     artists, total = meta_db.query_artists(
         letter=letter, q=q, favorites_only=bool(favorites),
         page=page, size=min(size, 100), format_filter=fmt,
@@ -1502,7 +1654,7 @@ def library_stats(favorites: int = 0, q: str = "", format: str = "",
                   has_lyrics: str = "", tunings: str = ""):
     """Aggregate stats for the UI. Accepts the same filter params as
     /api/library so the letter bar mirrors the active grid filter set."""
-    fmt = format if format in ("psarc", "sloppak") else ""
+    fmt = format if format in ("psarc", "sloppak", "loose") else ""
     return meta_db.query_stats(
         favorites_only=bool(favorites), q=q, format_filter=fmt,
         arrangements_has=_split_csv(arrangements_has),
@@ -2586,7 +2738,11 @@ async def ws_retune(websocket: WebSocket, filename: str, target: str = "E Standa
         await websocket.close()
         return
 
-    psarc_path = dlc / filename
+    psarc_path = _resolve_dlc_path(dlc, filename)
+    if psarc_path is None:
+        await websocket.send_json({"error": "forbidden"})
+        await websocket.close()
+        return
     if not psarc_path.exists():
         await websocket.send_json({"error": "File not found"})
         await websocket.close()
@@ -2693,13 +2849,23 @@ async def ws_retune(websocket: WebSocket, filename: str, target: str = "E Standa
 
 @app.get("/api/song/{filename:path}/art")
 async def get_song_art(filename: str):
-    """Extract and serve album art from a PSARC as PNG."""
+    """Serve album art for a song.
+
+    Dispatches by format and returns the appropriate media type:
+      - Sloppak: serves `cover.jpg` (or manifest-declared cover) from
+        the source dir as JPEG/PNG/WebP.
+      - Loose folder: serves the discovered art file directly as
+        JPEG/PNG/WebP.
+      - PSARC: extracts and caches the embedded album art as PNG.
+    """
     import asyncio
     dlc = _get_dlc_dir()
     if not dlc:
         return JSONResponse({"error": "not configured"}, 404)
 
-    psarc_path = dlc / filename
+    psarc_path = _resolve_dlc_path(dlc, filename)
+    if psarc_path is None:
+        return JSONResponse({"error": "forbidden"}, 403)
     if not psarc_path.exists():
         return JSONResponse({"error": "not found"}, 404)
 
@@ -2723,6 +2889,27 @@ async def get_song_art(filename: str):
                 return FileResponse(str(cover_path), media_type=mt)
         except Exception:
             pass
+        return JSONResponse({"error": "no art"}, 404)
+
+    # Loose folder path: serve art file directly.
+    # psarc_path is already validated against DLC_DIR by _resolve_dlc_path.
+    if loosefolder_mod.is_loose_song(psarc_path):
+        art_path = loosefolder_mod.find_art(psarc_path)
+        if art_path:
+            # Re-resolve in case the matched file is a symlink — a crafted
+            # CDLC could put `album_art.jpg` as a symlink to anywhere on
+            # disk. Insist the final target stays inside the song folder.
+            art_resolved = art_path.resolve()
+            try:
+                art_resolved.relative_to(psarc_path)
+            except ValueError:
+                return JSONResponse({"error": "forbidden"}, 403)
+            if art_resolved.is_file():
+                mt = {
+                    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".png": "image/png", ".webp": "image/webp",
+                }.get(art_resolved.suffix.lower(), "image/jpeg")
+                return FileResponse(str(art_resolved), media_type=mt)
         return JSONResponse({"error": "no art"}, 404)
 
     # Check cache first
@@ -2758,6 +2945,19 @@ async def get_song_art(filename: str):
 @app.post("/api/song/{filename:path}/meta")
 def update_song_meta(filename: str, data: dict):
     """Update song metadata in the cache."""
+    # Canonicalise to the same key get_song_info uses so an update via
+    # one URL form (e.g. with `..` segments) lands on the row that
+    # later reads will see.
+    dlc = _get_dlc_dir()
+    cache_key = filename
+    if dlc:
+        resolved = _resolve_dlc_path(dlc, filename)
+        if resolved is None:
+            return JSONResponse({"error": "forbidden"}, 403)
+        try:
+            cache_key = resolved.relative_to(dlc.resolve()).as_posix()
+        except ValueError:
+            pass
     with meta_db._lock:
         updates = []
         params = []
@@ -2767,7 +2967,7 @@ def update_song_meta(filename: str, data: dict):
                 params.append(data[field])
         if not updates:
             return {"error": "No fields to update"}
-        params.append(filename)
+        params.append(cache_key)
         meta_db.conn.execute(
             f"UPDATE songs SET {', '.join(updates)} WHERE filename = ?", params
         )
@@ -2815,19 +3015,30 @@ async def get_song_info(filename: str):
     if not dlc:
         return JSONResponse({"error": "DLC folder not configured"}, 404)
 
-    psarc_path = dlc / filename
+    psarc_path = _resolve_dlc_path(dlc, filename)
+    if psarc_path is None:
+        return JSONResponse({"error": "forbidden"}, 403)
     if not psarc_path.exists():
         return JSONResponse({"error": "File not found"}, 404)
 
-    stat = psarc_path.stat()
-    cached = meta_db.get(filename, stat.st_mtime, stat.st_size)
+    # Canonicalise the cache key against the resolved path so two URL
+    # forms of the same physical file (e.g. `Artist/song.psarc` vs
+    # `Artist/../Artist/song.psarc`) converge on a single row instead
+    # of fragmenting / shadowing each other in meta_db.
+    try:
+        cache_key = psarc_path.relative_to(dlc.resolve()).as_posix()
+    except ValueError:
+        cache_key = filename
+
+    mtime, size = _stat_for_cache(psarc_path)
+    cached = meta_db.get(cache_key, mtime, size)
     if cached:
         return cached
 
     # Extract in thread pool
     def _extract():
         meta = _extract_meta_for_file(psarc_path)
-        meta_db.put(filename, stat.st_mtime, stat.st_size, meta)
+        meta_db.put(cache_key, mtime, size, meta)
         return meta
 
     meta = await asyncio.get_event_loop().run_in_executor(None, _extract)
@@ -2914,13 +3125,23 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         await websocket.close()
         return
 
-    psarc_path = dlc / filename
+    psarc_path = _resolve_dlc_path(dlc, filename)
+    if psarc_path is None:
+        await websocket.send_json({"error": "forbidden"})
+        await websocket.close()
+        return
     if not psarc_path.exists():
         await websocket.send_json({"error": "File not found"})
         await websocket.close()
         return
 
     is_slop = sloppak_mod.is_sloppak(psarc_path)
+    # Sloppak wins precedence: `_extract_meta_for_file()` and the
+    # background scanner both treat a `.sloppak` directory as sloppak
+    # even if it happens to contain WEM/XML. Gate is_loose on that
+    # so the loose-only branches (audio_id, offset, audio conversion)
+    # don't fire for sloppak bundles.
+    is_loose = (not is_slop) and loosefolder_mod.is_loose_song(psarc_path)
     tmp = None
     owns_tmp = False
     loaded_slop = None  # LoadedSloppak when is_slop
@@ -2950,6 +3171,15 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                 )
                 song = loaded_slop.song
                 tmp = str(loaded_slop.source_dir)
+                owns_tmp = False
+            elif is_loose:
+                # Loose folders need no extraction — load_song reads the
+                # arrangement XMLs directly from the flat directory.
+                # psarc_path is already DLC-containment-validated by
+                # _resolve_dlc_path, so audio conversion below can use
+                # it directly.
+                song = await loop.run_in_executor(None, lambda: load_song(str(psarc_path)))
+                tmp = str(psarc_path)
                 owns_tmp = False
             else:
                 tmp, song, owns_tmp = await loop.run_in_executor(
@@ -2997,7 +3227,34 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         audio_url = None
         audio_error: str | None = None  # Surfaced in song_info when audio_url is None
         stems_payload: list[dict] = []
-        audio_id = Path(filename).stem.replace(" ", "_")
+        if is_loose:
+            # Loose folder filenames are relative paths (artist/album/song).
+            # Hash the *canonical* dlc-relative path (so two URL spellings
+            # of the same physical folder share a cache key) PLUS the
+            # source WEM's mtime+size so:
+            #  - different songs with the same leaf folder name can't
+            #    collide (a `/`→`__` escape would collapse `a/b__c` and
+            #    `a__b/c`);
+            #  - editing audio.wem in place invalidates the cached
+            #    converted file (without this, in-place CDLC iteration
+            #    keeps serving the stale mp3/ogg from the cache).
+            try:
+                canonical = psarc_path.relative_to(dlc.resolve()).as_posix()
+            except ValueError:
+                canonical = filename
+            wem_for_id = loosefolder_mod.find_audio(psarc_path)
+            try:
+                wem_stat = wem_for_id.stat() if wem_for_id else None
+            except OSError:
+                wem_stat = None
+            stamp = f"{wem_stat.st_mtime_ns}-{wem_stat.st_size}" if wem_stat else ""
+            digest = hashlib.sha256(
+                (canonical + "|" + stamp).encode("utf-8")
+            ).hexdigest()[:12]
+            leaf = Path(canonical.rstrip("/\\")).stem.replace(" ", "_")[:40] or "song"
+            audio_id = f"{leaf}_{digest}"
+        else:
+            audio_id = Path(filename).stem.replace(" ", "_")
 
         if is_slop:
             # Stems are served via the sloppak file endpoint; the first stem
@@ -3024,7 +3281,61 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                 if audio_url:
                     break
 
-        if not audio_url and not is_slop:
+        def _evict_audio_cache():
+            # Keep AUDIO_CACHE_DIR bounded so a library full of loose
+            # folders / many PSARCs doesn't fill disk. LRU on st_atime
+            # so songs the user keeps replaying stay warm. Best-effort:
+            # log at debug so permission / disk errors are diagnosable
+            # without aborting the request.
+            try:
+                audio_files = [f for f in AUDIO_CACHE_DIR.iterdir()
+                               if f.name.startswith("audio_") and f.suffix in (".mp3", ".ogg", ".wav")]
+                if len(audio_files) > 100:
+                    audio_files.sort(key=lambda f: f.stat().st_atime)
+                    for f in audio_files[:len(audio_files) - 100]:
+                        f.unlink(missing_ok=True)
+            except Exception:
+                log.debug("audio cache eviction failed for %s", AUDIO_CACHE_DIR, exc_info=True)
+
+        if not audio_url and is_loose:
+            await websocket.send_json({"type": "loading", "stage": "Converting audio..."})
+            wem_path = loosefolder_mod.find_audio(psarc_path)
+            if wem_path:
+                # Re-resolve to defeat a symlinked audio.wem that points
+                # outside the song folder — without this, a crafted
+                # CDLC could turn convert_wem into an arbitrary-file
+                # decode/read primitive.
+                wem_resolved = wem_path.resolve()
+                try:
+                    wem_resolved.relative_to(psarc_path)
+                except ValueError:
+                    audio_error = "Audio file escapes the loose folder."
+                    wem_resolved = None
+                if wem_resolved is not None:
+                    # Convert into a unique temp basename and then
+                    # atomically rename onto the final cache name.
+                    # Two clients requesting the same song concurrently
+                    # would otherwise race writing the same file and
+                    # one could serve a partial mp3/wav.
+                    tmp_suffix = uuid.uuid4().hex[:8]
+                    tmp_base = AUDIO_CACHE_DIR / f"audio_{audio_id}.{tmp_suffix}"
+                    try:
+                        produced = convert_wem(str(wem_resolved), str(tmp_base))
+                        ext = Path(produced).suffix
+                        final_path = AUDIO_CACHE_DIR / f"audio_{audio_id}{ext}"
+                        os.replace(produced, final_path)
+                        audio_url = f"/audio/audio_{audio_id}{ext}"
+                    except Exception as e:
+                        log.exception("loose-folder audio conversion failed for %s", audio_id)
+                        audio_error = f"Audio conversion failed: {e}"
+                        # Best-effort cleanup of partial temp artifacts.
+                        for stale in AUDIO_CACHE_DIR.glob(f"audio_{audio_id}.{tmp_suffix}.*"):
+                            stale.unlink(missing_ok=True)
+            else:
+                audio_error = "No audio file found in loose folder."
+            _evict_audio_cache()
+
+        if not audio_url and not is_slop and not is_loose:
             await websocket.send_json({"type": "loading", "stage": "Converting audio..."})
             wem_files = find_wem_files(tmp)
             if not wem_files:
@@ -3040,16 +3351,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                     log.exception("audio conversion failed for %s", audio_id)
                     audio_error = f"Audio conversion failed: {e}"
 
-            # Clean up old audio cache files (keep max 100)
-            try:
-                audio_files = [f for f in AUDIO_CACHE_DIR.iterdir()
-                               if f.name.startswith("audio_") and f.suffix in (".mp3", ".ogg", ".wav")]
-                if len(audio_files) > 100:
-                    audio_files.sort(key=lambda f: f.stat().st_atime)
-                    for f in audio_files[:len(audio_files) - 100]:
-                        f.unlink(missing_ok=True)
-            except Exception:
-                pass
+            _evict_audio_cache()
 
         # Send song metadata
         arr_list = [{"index": i, "name": a.name, "notes": len(a.notes) + sum(len(c.notes) for c in a.chords)}
@@ -3079,7 +3381,12 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
             # using `tuning.length` directly.
             "stringCount": arrangement_string_count(arr),
             "capo": arr.capo,
-            "format": "sloppak" if is_slop else "psarc",
+            # Sanitize song.offset before send_json: a malformed loose
+            # chart can produce NaN via `float("nan")`, which Starlette
+            # would serialise as the literal `NaN` token (invalid JSON)
+            # and break the frontend's song_info parsing.
+            "offset": _sanitized_song_offset(song) if is_loose else 0.0,
+            "format": "sloppak" if is_slop else ("loose" if is_loose else "psarc"),
             "stems": stems_payload,
         })
 
@@ -3114,10 +3421,18 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         # Send lyrics if available
         import xml.etree.ElementTree as ET
         lyrics = []
+        # Loose folders are flat — only inspect direct children so a
+        # nested backup/export directory inside the song folder can't
+        # override the active arrangement's lyrics / tone. PSARCs are
+        # unpacked into nested tmp dirs, so they keep recursive rglob.
+        # Sloppak skips XML lookups entirely below but the json loop
+        # is unconditional, so define both walkers up front.
+        _xml_walk = Path(tmp).glob if is_loose else Path(tmp).rglob
+        _json_walk = Path(tmp).glob if is_loose else Path(tmp).rglob
         if is_slop:
             lyrics = list(song.lyrics or [])
         else:
-            for xml_path in sorted(Path(tmp).rglob("*.xml")):
+            for xml_path in sorted(_xml_walk("*.xml")):
                 try:
                     root = ET.parse(xml_path).getroot()
                     if root.tag == "vocals":
@@ -3132,9 +3447,11 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                     pass
             if not lyrics:
                 # SNG-only PSARC (official DLC) — decode vocals SNG directly.
+                # Loose folders don't ship SNGs so the loop is a no-op
+                # there; same flat-vs-recursive walker choice as XML.
                 try:
                     from lib.sng_vocals import parse_vocals_sng
-                    for sng_path in sorted(Path(tmp).rglob("*vocals*.sng")):
+                    for sng_path in sorted(_xml_walk("*vocals*.sng")):
                         plat = "mac" if "/macos/" in str(sng_path).replace("\\", "/").lower() else "pc"
                         try:
                             lyrics = parse_vocals_sng(str(sng_path), plat)
@@ -3147,17 +3464,18 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         if lyrics:
             await websocket.send_json({"type": "lyrics", "data": lyrics})
 
-        # Send tone changes (PSARC only; sloppak has no tone XML)
+        # Send tone changes (PSARC and loose folders use arrangement XMLs;
+        # sloppak ships tone data inline in its arrangement JSON, no XML).
         tone_changes = []
         if is_slop:
             xml_paths = []
         else:
-            xml_paths = sorted(Path(tmp).rglob("*.xml"))
+            xml_paths = sorted(_xml_walk("*.xml"))
 
         # Build tone ID→name map from manifest JSON matching selected arrangement
         tone_id_map = {}  # {0: "Tone_A_name", 1: "Tone_B_name", ...}
         arr_name_lower = arr.name.lower() if arr else ""
-        for jf in sorted(Path(tmp).rglob("*.json")):
+        for jf in sorted(_json_walk("*.json")):
             try:
                 # Prefer manifest matching selected arrangement
                 if arr_name_lower and arr_name_lower not in jf.stem.lower():
@@ -3177,7 +3495,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                 break
         # Fallback: try any manifest if arrangement-specific one not found
         if not tone_id_map:
-            for jf in sorted(Path(tmp).rglob("*.json")):
+            for jf in sorted(_json_walk("*.json")):
                 try:
                     jdata = json.loads(jf.read_text())
                     for entry in (jdata.get("Entries") or {}).values():

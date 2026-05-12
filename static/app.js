@@ -883,7 +883,7 @@ const _LIB_SORT_VALUES = new Set([
     'artist', 'artist-desc', 'title', 'title-desc',
     'recent', 'year-desc', 'year', 'tuning',
 ]);
-const _LIB_FORMAT_VALUES = new Set(['', 'psarc', 'sloppak']);
+const _LIB_FORMAT_VALUES = new Set(['', 'psarc', 'sloppak', 'loose']);
 // Tree-view expand/collapse persistence. Three states per tree:
 //   '1'  → user asked to expand all
 //   '0'  → user asked to collapse all
@@ -1381,6 +1381,9 @@ function formatBadge(fmt, stemCount) {
     if (fmt === 'sloppak') {
         return `<span class="fmt-badge absolute top-2 right-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-900/80 text-green-200 border border-green-700">SLOPPAK</span>`;
     }
+    if (fmt === 'loose') {
+        return `<span class="fmt-badge absolute top-2 right-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-900/80 text-amber-200 border border-amber-700">FOLDER</span>`;
+    }
     return `<span class="fmt-badge absolute top-2 right-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-900/80 text-blue-200 border border-blue-700">PSARC</span>`;
 }
 
@@ -1390,6 +1393,9 @@ function formatBadgeInline(fmt, stemCount) {
     }
     if (fmt === 'sloppak') {
         return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-900/60 text-green-300">SLOPPAK</span>`;
+    }
+    if (fmt === 'loose') {
+        return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-900/60 text-amber-300">FOLDER</span>`;
     }
     return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-900/60 text-blue-300">PSARC</span>`;
 }
