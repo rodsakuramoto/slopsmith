@@ -5142,6 +5142,29 @@
         }
 
         /**
+         * True when standalone note rows already cover every string/fret in the
+         * arpeggio shape, so drawing the chord gems too would duplicate the same
+         * authored passage.
+         */
+        function chordShapeCoveredByStandaloneNotes(ch, shape, notesArr, timeWin) {
+            if (!notesArr || notesArr.length === 0 || !shape || shape.size === 0) return false;
+            const tLo = (timeWin ? timeWin.tLo : ch.t - ARP_FRAME_ONSET_PAD_S) - NEXT_ON_STRING_T_EPS;
+            const tHi = (timeWin ? timeWin.tHi : ch.t + ARP_FRAME_ONSET_CLUSTER_S) + NEXT_ON_STRING_T_EPS;
+            let i2 = lowerBoundT(notesArr, tLo);
+            const matchedStrings = new Set();
+            for (; i2 < notesArr.length; i2++) {
+                const n = notesArr[i2];
+                if (n.t > tHi) break;
+                if (!validString(n.s) || matchedStrings.has(n.s)) continue;
+                const ef = shape.get(n.s);
+                if (ef === undefined || ef !== n.f) continue;
+                matchedStrings.add(n.s);
+                if (matchedStrings.size >= shape.size) return true;
+            }
+            return false;
+        }
+
+        /**
          * Notes in an inferred arpeggio passage are charted in ``notes[]`` with
          * staggered times; treat them like chord-cluster notes for Rocksmith-style
          * board-ghost fret digits (``fromChord`` + template column).
@@ -6109,19 +6132,23 @@
                     const hsTimeWinFrame = hsHintFrame.hs
                         ? { tLo: hsStart(hsHintFrame.hs) - 0.06, tHi: hsEnd(hsHintFrame.hs) + 0.06 }
                         : null;
+                    const noteStreamCoversArpShape = chordShapeCoveredByStandaloneNotes(
+                        ch,
+                        chShape,
+                        notes,
+                        hsTimeWinFrame,
+                    );
                     const inferredArpPattern = (!hsHintFrame.hs
                         || handShapeChartSpanSec(hsHintFrame.hs) >= ARP_INFER_MIN_HAND_SHAPE_SPAN_S)
                         && inferArpeggioFromNotePattern(
                             ch, chShape, notes, hsTimeWinFrame);
-                    // h3dSynth chords are added for the *frame* (the chart
-                    // authored no chord row), so defer the gem strum
-                    // unconditionally — otherwise a full chord strum can show
-                    // up at the hand-shape start when arp inference / explicit
-                    // marker fails, on top of the single notes the chart
-                    // already authored.
-                    const deferChordGems = ch.h3dSynth
+                    // Only suppress the chord gems when standalone notes really
+                    // cover the arpeggio shape; otherwise explicit/synth hand
+                    // shapes can produce an empty lavender frame with no notes
+                    // inside (e.g. template-marked `-arp` chord rows).
+                    const deferChordGems = (ch.h3dSynth && noteStreamCoversArpShape)
                         || inferredArpPattern
-                        || (hsHintFrame.explicit && hsHintFrame.covered);
+                        || (hsHintFrame.explicit && hsHintFrame.covered && noteStreamCoversArpShape);
                     /**
                      * Lavender chord frame + purple highway rails: authored
                      * arpeggio metadata only. RS ``highDensity`` marks gallops /
@@ -7228,7 +7255,7 @@
                         } else if (_st === 'hit' || _st === 'active') {
                             _ndState = _st;
                             _ndGood = true;
-                            _ndOutline = mGlow[s];        // bright string-tinted edge (no green)
+                            _ndOutline = mGlow[s];
                             // Carry the provider's alpha (and optional color)
                             // through to the sizzle so a struck-note fade or a
                             // custom palette comes through (#254 review).
