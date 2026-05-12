@@ -4882,11 +4882,6 @@
         }
 
         /**
-         * Arpeggio styling is driven by authored metadata, not by post-hoc
-         * note-stream inference. Prefer explicit hand-shape flags and fall back
-         * to template markers when present.
-         */
-        /**
          * Per spec, `displayName` is the UI label for a chord template
          * (defaulting to `name` when the chart didn't set it). Always go
          * through this helper so name vs. displayName drift can't surface
@@ -4900,6 +4895,11 @@
             return typeof n === 'string' ? n : '';
         }
 
+        /**
+         * Arpeggio styling is driven by authored metadata, not by post-hoc
+         * note-stream inference. Prefer explicit hand-shape flags and fall back
+         * to template markers when present.
+         */
         function chordTemplateMarkedArpeggio(cid, chordTemplates) {
             if (cid == null || !chordTemplates) return false;
             const tmpl = chordTemplates[cid] ?? chordTemplates[Number(cid)];
@@ -7533,7 +7533,13 @@
             // ── Board ghost: filled rim at Z=0 (always drawn for isNext) ─
             const PROJ_WIN = 0.6;
             const projFactor = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN));
-            const isBlocked = dt < 0.15 && n.sus > 0;
+            // isBlocked suppresses the pre-impact ghost for sustains so it
+            // doesn't peek out from under the incoming note body in the
+            // last 150ms. Gate on dt > 0 so the post-hit linger window
+            // (dt ≤ 0, still inside ghostHold) keeps showing the ghost
+            // frame + digits — without the dt>0 gate, all post-hit
+            // sustain frames silently suppress the ghost too.
+            const isBlocked = dt > 0 && dt < 0.15 && n.sus > 0;
             if (n.f > 0 && isNextOnString && projectionVisible && dt > -ghostHold && dt < PROJ_WIN && projFactor > 0.001 && !isBlocked) {
                 // Ghost stays at final "on the board" orientation — not the
                 // incoming approachRot sweep — so it nests with the note at impact.

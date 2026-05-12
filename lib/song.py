@@ -544,7 +544,12 @@ def parse_arrangement(xml_path: str) -> Arrangement:
     if container is not None:
         for ct in container.findall("chordTemplate"):
             chord_name = ct.get("chordName", "")
-            display_name = ct.get("displayName", chord_name)
+            # Spec defaults displayName to name; treat an explicit empty
+            # / whitespace-only displayName attribute the same as a
+            # missing one so the parsed dataclass always has a usable
+            # label (matches the wire emitter's `display_name or name`).
+            display_name_attr = ct.get("displayName", "")
+            display_name = display_name_attr.strip() or chord_name
             width = 6
             while ct.get(f"fret{width}") is not None or ct.get(f"finger{width}") is not None:
                 width += 1
