@@ -51,14 +51,18 @@ test('ready case time-sorts handShapes before rendering', () => {
     );
 });
 
-test('bundle exposes handShapes to renderers', () => {
+test('bundle exposes handShapes to renderers with flat-list fallback', () => {
     // Renderers (highway_3d in particular) read `bundle.handShapes`; if
     // the bundle key gets renamed or dropped, the 3D arp-frame pipeline
-    // goes dark without a runtime error.
+    // goes dark without a runtime error. The current shape is a ternary
+    // that picks `_filteredHandShapes` when phrase data carries any and
+    // falls back to the flat `handShapes` list otherwise (DLC pattern).
+    // Pin both sides of the ternary so accidentally dropping the
+    // fallback branch fails the test.
     const src = fs.readFileSync(HIGHWAY_JS, 'utf8');
     assert.match(
         src,
-        /\bhandShapes:\s*\(?_filteredHandShapes\b/,
-        'bundle must expose handShapes (filtered list with flat-list fallback)',
+        /\bhandShapes:\s*\([^)]*_filteredHandShapes[^)]*\)\s*\?\s*_filteredHandShapes\s*:\s*handShapes\b/,
+        'bundle must expose handShapes with the _filteredHandShapes-vs-handShapes ternary fallback',
     );
 });

@@ -7237,26 +7237,12 @@
                     lb.material = txtMat(0, _showHit ? '#fff' : '#ddd', false, 'open');
                     lb.scale.set(NW * 0.7 * _textSizeMul * openWScale, NH * 0.8 * _textSizeMul * openWScale, 1);
                     lb.position.set(x, y + techniqueYNow, noteZ + 0.01 * K);
-                } else if (showFretOnNote && n.f > 0) {
-                    // Embedded fret number on the note body (issue #12).
-                    // The `n.f > 0` guard is redundant in the normal
-                    // path (we're already in the else of `n.f === 0`)
-                    // but matches the rest of the renderer's "fretted
-                    // means n.f > 0" convention (e.g. approachRot,
-                    // connector label) and side-steps any bogus
-                    // negative / NaN fret values from a malformed
-                    // chart. Sprite is camera-facing so it stays
-                    // readable through the note's approach-rotation.
-                    // Core sits at noteZ + 0.001 (raw world units, not
-                    // K-scaled), so place the label at noteZ + 0.005
-                    // — definitively in front of the core regardless
-                    // of how K resolves, units consistent with the
-                    // core's offset.
-                    const lb = pLbl.get();
-                    lb.material = txtMat(n.f, _showHit ? '#fff' : '#eee', false, 'noteFret');
-                    lb.scale.set(NW * 0.7 * _textSizeMul, NH * 0.85 * _textSizeMul, 1);
-                    lb.position.set(x, y + techniqueYNow, noteZ + 0.005);
                 }
+                // Fret digits on fretted (n.f > 0) flying notes deliberately
+                // omitted: the showFretOnNote setting and its UI helper text
+                // promise digits on the fretboard ghost only, never on the
+                // gems coming down the highway. The ghost path is at
+                // pGhostFretLbl below.
 
                 // ── Sustain trail ─────────────────────────────────────────
                 if (hasSus) {
