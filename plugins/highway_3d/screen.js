@@ -7018,8 +7018,13 @@
         // Ghost digit for chord notes uses the template row when present so it
         // matches the XML diagram, not a divergent chordNote.f if any.
         function _templateFretForChordGhost(chordId, stringIdx, noteFret) {
-            if (chordId == null || !Number.isFinite(chordId)) return noteFret;
-            const fr = _drawChordTemplates?.[chordId]?.frets;
+            if (chordId == null) return noteFret;
+            // Coerce: some upstream paths (e.g. hs.chord_id from sloppaks)
+            // hand us string ids like "12". Cf. `templates[cid] ?? templates[Number(cid)]`
+            // earlier in this file.
+            const cid = typeof chordId === 'number' ? chordId : Number(chordId);
+            if (!Number.isFinite(cid)) return noteFret;
+            const fr = _drawChordTemplates?.[cid]?.frets;
             if (!Array.isArray(fr) || stringIdx < 0 || stringIdx >= fr.length) return noteFret;
             const tf = fr[stringIdx];
             if (typeof tf !== 'number' || tf < 0) return noteFret;
