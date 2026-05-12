@@ -1,5 +1,6 @@
 """Convert Guitar Pro files (.gp5/.gp4/.gp3) to Rocksmith 2014 arrangement XML."""
 
+import re
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from dataclasses import dataclass, field
@@ -7,9 +8,34 @@ from pathlib import Path
 
 import guitarpro
 
-# Standard tuning MIDI values (high e to low E, GP string order 1-6)
-STANDARD_TUNING_6 = [64, 59, 55, 50, 45, 40]
-STANDARD_TUNING_4 = [43, 38, 33, 28]  # Bass: G D A E
+_YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
+
+
+def _extract_year(song: guitarpro.Song) -> str:
+    """Pull a 4-digit year out of GP metadata.
+
+    GP files have no dedicated year field; the year usually appears inside the
+    copyright string (e.g. "1998 Goat Head Music, WB Music Corp, USA"). RsCli
+    requires <albumYear> to parse as Int32, so we extract just the digits and
+    fall back to empty (which RsCli treats as no year) when nothing matches.
+    """
+    for field_val in (getattr(song, "copyright", None), getattr(song, "subtitle", None)):
+        if not field_val:
+            continue
+        m = _YEAR_RE.search(str(field_val))
+        if m:
+            return m.group(1)
+    return ""
+
+# Standard tuning MIDI values, GP string order (1 = highest, high → low).
+# Guitar: E4 B3 G3 D3 A2 E2 [B1 F#1] — extends to 7/8 strings by adding low B/F#.
+# Bass:   C3 G2 D2 A1 E1 B0 — 6-string bass high→low. A 4-string bass is the
+#         middle four (G2 D2 A1 E1); a 5-string adds either the high C (full
+#         table including index 0) or the low B (slice ending at index 5).
+# We keep the tables at the maximum we support; _standard_tuning_for slices
+# to the actual string count.
+STANDARD_TUNING_GUITAR = [64, 59, 55, 50, 45, 40, 35, 30]
+STANDARD_TUNING_BASS = [48, 43, 38, 33, 28, 23]
 
 GP_TICKS_PER_QUARTER = 960
 
@@ -148,21 +174,78 @@ def _gp_string_to_rs(gp_string: int, num_strings: int) -> int:
     return num_strings - gp_string
 
 
-def _compute_tuning(track: guitarpro.Track) -> list[int]:
-    """Compute RS tuning offsets from GP string MIDI values."""
-    num = len(track.strings)
-    if num == 4:
-        standard = STANDARD_TUNING_4
-    else:
-        standard = STANDARD_TUNING_6[:num]
+def _is_bass_track(track: guitarpro.Track) -> bool:
+    """Detect whether a GP track is a bass.
 
-    # GP strings are ordered high to low (string 1 = highest)
-    # RS tuning is ordered low to high (index 0 = lowest)
+    Trusts a GM MIDI program in the Bass family (32-39) when present, but
+    does not trust an explicit *non-bass* program: GP files frequently ship
+    bass tracks with mis-set channels (acoustic-guitar 24, piano 0, etc.),
+    so we always fall back to the highest string's pitch when the program
+    isn't in the bass range. Bass tops out around C3 (MIDI 48 on a 6-string
+    bass); guitar's highest string is E4 (MIDI 64) or D4 (MIDI 62) even for
+    detuned 7/8-string charts, so a `max ≤ 48` cut cleanly separates them.
+    """
+    if hasattr(track, "channel") and track.channel:
+        instrument = getattr(track.channel, "instrument", -1)
+        if 32 <= instrument <= 39:
+            return True
+    if not track.strings:
+        return False
+    return max(s.value for s in track.strings) <= 48
+
+
+def _standard_tuning_for(num: int, is_bass: bool, top_midi: int | None = None) -> list[int]:
+    """Return a high→low standard tuning of length `num` for the given role.
+
+    5-string bass has two common standards: high-C (`C G D A E`, top MIDI
+    48) and low-B (`G D A E B`, top MIDI 43). When `top_midi` is provided
+    and `num == 5`, pick whichever standard the actual top string is
+    closer to — the midpoint between MIDI 43 and 48 is 45.5, so
+    `top_midi >= 46` selects the high-C variant. With no hint we default
+    to the more common low-B layout.
+    """
+    if is_bass:
+        if num == 5 and top_midi is not None and top_midi >= 46:
+            # High-C 5-string: drop the lowest string from the 6-string table.
+            return STANDARD_TUNING_BASS[:5]
+        if num <= 5:
+            # 4-string and low-B 5-string: skip the high C from the 6-string table.
+            return STANDARD_TUNING_BASS[1:1 + num]
+        if num <= len(STANDARD_TUNING_BASS):
+            return STANDARD_TUNING_BASS[:num]
+        # >6-string bass is pathological but theoretically possible —
+        # pad with descending fourths so the returned list always has
+        # `num` entries (otherwise `_compute_tuning` silently leaves
+        # offsets at 0 for the missing slots).
+        extra = [STANDARD_TUNING_BASS[-1] - 5 * (i + 1)
+                 for i in range(num - len(STANDARD_TUNING_BASS))]
+        return STANDARD_TUNING_BASS + extra
+    # Guitar extends downward (low B/F#) — slice from the top.
+    if num <= len(STANDARD_TUNING_GUITAR):
+        return STANDARD_TUNING_GUITAR[:num]
+    # Pathological GP files with >8 strings: pad by continuing in fourths.
+    extra = [STANDARD_TUNING_GUITAR[-1] - 5 * (i + 1)
+             for i in range(num - len(STANDARD_TUNING_GUITAR))]
+    return STANDARD_TUNING_GUITAR + extra
+
+
+def _compute_tuning(track: guitarpro.Track) -> list[int]:
+    """Compute RS tuning offsets (semitones from standard) from GP string MIDI values."""
+    num = len(track.strings)
+    # Top GP string is `number == 1`; fall back to None when strings is
+    # empty so `_standard_tuning_for` uses the default low-B 5-string layout.
+    top_midi = next((s.value for s in track.strings if s.number == 1), None)
+    standard = _standard_tuning_for(num, _is_bass_track(track), top_midi=top_midi)
+
+    # GP strings are ordered high to low (string 1 = highest).
+    # RS tuning is ordered low to high (index 0 = lowest).
     offsets = [0] * num
     for gp_str in track.strings:
+        idx = gp_str.number - 1
+        if idx < 0 or idx >= len(standard):
+            continue  # defensive; shouldn't happen now that standard tracks num
         rs_idx = _gp_string_to_rs(gp_str.number, num)
-        std_midi = standard[gp_str.number - 1]
-        offsets[rs_idx] = gp_str.value - std_midi
+        offsets[rs_idx] = gp_str.value - standard[idx]
     return offsets
 
 
@@ -187,7 +270,7 @@ def convert_track(
     """
     track = song.tracks[track_index]
     num_strings = len(track.strings)
-    is_bass = num_strings == 4
+    is_bass = _is_bass_track(track)
     tempo_map = _build_tempo_map(song)
     if force_standard_tuning:
         tuning = [0] * num_strings
@@ -309,10 +392,19 @@ def convert_track(
                 if len(beat_notes) == 1:
                     rs_notes.append(beat_notes[0])
                 else:
-                    # Chord: create/reuse a chord template
-                    frets = [-1] * max(6, num_strings)
+                    # Chord: create/reuse a chord template. Size the
+                    # voicing to the highest string actually used (with
+                    # a floor of 6 to keep RS schema slots populated)
+                    # — on a 7/8-string track, a plain 6-string voicing
+                    # should not inflate every chord template to length
+                    # 7/8 with trailing `-1`s that round-trip back as
+                    # spurious wide templates.
+                    used = max((n.string for n in beat_notes
+                                if 0 <= n.string < num_strings), default=-1)
+                    width = max(6, used + 1)
+                    frets = [-1] * width
                     for n in beat_notes:
-                        if 0 <= n.string < len(frets):
+                        if 0 <= n.string < width:
                             frets[n.string] = n.fret
                     fret_key = tuple(frets)
 
@@ -325,7 +417,7 @@ def convert_track(
                         chord_templates.append(ChordTemplate(
                             name=chord_name,
                             frets=list(frets),
-                            fingers=[-1] * len(frets),
+                            fingers=[-1] * width,
                         ))
                         chord_template_map[fret_key] = idx
 
@@ -373,7 +465,7 @@ def convert_track(
         title=song.title or "Untitled",
         artist=song.artist or "Unknown",
         album=song.album or "",
-        year=str(song.copyright) if song.copyright else "",
+        year=_extract_year(song),
         arrangement=arrangement_name,
         tuning=tuning,
         num_strings=num_strings,
@@ -406,9 +498,12 @@ def _build_xml(
     ET.SubElement(root, "albumName").text = album
     ET.SubElement(root, "albumYear").text = year
 
-    # Tuning
+    # Tuning. RS2014 schema names 6 string slots; we always emit those
+    # for compatibility, and emit additional string6+ attributes (up to
+    # `len(tuning)-1`) for 7+ string arrangements. Slopsmith parses
+    # them; stock RS ignores them.
     tuning_el = ET.SubElement(root, "tuning")
-    for i in range(6):
+    for i in range(max(6, len(tuning))):
         tuning_el.set(f"string{i}", str(tuning[i] if i < len(tuning) else 0))
     ET.SubElement(root, "capo").text = "0"
 
@@ -436,11 +531,15 @@ def _build_xml(
         ET.SubElement(phrase_iters, "phraseIteration",
                       time=f"{s.time:.3f}", phraseId=str(i))
 
-    # Chord templates
+    # Chord templates. RS schema names fret0..fret5; emit extra slots
+    # per-template only when that specific chord actually has 7+ string
+    # data, so a single 7-string chord doesn't inflate every other
+    # 6-string template with synthetic `-1` slots on round-trip.
     ct_el = ET.SubElement(root, "chordTemplates", count=str(len(chord_templates)))
     for ct in chord_templates:
+        width = max(6, len(ct.frets), len(ct.fingers))
         attrs = {"chordName": ct.name}
-        for i in range(6):
+        for i in range(width):
             attrs[f"fret{i}"] = str(ct.frets[i] if i < len(ct.frets) else -1)
             attrs[f"finger{i}"] = str(ct.fingers[i] if i < len(ct.fingers) else -1)
         ET.SubElement(ct_el, "chordTemplate", **attrs)
@@ -583,6 +682,7 @@ def list_tracks(gp_path: str) -> list[dict]:
             "is_percussion": track.isPercussionTrack,
             "is_piano": is_piano_track(track),
             "is_drums": is_drum_track(track),
+            "is_bass": _is_bass_track(track),
             "instrument": instrument,
             "notes": note_count,
         })
@@ -620,8 +720,9 @@ def auto_select_tracks(gp_path: str) -> tuple[list[int], dict[int, str]]:
 
         name_low = t["name"].lower()
 
-        # 4-string = bass
-        if t["strings"] == 4:
+        # Bass detection: trust GM instrument / pitch-based check, which covers
+        # 4-, 5- and 6-string basses.
+        if t["is_bass"]:
             selected.append((t["index"], "bass"))
             continue
 
@@ -634,15 +735,15 @@ def auto_select_tracks(gp_path: str) -> tuple[list[int], dict[int, str]]:
             selected.append((t["index"], "bass"))
         elif any(kw in name_low for kw in guitar_keywords):
             selected.append((t["index"], "guitar"))
-        elif t["strings"] == 6:
-            # Generic 6-string, assume guitar
+        elif 6 <= t["strings"] <= 8:
+            # Generic 6/7/8-string, assume guitar (extended-range).
             selected.append((t["index"], "guitar"))
 
     if not selected:
         # Fallback: take all non-percussion non-empty tracks
         for t in tracks:
             if not t["is_percussion"] and t["notes"] > 0:
-                role = "bass" if t["strings"] == 4 else "guitar"
+                role = "bass" if t["is_bass"] else "guitar"
                 selected.append((t["index"], role))
 
     # Assign Rocksmith names: Lead, Rhythm, Combo, Bass, Keys, Drums
@@ -819,7 +920,7 @@ def convert_piano_track(
         title=song.title or "Untitled",
         artist=song.artist or "Unknown",
         album=song.album or "",
-        year=str(song.copyright) if song.copyright else "",
+        year=_extract_year(song),
         arrangement=arrangement_name,
         tuning=[0] * 6,
         num_strings=6,
@@ -974,7 +1075,7 @@ def convert_drum_track(
         title=song.title or "Untitled",
         artist=song.artist or "Unknown",
         album=song.album or "",
-        year=str(song.copyright) if song.copyright else "",
+        year=_extract_year(song),
         arrangement=arrangement_name,
         tuning=[0] * 6,
         num_strings=6,
