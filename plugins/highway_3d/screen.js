@@ -4867,6 +4867,20 @@
          * note-stream inference. Prefer explicit hand-shape flags and fall back
          * to template markers when present.
          */
+        /**
+         * Per spec, `displayName` is the UI label for a chord template
+         * (defaulting to `name` when the chart didn't set it). Always go
+         * through this helper so name vs. displayName drift can't surface
+         * the wrong label or break displayName-based dedupe heuristics.
+         */
+        function chordTemplateLabel(tmpl) {
+            if (!tmpl) return '';
+            const d = tmpl.displayName;
+            if (typeof d === 'string' && d.length > 0) return d;
+            const n = tmpl.name;
+            return typeof n === 'string' ? n : '';
+        }
+
         function chordTemplateMarkedArpeggio(cid, chordTemplates) {
             if (cid == null || !chordTemplates) return false;
             const tmpl = chordTemplates[cid] ?? chordTemplates[Number(cid)];
@@ -4948,8 +4962,11 @@
             const trimmedTemplateName = (cid) => {
                 if (cid == null || !chordTemplates) return '';
                 const tmpl = chordTemplates[cid] ?? chordTemplates[Number(cid)];
-                const n = tmpl && tmpl.name;
-                return typeof n === 'string' ? n.trim() : '';
+                // CDLC commonly authors several <chordTemplate> rows that share
+                // a displayName for fingering variants; the suppression
+                // heuristic in the surrounding code dedupes on the *label*,
+                // not the underlying name, so go through chordTemplateLabel.
+                return chordTemplateLabel(tmpl).trim();
             };
             outer: for (let i = 0; i < handShapes.length; i++) {
                 const hs = handShapes[i];
@@ -6200,7 +6217,7 @@
                         drawFrameBox(cx - width * 0.5 + ftSide * 0.5, sideCy, ftSide, sideH, 13);
                         drawFrameBox(cx + width * 0.5 - ftSide * 0.5, sideCy, ftSide, sideH, 13);
 
-                        const chordName = bundle.chordTemplates?.[ch.id]?.name;
+                        const chordName = chordTemplateLabel(bundle.chordTemplates?.[ch.id]);
                         if (chordName && firstInShapeRun && !chordWireHighDensity(ch)) {
                             const lblW = 28 * K, lblH = 9 * K;
                             const lbl = pChordLbl.get();
@@ -6808,9 +6825,10 @@
                         const chDt = ch.t - now;
                         if (chDt <= 0 && chDt > -DIAG_LINGER_S) {
                             const tmpl = bundle.chordTemplates?.[ch.id];
-                            if (tmpl?.name && tmpl?.frets && ch.t > bestT) {
+                            const lbl = chordTemplateLabel(tmpl);
+                            if (lbl && tmpl?.frets && ch.t > bestT) {
                                 bestT = ch.t;
-                                newChord = { name: tmpl.name, frets: tmpl.frets, t: ch.t, t0: ch.t, chDt, nStr };
+                                newChord = { name: lbl, frets: tmpl.frets, t: ch.t, t0: ch.t, chDt, nStr };
                             }
                         }
                     }
@@ -6854,9 +6872,10 @@
                                 for (const ch of chords) {
                                     if (!ch.notes) continue;
                                     const tmpl = bundle.chordTemplates?.[ch.id];
-                                    if (tmpl?.name && tmpl?.frets && ch.t < newChord.t && ch.t > bestPrevT) {
+                                    const lbl = chordTemplateLabel(tmpl);
+                                    if (lbl && tmpl?.frets && ch.t < newChord.t && ch.t > bestPrevT) {
                                         bestPrevT = ch.t;
-                                        histPrev = { name: tmpl.name, frets: tmpl.frets, t: ch.t, t0: ch.t, nStr };
+                                        histPrev = { name: lbl, frets: tmpl.frets, t: ch.t, t0: ch.t, nStr };
                                     }
                                 }
                             }
