@@ -152,6 +152,45 @@ services:
 volumes:
   slopsmith-config:
 ```
+## Apache Reverse Proxy
+
+To expose Slopsmith behind an Apache reverse proxy, add the following configuration to your virtual host:
+
+```apache
+ProxyPass /slopsmith/ http://localhost:8000/
+ProxyPassReverse /slopsmith/ http://localhost:8000/
+
+ProxyPass /api/ http://localhost:8000/api/
+ProxyPassReverse /api/ http://localhost:8000/api/
+
+ProxyPass /static/ http://localhost:8000/static/
+ProxyPassReverse /static/ http://localhost:8000/static/
+
+ProxyPass /ws ws://localhost:8000/ws
+
+ProxyPass /audio/ http://localhost:8000/audio/
+ProxyPassReverse /audio/ http://localhost:8000/audio/
+```
+
+Ensure the required Apache modules are enabled:
+
+```bash
+sudo a2enmod proxy
+sudo a2enmod proxy_http
+sudo a2enmod proxy_wstunnel
+```
+
+Then restart Apache:
+
+```bash
+sudo systemctl restart apache2
+```
+
+> **Note:** If Slopsmith is running on a different server, replace `localhost:8000` with the appropriate URL or IP address (e.g., `http://192.168.1.100:8000` or `http://slopsmith.internal:8000`).
+>
+> **Important:** Even though the app entrypoint is proxied at `/slopsmith`, Slopsmith currently uses absolute frontend paths (for example `/static/...` and `/api/...`). That is why the config also proxies `/api`, `/static`, `/ws`, and `/audio` at the virtual-host root. These root routes will be exposed and can conflict with an existing site that already uses the same paths.
+>
+> Slopsmith is not fully base-path aware yet, so it cannot be cleanly nested entirely under `/slopsmith` without additional rewriting or app changes. If you need to avoid route collisions, use a dedicated subdomain (for example `slopsmith.your-domain`) as the cleanest option.
 
 ## Proxmox LXC Container
 
