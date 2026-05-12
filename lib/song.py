@@ -436,9 +436,12 @@ def _int(elem, attr, default=0):
         return int(float(v))
 
 
+_FALSE_LITERALS = frozenset({"", "0", "false", "False", "FALSE"})
+
+
 def _bool(elem, attr):
     v = elem.get(attr)
-    return v is not None and v != "0"
+    return v is not None and v not in _FALSE_LITERALS
 
 
 def _hand_shape_arpeggio_flag(elem) -> bool:
