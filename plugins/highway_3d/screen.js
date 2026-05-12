@@ -1776,6 +1776,31 @@
         let _arpLaneRailHsScratch = [];
         let _arpRailBoundLoScratch = [];
         let _arpRailBoundHiScratch = [];
+
+        // ── Cross-frame caches for chart-static derivations ──────────────
+        // The merge + arp-flag fills below depend only on chart-static
+        // input arrays (handShapes / chords / chordTemplates / notes),
+        // not on `now`. The bundle hands us the same array refs every
+        // frame within an arrangement, so we can skip the recompute when
+        // the inputs are identity-equal to the previous frame's. On dense
+        // arrangements this avoids per-frame Set construction, nested
+        // O(hs × notes) scans, and a sort — significant FPS recovery.
+        let _mergeCacheResult = null;
+        let _mergeCacheChordsRef = null;
+        let _mergeCacheHsRef = null;
+        let _mergeCacheTplRef = null;
+
+        let _arpGhostInferRefHs = null;
+        let _arpGhostInferRefNotes = null;
+        let _arpGhostInferRefTpl = null;
+
+        let _laneRailFlagsRefHs = null;
+        let _laneRailFlagsRefTpl = null;
+
+        let _laneRailBoundsRefHs = null;
+        let _laneRailBoundsRefChords = null;
+        let _laneRailBoundsRefTpl = null;
+        let _laneRailBoundsRefNotes = null;
         let _lastHwW = 0, _lastHwH = 0;
         let mBeatM = null, mBeatQ = null;
         let txtCache = {};
@@ -5411,18 +5436,41 @@
             const t1 = now + AHEAD;
 
             const notes = bundle.notes;
-            const chords = mergeHandShapeSynthChords(
-                bundle.chords,
-                bundle.handShapes,
-                bundle.chordTemplates,
-            );
+            // Skip the merge when inputs are identity-equal to the last
+            // frame's; mergeHandShapeSynthChords is chart-static.
+            let chords;
+            if (_mergeCacheResult !== null
+                && _mergeCacheChordsRef === bundle.chords
+                && _mergeCacheHsRef === bundle.handShapes
+                && _mergeCacheTplRef === bundle.chordTemplates) {
+                chords = _mergeCacheResult;
+            } else {
+                chords = mergeHandShapeSynthChords(
+                    bundle.chords,
+                    bundle.handShapes,
+                    bundle.chordTemplates,
+                );
+                _mergeCacheResult = chords;
+                _mergeCacheChordsRef = bundle.chords;
+                _mergeCacheHsRef = bundle.handShapes;
+                _mergeCacheTplRef = bundle.chordTemplates;
+            }
 
             let arpGhostHsInfer = null;
             const hsForArpGhost = bundle.handShapes;
             if (hsForArpGhost && hsForArpGhost.length && notes && notes.length) {
                 const nHs = hsForArpGhost.length;
                 while (_arpGhostHsInferScratch.length < nHs) _arpGhostHsInferScratch.push(false);
-                fillArpeggioGhostInferFlags(hsForArpGhost, bundle.chordTemplates, notes, _arpGhostHsInferScratch);
+                // fillArpeggioGhostInferFlags is chart-static — skip if
+                // the input refs match the previous frame's.
+                if (_arpGhostInferRefHs !== hsForArpGhost
+                    || _arpGhostInferRefNotes !== notes
+                    || _arpGhostInferRefTpl !== bundle.chordTemplates) {
+                    fillArpeggioGhostInferFlags(hsForArpGhost, bundle.chordTemplates, notes, _arpGhostHsInferScratch);
+                    _arpGhostInferRefHs = hsForArpGhost;
+                    _arpGhostInferRefNotes = notes;
+                    _arpGhostInferRefTpl = bundle.chordTemplates;
+                }
                 arpGhostHsInfer = _arpGhostHsInferScratch;
             }
 
@@ -5439,16 +5487,32 @@
                     _arpRailBoundLoScratch.push(0);
                     _arpRailBoundHiScratch.push(0);
                 }
-                fillLaneRailHandShapeFlags(hsLaneRail, bundle.chordTemplates, _arpLaneRailHsScratch);
-                fillArpeggioRailShapeBoundsCaches(
-                    hsLaneRail,
-                    chords ?? [],
-                    bundle.chordTemplates,
-                    notesArrForRails,
-                    _arpLaneRailHsScratch,
-                    _arpRailBoundLoScratch,
-                    _arpRailBoundHiScratch,
-                );
+                // Authored-marker flags depend only on (handShapes, templates).
+                if (_laneRailFlagsRefHs !== hsLaneRail
+                    || _laneRailFlagsRefTpl !== bundle.chordTemplates) {
+                    fillLaneRailHandShapeFlags(hsLaneRail, bundle.chordTemplates, _arpLaneRailHsScratch);
+                    _laneRailFlagsRefHs = hsLaneRail;
+                    _laneRailFlagsRefTpl = bundle.chordTemplates;
+                }
+                // Bounds cache depends on (handShapes, chords, templates, notes).
+                if (_laneRailBoundsRefHs !== hsLaneRail
+                    || _laneRailBoundsRefChords !== chords
+                    || _laneRailBoundsRefTpl !== bundle.chordTemplates
+                    || _laneRailBoundsRefNotes !== notesArrForRails) {
+                    fillArpeggioRailShapeBoundsCaches(
+                        hsLaneRail,
+                        chords ?? [],
+                        bundle.chordTemplates,
+                        notesArrForRails,
+                        _arpLaneRailHsScratch,
+                        _arpRailBoundLoScratch,
+                        _arpRailBoundHiScratch,
+                    );
+                    _laneRailBoundsRefHs = hsLaneRail;
+                    _laneRailBoundsRefChords = chords;
+                    _laneRailBoundsRefTpl = bundle.chordTemplates;
+                    _laneRailBoundsRefNotes = notesArrForRails;
+                }
                 laneRailArpHsFlags = _arpLaneRailHsScratch;
                 laneRailBoundLo = _arpRailBoundLoScratch;
                 laneRailBoundHi = _arpRailBoundHiScratch;
