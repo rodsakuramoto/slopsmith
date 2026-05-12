@@ -784,7 +784,7 @@
         return _bgBandsCache;
     }
 
-    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: true, fretNumberGhostScope: 'rocksmith', cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 1, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
+    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', showFretOnNote: true, fretNumberGhostScope: 'rocksmith', cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 1, projectionVisible: true, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: true, sectionHudPosition: 'tr', sectionHudSize: 0.5 };
     const BG_STYLE_IDS = ['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video'];
     const FRET_NUMBER_GHOST_SCOPE_IDS = ['rocksmith', 'all'];
 
@@ -823,7 +823,7 @@
     // means (fall back to default rather than silently flipping to
     // false). Add new boolean keys to BG_DEFAULTS and they pick this
     // up via the dispatch below.
-    const _BG_BOOL_KEYS = new Set(['reactive', 'showFretOnNote', 'cameraLockLow', 'inlayLabelsVisible', 'sectionLabelsOnHighway', 'sectionHudVisible', 'nutHeadstockVisible', 'tuningLabelsVisible']);
+    const _BG_BOOL_KEYS = new Set(['reactive', 'showFretOnNote', 'cameraLockLow', 'inlayLabelsVisible', 'sectionLabelsOnHighway', 'sectionHudVisible', 'nutHeadstockVisible', 'tuningLabelsVisible', 'projectionVisible']);
     function _bgCoerceBool(val, fallback) {
         if (val === 'true' || val === '1') return true;
         if (val === 'false' || val === '0') return false;
@@ -941,6 +941,7 @@
     window.h3dBgSetSectionHudVisible      = (v) => _bgWriteGlobal('sectionHudVisible', !!v);
     window.h3dBgSetSectionHudPosition     = (v) => _bgWriteGlobal('sectionHudPosition', v);
     window.h3dBgSetSectionHudSize         = (v) => _bgWriteGlobal('sectionHudSize', v);
+    window.h3dBgSetProjectionVisible      = (v) => _bgWriteGlobal('projectionVisible', !!v);
     // Custom image asset for the 'image' bg style (#19). Composite setter:
     // writes both the data URL (the bytes that drive the texture) and the
     // display filename, each emitting a change event. The listener
@@ -1861,9 +1862,10 @@
         let sectionHudPosition     = BG_DEFAULTS.sectionHudPosition;
         let sectionHudSize         = BG_DEFAULTS.sectionHudSize;
         let nutHeadstockVisible    = BG_DEFAULTS.nutHeadstockVisible;
-        let tuningLabelsVisible   = BG_DEFAULTS.tuningLabelsVisible;
+        let tuningLabelsVisible    = BG_DEFAULTS.tuningLabelsVisible;
         let nutColor               = BG_DEFAULTS.nutColor;
         let headstockColor         = BG_DEFAULTS.headstockColor;
+        let projectionVisible      = BG_DEFAULTS.projectionVisible;   // board "note preview" ghost on the fretboard
         let _vibrancyIdleOp = 0.4  + 0.6  * BG_DEFAULTS.vibrancy;
         let _vibrancyProjOp = 0.15 + 0.35 * BG_DEFAULTS.vibrancy;
         // Custom image asset (issue #19). Data URL is the bytes that
@@ -1897,11 +1899,33 @@
         let _ndOnHit = null, _ndOnMiss = null;
         let _ndOnBusHit = null, _ndOnBusMiss = null;
         let _ndLabels = [];
+        // slopsmith#254 — per-frame queue of confirmed-hit/active notes
+        // ({x, y, z, s, alpha, color} in world space; alpha is the
+        // provider's clamped 0..1 fade — drawNotedetectSizzle scales
+        // opacity/density by it; color is an optional override for the
+        // string-tinted half of the dot/arc colour mix). drawNote() fills
+        // it; after ren.render(), drawNotedetectSizzle() projects each
+        // through the camera and twinkles a few tiny dots on the note.
+        // Rebuilt every frame, so the sparkle follows the note and
+        // persists exactly as long as the provider keeps reporting
+        // hit/active for it.
+        let _ndSizzle = [];
         // Per-frame timestamp captured by update() and used by its
         // prune pass for the notedetect mark arrays. drawNote itself
         // no longer reads it — pruning lives once per frame so
         // drawNote's hot path is just the bounded (s, f, t) match.
         let _ndFrameNowMs = 0;
+        // slopsmith#254 — core's per-note judgment provider, captured
+        // from `bundle.getNoteState` at the top of each update(). When
+        // present it's authoritative over the event-driven marks above:
+        // 'hit'/'active' → bright string-tinted outline (mGlow[s]) +
+        // bright body + glowing sustain trail + a contained sparkle on
+        // the overlay (a held sustain keeps glowing/sparkling for as
+        // long as it stays 'active'); 'miss' → red outline (mMissOutline)
+        // + suppressed body. null on cores without the API or songs
+        // with no scorer registered. Older note_detect builds that only
+        // emit notedetect:hit/miss events still work via _ndHitMarks.
+        let _ndGetNoteState = null;
 
         // Object pools
         let pNote, pSus, pLbl, pBeat, pSec;
@@ -3906,7 +3930,8 @@
                     changedKey === 'sectionLabelsOnHighway' ||
                     changedKey === 'sectionHudVisible' ||
                     changedKey === 'sectionHudPosition' ||
-                    changedKey === 'sectionHudSize') {
+                    changedKey === 'sectionHudSize' ||
+                    changedKey === 'projectionVisible') {
                     // Flag flips don't need a mesh rebuild — just refresh
                     // the per-instance state for the next frame to consult.
                     // Same shape for showFretOnNote (#12), cameraSmoothing
@@ -4111,6 +4136,7 @@
             tuningLabelsVisible    = _bgReadSetting(panelKey, 'tuningLabelsVisible');
             nutColor               = _bgReadSetting(panelKey, 'nutColor');
             headstockColor         = _bgReadSetting(panelKey, 'headstockColor');
+            projectionVisible      = _bgReadSetting(panelKey, 'projectionVisible');
             _vibrancyIdleOp = 0.4  + 0.6  * vibrancy;
             _vibrancyProjOp = 0.15 + 0.35 * vibrancy;
             // Custom image asset is a single GLOBAL slot — bytes are
@@ -5369,6 +5395,7 @@
             pFretColMarker.reset();
             _ndLabels = [];
             let hwyLaneArpOuterDividers = false;
+            _ndSizzle = [];
 
             // Prune expired notedetect marks once per frame instead of
             // once per drawNote call (issue #9 perf nit). drawNote then
@@ -5383,6 +5410,9 @@
             if (_ndMissMarks.length) {
                 _ndMissMarks = _ndMissMarks.filter(m => m.expiresAt > _ndFrameNowMs);
             }
+            // slopsmith#254 — capture core's per-note judgment provider for
+            // this frame's drawNote() calls (held-sustain glow + lit gems).
+            _ndGetNoteState = (bundle && typeof bundle.getNoteState === 'function') ? bundle.getNoteState : null;
 
             const now = bundle.currentTime;
             const t0 = now - BEHIND;
@@ -7101,6 +7131,48 @@
                 const rimXY = n.ac ? ACCENT_RIM_XY_SCALE_MUL : 1;
                 const rimZ = n.ac ? ACCENT_RIM_Z_SCALE_MUL : 1;
 
+                // slopsmith#254 — core's per-note judgment provider is
+                // authoritative over the event-driven marks above (and over
+                // the proximity-based `hit` heuristic). 'active' (a sustained
+                // note currently being held on-pitch) reads the same as
+                // 'hit': bright string-tinted outline (mGlow[s]) + bright
+                // body + bright sustain trail + the contained sparkle/sizzle
+                // overlay (drawNotedetectSizzle). 'miss' → red outline AND
+                // suppress the bright body even if the note is near the line.
+                // Called with the note's chart time, not `now`: note_detect
+                // keys its noteResults map by chart time, so `n.t` is the key
+                // (it reads the live time internally for the fade window).
+                let _ndGood = false, _ndState = null;
+                if (_ndGetNoteState) {
+                    let _cs = null;
+                    try { _cs = _ndGetNoteState(n, n.t); } catch (e) { _cs = null; }
+                    if (_cs) {
+                        const _isObj = typeof _cs === 'object';
+                        const _st = _isObj ? _cs.state : _cs;
+                        if (_st === 'miss') {
+                            _ndState = 'miss';
+                            _ndOutline = mMissOutline;
+                        } else if (_st === 'hit' || _st === 'active') {
+                            _ndState = _st;
+                            _ndGood = true;
+                            _ndOutline = mGlow[s];        // bright string-tinted edge (no green)
+                            // Carry the provider's alpha (and optional color)
+                            // through to the sizzle so a struck-note fade or a
+                            // custom palette comes through (#254 review).
+                            // _noteState already clamps alpha to [0,1] and only
+                            // returns the object when alpha > 0.
+                            if (_ndSizzle.length < 40) {
+                                const _a = (_isObj && Number.isFinite(_cs.alpha)) ? Math.max(0, Math.min(1, _cs.alpha)) : 1;
+                                const _col = (_isObj && typeof _cs.color === 'string') ? _cs.color : null;
+                                _ndSizzle.push({ x, y: y + techniqueYNow, z: noteZ, s, alpha: _a, color: _col });
+                            }
+                        }
+                    }
+                }
+                // Provider verdict wins when present; otherwise fall back to
+                // the proximity heuristic, including the pre-hit ghost window.
+                const _showHit = (_ndState === 'miss') ? false : (_ndState ? _ndGood : (hit || (n.f > 0 && inGhostWin)));
+
                 // Accent: soft neon outer glow (reference: diffused halo fading out).
                 // Three additive shells drawn behind outline/core; colour = string hue.
                 if (n.ac && mAccentHaloNear[s]) {
@@ -7128,9 +7200,8 @@
                         }
                     }
                 }
-
                 const outline = pNote.get();
-                outline.material = _ndMatchedMark != null ? _ndOutline
+                outline.material = (_ndMatchedMark != null || _ndState != null) ? _ndOutline
                     : (n.ac ? mAccentOutline[s] : _ndOutline);
                 outline.position.set(x, y + techniqueYNow, noteZ);
                 outline.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
@@ -7146,8 +7217,7 @@
 
                 // ── Core (filled note body) ───────────────────────────────
                 const core = pNote.get();
-                core.material = n.ac ? mAccentCore[s]
-                    : ((hit || (n.f > 0 && inGhostWin)) ? mGlow[s] : mStr[s]);
+                core.material = n.ac ? mAccentCore[s] : (_showHit ? mGlow[s] : mStr[s]);
                 core.position.set(x, y + techniqueYNow, noteZ + 0.001);
                 core.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
@@ -7158,6 +7228,32 @@
                     );
                 } else {
                     core.scale.set(rimXY, rimXY, 2.5 * rimZ);
+                }
+                if (n.f === 0) {
+                    // "0" label on open string
+                    const lb = pLbl.get();
+                    lb.material = txtMat(0, _showHit ? '#fff' : '#ddd', false, 'open');
+                    lb.scale.set(NW * 0.7 * _textSizeMul * openWScale, NH * 0.8 * _textSizeMul * openWScale, 1);
+                    lb.position.set(x, y + techniqueYNow, noteZ + 0.01 * K);
+                } else if (showFretOnNote && n.f > 0) {
+                    // Embedded fret number on the note body (issue #12).
+                    // The `n.f > 0` guard is redundant in the normal
+                    // path (we're already in the else of `n.f === 0`)
+                    // but matches the rest of the renderer's "fretted
+                    // means n.f > 0" convention (e.g. approachRot,
+                    // connector label) and side-steps any bogus
+                    // negative / NaN fret values from a malformed
+                    // chart. Sprite is camera-facing so it stays
+                    // readable through the note's approach-rotation.
+                    // Core sits at noteZ + 0.001 (raw world units, not
+                    // K-scaled), so place the label at noteZ + 0.005
+                    // — definitively in front of the core regardless
+                    // of how K resolves, units consistent with the
+                    // core's offset.
+                    const lb = pLbl.get();
+                    lb.material = txtMat(n.f, _showHit ? '#fff' : '#eee', false, 'noteFret');
+                    lb.scale.set(NW * 0.7 * _textSizeMul, NH * 0.85 * _textSizeMul, 1);
+                    lb.position.set(x, y + techniqueYNow, noteZ + 0.005);
                 }
 
                 // ── Sustain trail ─────────────────────────────────────────
@@ -7216,7 +7312,10 @@
                                 trOut.position.set(xOff, y, zCenter);
                                 trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
                                 const tr = pSus.get();
-                                tr.material = mSus[s];
+                                // slopsmith#254 — a sustain currently being
+                                // held correctly glows bright (mGlow), else
+                                // the usual dim sustain material.
+                                tr.material = _ndGood ? mGlow[s] : mSus[s];
                                 tr.position.set(xOff, y, zCenter);
                                 tr.scale.set(tw, th, segLen);
                             }
@@ -7242,7 +7341,7 @@
                                 body.scale.set(1, 1, 1);
                                 body.rotation.set(0, 0, 0);
                                 body.position.set(0, 0, 0);
-                                body.material = mSus[s];
+                                body.material = _ndGood ? mGlow[s] : mSus[s];
                                 slideRibbonUpdatePositions(
                                     body.geometry, strandX, tw, th, y,
                                     sliceDur, susStart, now, n, slideSt,
@@ -7375,11 +7474,11 @@
             // ── Board ghost: filled rim at Z=0 (always drawn for isNext) ─
             const PROJ_WIN = 0.6;
             const projFactor = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN));
-            if (n.f > 0 && isNextOnString && dt > -ghostHold && dt < PROJ_WIN && projFactor > 0.001) {
+            const isBlocked = dt < 0.15 && n.sus > 0;
+            if (n.f > 0 && isNextOnString && projectionVisible && dt > -ghostHold && dt < PROJ_WIN && projFactor > 0.001 && !isBlocked) {
                 // Ghost stays at final "on the board" orientation — not the
                 // incoming approachRot sweep — so it nests with the note at impact.
                 const projRim = isHarm ? Math.PI / 4 : 0;
-
                 const proj = projMeshArr[s];
                 // _vibrancyProjOp (0.15..0.5) is the vibrancy-scaled idle floor;
                 // scale the whole opacity by (_vibrancyProjOp / 0.15) so the slider
@@ -7474,6 +7573,96 @@
             ctx.restore();
         }
 
+        // slopsmith#254 — the "sparkle/sizzle": a few tiny bright dots that
+        // twinkle on each confirmed hit/active note, re-randomised every
+        // frame, contained to roughly the note's footprint (no halo / no
+        // shockwave / no long sparks). Drawn on the 2D overlay AFTER
+        // ren.render(), positioned by projecting the note's world point
+        // through the now-up-to-date camera so it sits exactly on the
+        // note and follows it. _ndSizzle is filled by drawNote(); rebuilt
+        // every frame, so the sparkle lives for exactly as long as the
+        // provider keeps reporting hit/active for that note (and stops
+        // the instant it goes away or a held sustain drops off-pitch).
+        function drawNotedetectSizzle(ctx, W, H) {
+            if (!_ndSizzle.length || !cam || !_probe) return;
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            ctx.lineCap = 'round';
+            for (const it of _ndSizzle) {
+                _probe.set(it.x, it.y, it.z);
+                _probe.project(cam);
+                if (_probe.z < -1 || _probe.z > 1) continue;
+                const cx = (_probe.x * 0.5 + 0.5) * W;
+                const cy = (-_probe.y * 0.5 + 0.5) * H;
+                // On-screen note size: project a point half a note-width to
+                // the side along the fretboard X axis (reliably non-parallel
+                // to the view direction, unlike a world-Y offset on a note
+                // that's rotated flat at the strike line), and take the 2D
+                // pixel distance. Floored so it always draws something.
+                _probe.set(it.x + NW * 0.5, it.y, it.z);
+                _probe.project(cam);
+                const ex = (_probe.x * 0.5 + 0.5) * W, ey = (-_probe.y * 0.5 + 0.5) * H;
+                const r = Math.max(8, Math.hypot(ex - cx, ey - cy));
+                if (r > Math.min(W, H) * 0.4) continue;                 // absurd projection — skip
+                // Provider-driven fade: scale opacity AND on-probability by
+                // the entry's alpha so a struck-note glow visibly fades out
+                // (more dots/arcs drop off as alpha decays), and prefer the
+                // provider's custom color (when given) for the string-color
+                // half of the mix. alpha defaults 1 (full intensity).
+                const itA = (typeof it.alpha === 'number') ? it.alpha : 1;
+                if (itA <= 0) continue;
+                const c = activePalette[it.s];
+                const colHex = (typeof it.color === 'string')
+                    ? it.color
+                    : ((typeof c === 'number')
+                        ? '#' + ('000000' + (c >>> 0).toString(16)).slice(-6)
+                        : '#ffffff');
+                const rx = r * 1.08, ry = r * 0.66;                     // note is a flat wide rect at the line
+                const skipBoost = 0.6 * (1 - itA);                      // extra "off" probability as alpha fades
+
+                // Crackling edge — short bright arc segments flicking around
+                // the note's perimeter, re-randomised each frame so the
+                // outline "sizzles". Soft glow on each so it pops; still
+                // contained right at the note's edge (≲1.4×).
+                const arcs = 8;
+                for (let i = 0; i < arcs; i++) {
+                    if (Math.random() < 0.2 + skipBoost) continue;
+                    const a0 = Math.random() * Math.PI * 2;
+                    const a1 = a0 + (0.3 + Math.random() * 0.85);
+                    const rr = 0.92 + Math.random() * 0.46;             // ≈0.92–1.38× the note edge
+                    const white = Math.random() < 0.5;
+                    ctx.globalAlpha = (0.55 + Math.random() * 0.45) * itA;
+                    ctx.strokeStyle = white ? '#ffffff' : colHex;
+                    ctx.shadowColor = white ? '#ffffff' : colHex;
+                    ctx.shadowBlur = Math.max(3, r * 0.22) * itA;
+                    ctx.lineWidth = Math.max(2, r * 0.2);
+                    ctx.beginPath();
+                    ctx.ellipse(cx, cy, rx * rr, ry * rr, 0, a0, a1);
+                    ctx.stroke();
+                }
+
+                // Sparkle — bright dots twinkling on/around the note.
+                const N = 16;
+                for (let i = 0; i < N; i++) {
+                    if (Math.random() < 0.28 + skipBoost) continue;     // twinkle — more off as alpha fades
+                    const ang = Math.random() * Math.PI * 2;
+                    const d = 0.12 + Math.random() * 1.05;              // 0.12–1.17× the edge
+                    const dx = cx + Math.cos(ang) * rx * d;
+                    const dy = cy + Math.sin(ang) * ry * d;
+                    const white = Math.random() < 0.5;
+                    ctx.globalAlpha = (0.6 + Math.random() * 0.4) * itA;
+                    ctx.fillStyle = white ? '#ffffff' : colHex;
+                    ctx.shadowColor = white ? '#ffffff' : colHex;
+                    ctx.shadowBlur = Math.max(2, r * 0.16) * itA;
+                    ctx.beginPath();
+                    ctx.arc(dx, dy, 1.6 + Math.random() * Math.max(3.5, r * 0.22), 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.shadowBlur = 0;
+            }
+            ctx.restore();
+        }
+
         /* ── Camera smooth lerp ──────────────────────────────────────────── */
         function camUpdate(bundle) {
             const bpm = computeBPM(bundle.beats, bundle.currentTime);
@@ -7557,6 +7746,7 @@
             _ndHitMarks = [];
             _ndMissMarks = [];
             _ndLabels = [];
+            _ndSizzle = [];
             _bgUnmountStyle();
             bgGroup = null; _bgLastT = 0;
             _diagChord = null; _diagPrev = null; _diagPrevOpacity = 0; _diagPrevStartOpacity = 0; _diagPrevStartT = null;
@@ -7830,6 +8020,7 @@
                     if (bundle.lyricsVisible && bundle.lyrics?.length) {
                         lyricsBottom = drawLyrics(bundle.lyrics, bundle.currentTime, lyricsCtx, lyricsCanvas.width, lyricsCanvas.height) || 0;
                     }
+                    drawNotedetectSizzle(lyricsCtx, lyricsCanvas.width, lyricsCanvas.height);
                     drawNotedetectLabels(lyricsCtx, lyricsCanvas.width, lyricsCanvas.height);
                     // Draw outgoing diagram first so the incoming diagram renders on top,
                     // making the entrance scale-in animation visible during crossfades.
