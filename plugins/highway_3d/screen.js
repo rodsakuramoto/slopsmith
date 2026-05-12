@@ -2308,7 +2308,14 @@
             const mat = new T.SpriteMaterial({
                 map: new T.CanvasTexture(c),
                 transparent: true,
+                // depthTest:false means later geometry never *fails* depth
+                // against these sprites, but without depthWrite:false the
+                // sprites still write to the depth buffer (Three.js default
+                // is depthWrite:true even for SpriteMaterial). That can
+                // make subsequent sprites/labels vanish — match the
+                // pattern used by the other sprite materials in this file.
                 depthTest: false,
+                depthWrite: false,
             });
             txtCache[k] = mat;
             return mat;
