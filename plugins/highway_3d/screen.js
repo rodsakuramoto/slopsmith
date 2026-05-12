@@ -4993,11 +4993,16 @@
                 }
                 const notes = chordNotesFromTemplate(cid, chordTemplates);
                 if (notes.length === 0) continue;
-                const explicitArp = handShapeMarkedArpeggio(hs, chordTemplates);
                 synth.push({
                     t: st,
                     id: cid,
-                    hd: explicitArp,
+                    // `hd` is the Rocksmith `highDensity` wire field (gallops /
+                    // repeated strums), not an arpeggio carrier — arpeggio
+                    // intent is read directly from the hand-shape via
+                    // chordHandShapeArpeggioHint() downstream. Keep `hd` false
+                    // so chordWireHighDensity() / label-suppression behave the
+                    // same as for any other non-gallop chord row.
+                    hd: false,
                     notes,
                     /** Hand-shape fill-in (no authored chord row) — skip note-stream arp frame. */
                     h3dSynth: true,
@@ -5852,8 +5857,6 @@
                     }
                     if (n.t + (n.sus || 0) < t0 || n.t > t1) continue;
                     if (!validString(n.s)) continue;
-                    const isNext = nextNoteByString[n.s] &&
-                        Math.abs(nextNoteByString[n.s].t - n.t) < NEXT_ON_STRING_T_EPS;
                     const skipLabel = lastFretForString[n.s] === n.f;
                     let singleOpenX;
                     if (n.f === 0) {
@@ -5872,7 +5875,6 @@
                         n,
                         now,
                         singleOpenX,
-                        isNext,
                         skipLabel,
                         false,
                         GHOST_HOLD_AFTER_ONSET,
@@ -6053,7 +6055,14 @@
                         || handShapeChartSpanSec(hsHintFrame.hs) >= ARP_INFER_MIN_HAND_SHAPE_SPAN_S)
                         && inferArpeggioFromNotePattern(
                             ch, chShape, notes, hsTimeWinFrame);
-                    const deferChordGems = inferredArpPattern
+                    // h3dSynth chords are added for the *frame* (the chart
+                    // authored no chord row), so defer the gem strum
+                    // unconditionally — otherwise a full chord strum can show
+                    // up at the hand-shape start when arp inference / explicit
+                    // marker fails, on top of the single notes the chart
+                    // already authored.
+                    const deferChordGems = ch.h3dSynth
+                        || inferredArpPattern
                         || (hsHintFrame.explicit && hsHintFrame.covered);
                     /**
                      * Lavender chord frame + purple highway rails: authored
@@ -6108,14 +6117,11 @@
                     const chordTailFadeS = Math.min(CHORD_HWY_FADE_S, chordTailHoldS);
                     if (!deferChordGems) {
                         for (const cn of chordNotes) {
-                            const isNext = nextNoteByString[cn.s] &&
-                                Math.abs(nextNoteByString[cn.s].t - ch.t) < NEXT_ON_STRING_T_EPS;
                             const skipLabel = !firstInShapeRun || lastFretForString[cn.s] === cn.f;
                             drawNote(
                                 { ...cn, t: ch.t, sus: cn.sus || 0 },
                                 now,
                                 cn.f === 0 ? chordCX : undefined,
-                                isNext,
                                 skipLabel,
                                 isRepeat,
                                 chordTailHoldS,
@@ -7051,7 +7057,7 @@
         }
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
-        function drawNote(n, now, openX, _isNextLegacy, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false, chordId, susTrailMatchArpFrame = false) {
+        function drawNote(n, now, openX, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false, chordId, susTrailMatchArpFrame = false) {
             const s = n.s;
             // Belt + suspenders: callers already gate via validString(),
             // but drawNote is also entered through { ...cn } chord-note
