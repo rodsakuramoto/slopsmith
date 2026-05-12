@@ -153,6 +153,7 @@ volumes:
   slopsmith-config:
 ```
 
+<<<<<<< HEAD
 ## Apache Reverse Proxy
 
 To expose Slopsmith behind an Apache reverse proxy, add the following configuration to your virtual host:
@@ -191,6 +192,8 @@ sudo systemctl restart apache2
 
 Slopsmith will be accessible at `http://your-domain/slopsmith`.
 
+=======
+>>>>>>> 40f01048d739360b9393bc28a50c1999e5f7c7a0
 ## Proxmox LXC Container
 
 `build-proxmox-ct.sh` builds a self-contained Proxmox LXC rootfs tarball from WSL2. It bootstraps a Debian Trixie rootfs, installs the runtime dependencies (Python, FFmpeg, fluidsynth, vgmstream) plus a build-only .NET SDK, builds RsCli, copies the app, removes the .NET SDK, and packages the result as a `.tar.zst` importable by `pct restore`.
