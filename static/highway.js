@@ -119,6 +119,15 @@ function createHighway() {
     let _filteredChords = null;
     let _filteredAnchors = null;
     let _filteredHandShapes = null;
+    // Tracks whether ANY phrase level carries handshape data. Lets us
+    // distinguish "this difficulty has none" (respect strictly — even
+    // when empty) from "the chart's phrase data never authored any
+    // handshapes at all" (fall back to the flat list so 3D arpeggio
+    // hints still work on DLC that ships handshapes only on the
+    // arrangement root). Without this flag the bundle would silently
+    // surface arp-frame hints at low-mastery levels that shouldn't
+    // have any.
+    let _phrasesHaveHandShapes = false;
     let showLyrics = localStorage.getItem('showLyrics') !== 'false';
     let _drawHooks = [];  // plugin draw callbacks: fn(ctx, W, H)
     // slopsmith#254 — per-note judgment overlay. A plugin (note_detect)
@@ -441,9 +450,13 @@ function createHighway() {
             // Master-difficulty (slopsmith#48)
             mastery: _mastery,
             hasPhraseData: !!(_phrases && _phrases.length > 0),
-            // Phrase-level `handshapes` are often empty on DLC even when the flat
-            // arrangement carried them — fall back so 3D arpeggio hints still work.
-            handShapes: (_filteredHandShapes !== null && _filteredHandShapes.length > 0)
+            // When phrase data authored ANY handshape, respect the filtered
+            // list strictly (even when this difficulty leaves it empty) —
+            // otherwise low-mastery levels would surface arp hints that
+            // don't belong. Only fall back to the flat list when the
+            // phrase data carries no handshapes at all (common on DLC
+            // where handshapes ship on the arrangement root).
+            handShapes: (_filteredHandShapes !== null && _phrasesHaveHandShapes)
                 ? _filteredHandShapes
                 : handShapes,
 
@@ -2126,12 +2139,20 @@ function createHighway() {
             _filteredChords = null;
             _filteredAnchors = null;
             _filteredHandShapes = null;
+            _phrasesHaveHandShapes = false;
             return;
         }
         const outNotes = [];
         const outChords = [];
         const outAnchors = [];
         const outHandShapes = [];
+        // Scan EVERY level (not just the current mastery's slice): if
+        // any level anywhere authored a handshape, the chart's phrase
+        // data is the authoritative source and the bundle should
+        // respect filtered emptiness strictly. Otherwise, the chart
+        // didn't ship handshapes via phrases at all and we should fall
+        // back to the flat arrangement-root list (DLC pattern).
+        let anyHandShapeInPhrases = false;
         for (const p of _phrases) {
             const n = p.levels.length;
             if (n === 0) continue;
@@ -2149,6 +2170,14 @@ function createHighway() {
             // the same level as the notes they pair with.
             for (const x of lv.anchors) outAnchors.push(x);
             for (const x of (lv.handshapes || [])) outHandShapes.push(x);
+            if (!anyHandShapeInPhrases) {
+                for (const level of p.levels) {
+                    if (level.handshapes && level.handshapes.length > 0) {
+                        anyHandShapeInPhrases = true;
+                        break;
+                    }
+                }
+            }
         }
         _filteredNotes = outNotes;
         _filteredChords = outChords;
@@ -2157,6 +2186,7 @@ function createHighway() {
             outHandShapes.sort((a, b) => a.start_time - b.start_time);
         }
         _filteredHandShapes = outHandShapes;
+        _phrasesHaveHandShapes = anyHandShapeInPhrases;
     }
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -2199,6 +2229,7 @@ function createHighway() {
             _filteredChords = null;
             _filteredAnchors = null;
             _filteredHandShapes = null;
+            _phrasesHaveHandShapes = false;
             _resetChordRenderState();
         },
 
@@ -2852,6 +2883,7 @@ function createHighway() {
             _filteredChords = null;
             _filteredAnchors = null;
             _filteredHandShapes = null;
+            _phrasesHaveHandShapes = false;
             _resetChordRenderState();
             const arrParam = arrangement !== undefined ? `?arrangement=${arrangement}` : '';
             // filename might already be encoded from data-play attribute

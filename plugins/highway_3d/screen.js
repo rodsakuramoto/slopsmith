@@ -1724,7 +1724,7 @@
         let ambLight = null, dirLight = null;
         let fretG = null, tuningLblG = null, noteG = null, beatG = null, lblG = null;
         let gNote = null, gSus = null, gBeat = null, gTechArrow = null, gTapChevron = null;
-        let mStr = [], mGlow = [], mSus = [], mProj = [], mProjGlow = [], mStrHitOutline = [], mAccentOutline = [], mAccentCore = [], mAccentHaloNear = [], mAccentHaloMid = [], mAccentHaloFar = [];
+        let mStr = [], mGlow = [], mSus = [], mStrHitOutline = [], mAccentOutline = [], mAccentCore = [], mAccentHaloNear = [], mAccentHaloMid = [], mAccentHaloFar = [];
         let mWhiteOutline = null, mSusOutline = null;
         // Shared materials for the legato technique meshes — one per geometry
         // type, reused across every pooled mesh instance to avoid per-mesh
@@ -3568,14 +3568,6 @@
             mGlow = activePalette.map(c => new T.MeshLambertMaterial({
                 color: 0xffffff, emissive: c, emissiveIntensity: 1.5,
             }));
-            mProj = activePalette.map(c => new T.MeshStandardMaterial({
-                color: c, emissive: c, emissiveIntensity: 0.002,
-                transparent: true, opacity: 0.15, roughness: 1,
-            }));
-            mProjGlow = activePalette.map(c => new T.MeshLambertMaterial({
-                color: 0xffffff, emissive: c, emissiveIntensity: 1.5,
-                transparent: true, opacity: 0.1,
-            }));
             _laneTargetColor = new T.Color(0x4488ff);
             mSus = activePalette.map(c => new T.MeshLambertMaterial({
                 color: c, transparent: true, opacity: 0.35,
@@ -4172,11 +4164,11 @@
         }
         // Live-swap palette by mutating existing materials in place.
         // Three.js colors propagate to all sharing meshes on the next
-        // render — no rebuild, no GC. Glow materials (mGlow, mProjGlow)
-        // were authored with .color = white and the per-string color in
-        // .emissive only; we preserve that here so the glow look stays
-        // consistent before/after a palette swap rather than tinting
-        // the diffuse white. Lane lines and drop lines that read
+        // render — no rebuild, no GC. The mGlow material was authored
+        // with .color = white and the per-string color in .emissive
+        // only; we preserve that here so the glow look stays consistent
+        // before/after a palette swap rather than tinting the diffuse
+        // white. Lane lines and drop lines that read
         // activePalette[s] per frame pick up automatically. Per-string
         // fretboard materials built inside buildBoard() are independent
         // and aren't reachable from here — buildBoard re-runs from the
@@ -4190,8 +4182,6 @@
                 if (mStr[s]) { mStr[s].color.setHex(c); mStr[s].emissive.setHex(c); }
                 if (mGlow[s]) mGlow[s].emissive.setHex(c);
                 if (mSus[s]) mSus[s].color.setHex(c);
-                if (mProj[s]) { mProj[s].color.setHex(c); mProj[s].emissive.setHex(c); }
-                if (mProjGlow[s]) mProjGlow[s].emissive.setHex(c);
                 if (mStrHitOutline[s]) {
                     mStrHitOutline[s].color.setHex(c);
                     mStrHitOutline[s].emissive.setHex(c);
@@ -4230,12 +4220,14 @@
         function _applyVibrancy() {
             const t = vibrancy;
             const idleOp     = 0.4  + 0.6  * t;  // mStr / IDLE_OP source
-            const projIdleOp = 0.15 + 0.35 * t;  // mProj base (drawNote layers a per-frame factor on top)
+            // projIdleOp drives the projMeshArr ghost-frame opacity and is
+            // read by drawNote() as `_vibrancyProjOp`, which layers a
+            // per-frame factor on top.
+            const projIdleOp = 0.15 + 0.35 * t;
             const susOp      = 0.35 + 0.45 * t;  // mSus
             const lineGlowOp = 0.15 + 0.35 * t;  // thin Line glow layer behind each string
             for (let s = 0; s < activePalette.length; s++) {
                 if (mStr[s])  mStr[s].opacity  = idleOp;
-                if (mProj[s]) mProj[s].opacity = projIdleOp;
                 if (mSus[s])  mSus[s].opacity  = susOp;
                 if (mGlow[s]) {
                     // Hit-note body lerps from white (current pastel
@@ -4271,11 +4263,6 @@
             const g = glowMul;
             for (let s = 0; s < activePalette.length; s++) {
                 if (mStr[s])  mStr[s].emissiveIntensity  = 0.002 * g;
-                if (mProj[s]) mProj[s].emissiveIntensity = 0.002 * g;
-                if (mProjGlow[s]) {
-                    mProjGlow[s].emissiveIntensity = 1.5 * g;
-                    mProjGlow[s].opacity           = 0.1 * g;
-                }
                 // mGlow[s].emissiveIntensity is per-frame in update();
                 // see Phase 4 comment block.
                 const pm = projMeshArr && projMeshArr[s];
@@ -7801,8 +7788,6 @@
             for (const m of mStr) m?.dispose?.();
             for (const m of mGlow) m?.dispose?.();
             for (const m of mSus) m?.dispose?.();
-            for (const m of mProj) m?.dispose?.();
-            for (const m of mProjGlow) m?.dispose?.();
             for (const m of mStrHitOutline) m?.dispose?.();
             for (const m of mAccentOutline) m?.dispose?.();
             for (const m of mAccentCore) m?.dispose?.();
@@ -7838,7 +7823,7 @@
             if (ren) { ren.dispose(); ren = null; }
             scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
             ambLight = dirLight = null;
-            mStr = []; mGlow = []; mSus = []; mProj = []; mProjGlow = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = null; stringLines = []; stringLineGlows = [];
+            mStr = []; mGlow = []; mSus = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = null; stringLines = []; stringLineGlows = [];
             for (const m of _inlayMats) m?.dispose?.(); _inlayMats = []; _inlayLabels = [];
             // mTechArrow / mTapChevron are owned by pooled meshes attached
             // to noteG; the scene.traverse() dispose pass above already
