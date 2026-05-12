@@ -6132,16 +6132,22 @@
                     const hsTimeWinFrame = hsHintFrame.hs
                         ? { tLo: hsStart(hsHintFrame.hs) - 0.06, tHi: hsEnd(hsHintFrame.hs) + 0.06 }
                         : null;
-                    const chordOnsetTimeWinFrame = {
-                        tLo: ch.t - ARP_FRAME_ONSET_PAD_S,
-                        tHi: ch.t + ARP_FRAME_ONSET_CLUSTER_S,
+                    // Lazy: the coverage scan walks the note stream and is only
+                    // consumed by the h3dSynth and explicit+covered branches of
+                    // `deferChordGems`; computing it eagerly for every chord
+                    // every frame regresses dense charts.
+                    let _arpCoverMemo;
+                    const noteStreamCoversArpShape = () => {
+                        if (_arpCoverMemo === undefined) {
+                            _arpCoverMemo = chordShapeCoveredByStandaloneNotes(
+                                ch,
+                                chShape,
+                                notes,
+                                { tLo: ch.t - ARP_FRAME_ONSET_PAD_S, tHi: ch.t + ARP_FRAME_ONSET_CLUSTER_S },
+                            );
+                        }
+                        return _arpCoverMemo;
                     };
-                    const noteStreamCoversArpShape = chordShapeCoveredByStandaloneNotes(
-                        ch,
-                        chShape,
-                        notes,
-                        chordOnsetTimeWinFrame,
-                    );
                     const inferredArpPattern = (!hsHintFrame.hs
                         || handShapeChartSpanSec(hsHintFrame.hs) >= ARP_INFER_MIN_HAND_SHAPE_SPAN_S)
                         && inferArpeggioFromNotePattern(
@@ -6150,9 +6156,9 @@
                     // cover the arpeggio shape; otherwise explicit/synth hand
                     // shapes can produce an empty lavender frame with no notes
                     // inside (e.g. template-marked `-arp` chord rows).
-                    const deferChordGems = (ch.h3dSynth && noteStreamCoversArpShape)
+                    const deferChordGems = (ch.h3dSynth && noteStreamCoversArpShape())
                         || inferredArpPattern
-                        || (hsHintFrame.explicit && hsHintFrame.covered && noteStreamCoversArpShape);
+                        || (hsHintFrame.explicit && hsHintFrame.covered && noteStreamCoversArpShape());
                     /**
                      * Lavender chord frame + purple highway rails: authored
                      * arpeggio metadata only. RS ``highDensity`` marks gallops /
