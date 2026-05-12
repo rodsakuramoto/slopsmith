@@ -6132,11 +6132,15 @@
                     const hsTimeWinFrame = hsHintFrame.hs
                         ? { tLo: hsStart(hsHintFrame.hs) - 0.06, tHi: hsEnd(hsHintFrame.hs) + 0.06 }
                         : null;
+                    const chordOnsetTimeWinFrame = {
+                        tLo: ch.t - ARP_FRAME_ONSET_PAD_S,
+                        tHi: ch.t + ARP_FRAME_ONSET_CLUSTER_S,
+                    };
                     const noteStreamCoversArpShape = chordShapeCoveredByStandaloneNotes(
                         ch,
                         chShape,
                         notes,
-                        hsTimeWinFrame,
+                        chordOnsetTimeWinFrame,
                     );
                     const inferredArpPattern = (!hsHintFrame.hs
                         || handShapeChartSpanSec(hsHintFrame.hs) >= ARP_INFER_MIN_HAND_SHAPE_SPAN_S)
