@@ -223,6 +223,82 @@ sudo env SKIP_HASH_CHECK=1 bash build-proxmox-ct.sh amd64 slopsmith-ct
 
 The script is linted with `shellcheck`. Only `amd64` is supported out of the box; `arm64` requires `qemu-user-static` + binfmt registration.
 
+## Portainer Setup
+
+This guide walks through installing Docker, Portainer, and Slopsmith on Ubuntu.
+
+**Step 1:** Update Package Lists & install docker
+```bash
+sudo apt update
+sudo apt install docker.io -y
+sudo usermod -aG docker $USER
+```
+**Step 2:** Install Portainer on Ubuntu
+```bash
+sudo docker pull portainer/portainer-ce:latest
+sudo docker run -d -p 9000:9000 --restart always -v /var/run/docker.sock:/var/run/docker.sock portainer/portainer-ce:latest
+```
+**Step 3:** Access the Portainer Web Interface
+Open the following URL in your browser:
+
+    • http://server-ip:9000
+
+**Step 4:** Pull the Slopsmith Image
+In Portainer, go to the Images tab and build a new image using the following settings:
+
+    • Image Name: slopsmith:latest
+    
+    • Repository URL: https://github.com/byrongamatos/slopsmith.git
+
+**Step 5:** Create a Stack for Slopsmith
+Click '+ Add Stack' and paste the following Docker Compose configuration into the editor. Replace '/path/to/dlc/' with the correct path where your dlc is on your host system.
+```bash
+version: "3.9"
+
+services:
+  web:
+    image: slopsmith:latest
+    container_name: slopsmith-web
+    restart: unless-stopped
+
+    ports:
+      - "7000:8000"
+
+    volumes:
+      - /path/to/dlc/:/dlc
+      - slopsmith-config:/config
+
+    environment:
+      DLC_DIR: /dlc
+      CONFIG_DIR: /config
+
+volumes
+  slopsmith-config:
+```
+Click 'Deploy the stack'. This creates a container named 'slopsmith-web'.
+Access Slopsmith at: http://server-ip:7000
+
+**Step 6:** Add the Update Manager
+
+Clone the Update Manager repository on the host machine and copy to container.
+```bash
+cd /home/your_user
+git clone https://github.com/byrongamatos/slopsmith-update-manager.git update_manager
+sudo docker cp /home/your_user/update_manager slopsmith-web:/app/plugins/
+```
+**Step 7:** Restart the Slopsmith Container
+
+In the Portainer web interface, go to Containers, select 'slopsmith-web', and restart the container.
+
+**Step 8:** Install Recommended Plugins
+
+Open Slopsmith at http://server-ip:7000 and install the following recommended plugins via the update manager:
+
+    • NAM Tone Engine - Enables Slopsmith to interface with your guitar/audio cable.
+        1. Download amp models and cabinet IRs from: https://www.tone3000.com/
+        
+    • Note Detection - Allows Slopsmith to detect the notes you are playing.
+
 ## Windows 11 install tutorial
 
 https://youtu.be/bIz8pbTFiV8
