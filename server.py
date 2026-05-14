@@ -17,6 +17,7 @@ configure_logging()
 log = logging.getLogger("slopsmith.server")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
@@ -158,6 +159,8 @@ _DEMO_BLOCKED: list[tuple[str, re.Pattern]] = [
     ("POST",   re.compile(r"^/api/settings/import$")),
     ("POST",   re.compile(r"^/api/rescan$")),
     ("POST",   re.compile(r"^/api/rescan/full$")),
+    ("POST",   re.compile(r"^/api/songs/upload$")),
+    ("DELETE", re.compile(r"^/api/song/.+$")),
     ("POST",   re.compile(r"^/api/favorites/toggle$")),
     ("POST",   re.compile(r"^/api/loops$")),
     ("DELETE", re.compile(r"^/api/loops/[^/]+$")),
@@ -1045,7 +1048,12 @@ def _get_startup_status():
 
 
 def _background_scan():
-    """Scan all PSARCs and cache metadata on startup. Uses thread pool for parallelism."""
+    """Scan all PSARCs and cache metadata on startup. Uses thread pool for parallelism.
+
+    Never sets `_scan_status["running"] = False` — ownership of that flag
+    lives in `_scan_runner` so a `_kick_scan()` racing this function's
+    terminal write cannot observe a stale False and start a second runner.
+    """
     global _scan_status
     _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "listing"}
 
@@ -1054,7 +1062,7 @@ def _background_scan():
     _cfg = _load_config(CONFIG_DIR / "config.json") or _default_settings()
     dlc = _get_dlc_dir(_cfg)
     if not dlc:
-        _scan_status = {**_SCAN_STATUS_INIT, "stage": "idle", "error": "DLC folder not configured"}
+        _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "idle", "error": "DLC folder not configured"}
         log.warning("Scan: no DLC folder configured")
         return
 
@@ -1100,11 +1108,11 @@ def _background_scan():
                "On macOS: grant Full Disk Access to the app in System Settings → Privacy & Security. "
                "With Docker: share this path in Docker Desktop → Settings → Resources → File Sharing.")
         log.error("Scan failed: %s (%s)", msg, e)
-        _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": msg}
+        _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "error", "error": msg}
         return
     except OSError as e:
         log.error("Scan failed listing %s: %s", dlc, e)
-        _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": f"Unable to list {dlc}: {e}"}
+        _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "error", "error": f"Unable to list {dlc}: {e}"}
         return
 
     all_songs = psarcs + sloppaks + loose_songs
@@ -1144,7 +1152,7 @@ def _background_scan():
             to_scan.append((f, mtime, size))
 
     if not to_scan:
-        _scan_status = {**_SCAN_STATUS_INIT, "stage": "complete"}
+        _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "complete"}
         log.info("Scan: nothing new to scan (%d songs, all cached)", len(all_songs))
         return
 
@@ -1177,7 +1185,50 @@ def _background_scan():
             _scan_status["current"] = fname
 
     log.info("Scan complete: %d songs cached", len(to_scan))
-    _scan_status = {**_SCAN_STATUS_INIT, "stage": "complete"}
+    _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "complete"}
+
+
+_scan_kick_lock = threading.Lock()
+_scan_rescan_pending = False
+
+
+def _kick_scan() -> bool:
+    """Request a library rescan, single-flight + coalescing.
+
+    Returns True if a new scan thread was started, False if one was already
+    running. In the latter case a follow-up pass is queued and runs as soon
+    as the current scan finishes so files landing mid-scan (e.g. an upload
+    that finalizes after the scan has already listed DLC_DIR) are not lost
+    until the next periodic pass. Multiple late-arriving requests coalesce
+    into a single follow-up.
+    """
+    global _scan_rescan_pending
+    with _scan_kick_lock:
+        if _scan_status["running"]:
+            _scan_rescan_pending = True
+            return False
+        # Mark running synchronously so a parallel _kick_scan() observes it
+        # before the worker thread has a chance to reassign _scan_status.
+        _scan_status["running"] = True
+    threading.Thread(target=_scan_runner, daemon=True).start()
+    return True
+
+
+def _scan_runner():
+    """Run _background_scan, then re-run if requests arrived mid-scan."""
+    global _scan_rescan_pending
+    while True:
+        try:
+            _background_scan()
+        except Exception:
+            log.exception("background scan failed unexpectedly")
+
+        with _scan_kick_lock:
+            if not _scan_rescan_pending:
+                _scan_status["running"] = False
+                return
+            _scan_rescan_pending = False
+            _scan_status["running"] = True
 
 
 # ── Register plugin API endpoints (lightweight, before app starts) ───────────
@@ -1482,8 +1533,7 @@ def shutdown_events():
 
 def startup_scan():
     """Start background metadata scan and periodic rescan on server start."""
-    thread = threading.Thread(target=_background_scan, daemon=True)
-    thread.start()
+    _kick_scan()
     # Periodic rescan every 5 minutes
     rescan_thread = threading.Thread(target=_periodic_rescan, daemon=True)
     rescan_thread.start()
@@ -1493,8 +1543,10 @@ def _periodic_rescan():
     """Check for new files every 5 minutes."""
     time.sleep(300)  # Wait 5 minutes after startup
     while True:
-        if not _scan_status["running"]:
-            _background_scan()
+        # _kick_scan() is a no-op (returns False, queues a pending pass) when
+        # a scan is already running, so racing against the active scan is
+        # safe — no second runner is spawned.
+        _kick_scan()
         time.sleep(300)
 
 
@@ -1572,10 +1624,8 @@ async def startup_status_stream(request: Request):
 @app.post("/api/rescan")
 def trigger_rescan():
     """Manually trigger a library rescan."""
-    if _scan_status["running"]:
+    if not _kick_scan():
         return {"message": "Scan already in progress"}
-    thread = threading.Thread(target=_background_scan, daemon=True)
-    thread.start()
     return {"message": "Rescan started"}
 
 
@@ -1587,9 +1637,429 @@ def trigger_full_rescan():
     with meta_db._lock:
         meta_db.conn.execute("DELETE FROM songs")
         meta_db.conn.commit()
-    thread = threading.Thread(target=_background_scan, daemon=True)
-    thread.start()
+    if not _kick_scan():
+        return {"message": "Scan already in progress"}
     return {"message": "Full rescan started"}
+
+
+# ── Song upload ───────────────────────────────────────────────────────────────
+
+_ALLOWED_SONG_EXTS = {".psarc", ".sloppak"}
+_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GB — covers sloppaks bundled with stems
+# Per-request batch cap. Lets a user drop a whole album of sloppaks at once
+# without giving a hostile client a 1000-file DoS surface via Starlette's
+# default max_files=1000. The pre-parse Content-Length guard is sized as
+# _MAX_UPLOAD_FILES * _MAX_UPLOAD_BYTES + slack.
+_MAX_UPLOAD_FILES = 50
+# Multipart Content-Length includes boundary markers + per-part headers, so a
+# file sitting right at _MAX_UPLOAD_BYTES would be rejected by an equality cap
+# on Content-Length. Add a generous slack for the multipart envelope; the real
+# file-size cap is enforced by the streaming check in _save_uploaded_song().
+_MULTIPART_OVERHEAD_SLACK = 1024 * 1024  # 1 MiB
+# Serializes the mutating step of upload (os.replace into DLC_DIR) with
+# delete_song so the two endpoints can't interleave on the same path —
+# e.g. an upload finishing right after a concurrent delete shouldn't
+# resurrect a song the user just removed, and a delete arriving mid-
+# overwrite shouldn't strand a half-written file. threading.Lock (not
+# asyncio.Lock) because delete_song is sync (runs in the threadpool);
+# upload acquires it inside ``run_in_threadpool`` for the same reason.
+_song_io_lock = threading.Lock()
+
+
+def _commit_uploaded_song(tmp_path: Path, dest: Path, overwrite: bool, base: str):
+    """Atomically move a validated temp upload into ``dest`` under ``_song_io_lock``.
+
+    Returns ``None`` on success or an error result dict matching the upload
+    endpoint's contract. Holds the lock across the directory re-check and
+    the final ``os.replace`` so a concurrent delete or upload can't slip
+    between them. Always cleans up the temp file on the error paths.
+    """
+    with _song_io_lock:
+        if dest.exists():
+            if not overwrite:
+                # Lost the race against a concurrent upload of the same name.
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                return {"status": "exists", "filename": base,
+                        "error": "A file with this name already exists"}
+            # Re-check directory state under the lock — the pre-check
+            # may have raced an unrelated mkdir, and a sloppak directory
+            # has to be removed before os.replace() can write over it.
+            if dest.is_dir():
+                if not sloppak_mod.is_sloppak(dest):
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                    return {"status": "exists", "filename": base,
+                            "error": "A directory with this name exists and is not "
+                                     "a sloppak — refusing to overwrite"}
+                shutil.rmtree(str(dest))
+        os.replace(str(tmp_path), str(dest))
+    return None
+
+
+def _invalidate_song_caches(cache_key: str) -> None:
+    """Drop filename-keyed derived caches when a song at ``cache_key`` is
+    replaced or removed. Sloppak's ``_source_cache`` and loose-folder audio
+    IDs self-invalidate via stat checks; the caches purged here do not."""
+    # In-memory PSARC extraction cache (filename → tmp dir + Song).
+    with _extract_cache_lock:
+        stale = _extract_cache.pop(cache_key, None)
+    if stale:
+        shutil.rmtree(stale[0], ignore_errors=True)
+
+    # Art cache — match the safe_name mapping used by get_song_art /
+    # upload_song_art_b64 exactly so we hit the same on-disk file.
+    safe_name = cache_key.replace("/", "_").replace(" ", "_")
+    art_file = ART_CACHE_DIR / f"{safe_name}.png"
+    try:
+        art_file.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        log.debug("failed to evict art cache for %s", cache_key, exc_info=True)
+
+    # PSARC audio cache — audio_id is `Path(filename).stem.replace(" ", "_")`
+    # without any stat digest, so a same-named replacement would serve the
+    # previous file's converted audio. Loose-folder ids include a wem stat
+    # digest and self-heal; sloppak streams stems directly and uses no
+    # audio_id at all — both safely no-op here.
+    audio_id = Path(cache_key).stem.replace(" ", "_")
+    for d in (AUDIO_CACHE_DIR, STATIC_DIR):
+        for ext in (".mp3", ".ogg", ".wav"):
+            f = d / f"audio_{audio_id}{ext}"
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.debug("failed to evict audio cache file %s", f, exc_info=True)
+
+
+@app.post("/api/songs/upload")
+async def upload_song(request: Request):
+    """Upload one or more .psarc / .sloppak files into the configured DLC folder.
+
+    Multipart body with one or more ``file`` fields (up to ``_MAX_UPLOAD_FILES``
+    per request). Query string:
+      ``overwrite=1`` — replace existing files with the same name.
+
+    Response shape (always HTTP 200 once we've gotten past request-level guards
+    like DLC-not-configured / payload-too-large):
+      ``{"results": [{"filename": "...", "status": "ok" | "exists" | "error",
+                       "error"?: "...", "size"?: N, "format"?: "psarc"}, ...]}``
+    Per-file conflicts surface as ``status: "exists"`` so a batch upload can
+    surface ALL conflicts at once instead of bailing on the first one. The
+    client re-POSTs just the conflicting files with ``overwrite=1`` if the
+    user opts in.
+
+    The DLC directory is resolved via ``_get_dlc_dir()`` which honours the
+    ``DLC_DIR`` env var first and falls back to ``dlc_dir`` in
+    ``config.json`` — so uploads land in whichever folder the rest of the
+    app already considers the library root, regardless of which mechanism
+    configured it.
+    """
+    dlc = _get_dlc_dir()
+    if dlc is None:
+        return JSONResponse(
+            {"error": "DLC folder is not configured. Set DLC_DIR or configure it in Settings."},
+            status_code=503,
+        )
+    if not os.access(str(dlc), os.W_OK):
+        return JSONResponse(
+            {"error": f"DLC folder {dlc} is not writable by the server process."},
+            status_code=500,
+        )
+
+    # Pre-parse Content-Length guard — fail fast before reading any body.
+    # Multipart Content-Length is file bytes + boundary + per-part headers, so
+    # we can't use _MAX_UPLOAD_BYTES as an exact cap here (a file right at the
+    # advertised max would be rejected before _save_uploaded_song() can apply
+    # the real per-file byte cap). For batch uploads we allow up to
+    # _MAX_UPLOAD_FILES files at _MAX_UPLOAD_BYTES each; the parser still
+    # enforces per-part size via max_part_size and per-batch count via
+    # max_files. The streaming check inside _save_uploaded_song() is the
+    # authoritative per-file size cap.
+    max_total = _MAX_UPLOAD_FILES * _MAX_UPLOAD_BYTES + _MULTIPART_OVERHEAD_SLACK
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            cl_int = int(cl)
+        except ValueError:
+            return JSONResponse({"error": "Invalid Content-Length header"}, status_code=400)
+        if cl_int < 0:
+            return JSONResponse({"error": "Invalid Content-Length header"}, status_code=400)
+        if cl_int > max_total:
+            return JSONResponse(
+                {"error": f"Batch upload exceeds {_MAX_UPLOAD_FILES} files × "
+                          f"{_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit"},
+                status_code=413,
+            )
+
+    overwrite = request.query_params.get("overwrite") == "1"
+    # Tighten the parser to the handler's contract: up to _MAX_UPLOAD_FILES
+    # file parts, no text parts (overwrite comes from query params).
+    # Starlette's defaults of max_files=1000 / max_fields=1000 would
+    # otherwise let a client force the parser to spool far more parts than
+    # the endpoint is willing to process.
+    form = await request.form(
+        max_files=_MAX_UPLOAD_FILES,
+        max_fields=0,
+        max_part_size=_MAX_UPLOAD_BYTES,
+    )
+    try:
+        from starlette.datastructures import UploadFile as _StarletteUploadFile
+        # form.getlist("file") returns all parts named "file" in submission
+        # order. Filter to file parts only — Starlette would yield strings
+        # for text parts, but we've capped max_fields=0 so any non-file part
+        # is already a parser error before reaching here.
+        uploads = [u for u in form.getlist("file") if isinstance(u, _StarletteUploadFile)]
+        if not uploads:
+            return JSONResponse(
+                {"error": "Expected one or more files in multipart field 'file'"},
+                status_code=400,
+            )
+
+        results = []
+        any_saved = False
+        for upload in uploads:
+            try:
+                result = await _save_uploaded_song(upload, dlc, overwrite)
+                results.append(result)
+                if result.get("status") == "ok":
+                    any_saved = True
+            except Exception as e:
+                # Per-file failure must not abort the batch — record and
+                # continue so the client gets a complete report.
+                log.exception("upload failed for %r", getattr(upload, "filename", "?"))
+                results.append({
+                    "filename": Path(getattr(upload, "filename", "") or "").name or "?",
+                    "status": "error",
+                    "error": f"Upload failed: {e}",
+                })
+            finally:
+                try:
+                    await upload.close()
+                except Exception:
+                    log.debug("failed to close upload file handle", exc_info=True)
+
+        if any_saved:
+            _kick_scan()
+        return {"results": results}
+    finally:
+        try:
+            await form.close()
+        except Exception:
+            log.debug("failed to close form", exc_info=True)
+
+
+async def _save_uploaded_song(upload: UploadFile, dlc: Path, overwrite: bool) -> dict:
+    """Save one upload into ``dlc``. Returns a per-file result dict (never
+    a JSONResponse) so batch uploads can aggregate.
+
+    Shape:
+      ok:     ``{"status": "ok", "filename": base, "size": N, "format": "psarc"}``
+      exists: ``{"status": "exists", "filename": base, "error": "..."}``
+      error:  ``{"status": "error", "filename": base, "error": "..."}``
+    """
+    # Strip any path components a client may have included in the filename —
+    # only the basename lands in the DLC root. Path traversal would otherwise
+    # let a crafted upload escape the library directory.
+    raw_name = upload.filename or ""
+    base = Path(raw_name).name
+    if not base or base in (".", "..") or "/" in base or "\\" in base:
+        return {"status": "error", "filename": raw_name or "?", "error": "Invalid filename"}
+    suffix = Path(base).suffix.lower()
+    if suffix not in _ALLOWED_SONG_EXTS:
+        return {"status": "error", "filename": base,
+                "error": "Only .psarc and .sloppak files are accepted"}
+
+    dest = dlc / base
+    if dest.exists():
+        if not overwrite:
+            return {"status": "exists", "filename": base,
+                    "error": "A file with this name already exists"}
+        # overwrite=1 must handle directory-form sloppaks (the scanner and
+        # delete path both treat them as song entries). os.replace() can't
+        # clobber a non-empty directory, so without the rmtree below the
+        # whole upload would write to a temp file and then surface a late
+        # 500 at the os.replace() call. Refuse other directories so an
+        # unrelated folder isn't blown away by a same-named upload.
+        if dest.is_dir() and not sloppak_mod.is_sloppak(dest):
+            return {"status": "exists", "filename": base,
+                    "error": "A directory with this name exists and is not a sloppak — "
+                             "refusing to overwrite"}
+
+    # Temp file in the DLC dir itself so os.replace is atomic (same filesystem).
+    # Dot-prefix keeps it out of the rglob("*.psarc")/"*.sloppak") scan globs.
+    fd, tmp_name = await run_in_threadpool(
+        tempfile.mkstemp, dir=str(dlc), prefix=".upload-", suffix=".part"
+    )
+    tmp_path = Path(tmp_name)
+    bytes_read = 0
+    head = b""
+    error_result: dict | None = None
+    try:
+        try:
+            tmpf = await run_in_threadpool(os.fdopen, fd, "wb")
+        except BaseException:
+            try:
+                await run_in_threadpool(os.close, fd)
+            except OSError:
+                pass
+            raise
+        try:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                bytes_read += len(chunk)
+                if bytes_read > _MAX_UPLOAD_BYTES:
+                    error_result = {
+                        "status": "error", "filename": base,
+                        "error": f"Upload exceeds {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB cap",
+                    }
+                    break
+                if len(head) < 4:
+                    head += chunk[: 4 - len(head)]
+                await run_in_threadpool(tmpf.write, chunk)
+        finally:
+            await run_in_threadpool(tmpf.close)
+
+        if error_result is None:
+            if bytes_read == 0:
+                error_result = {"status": "error", "filename": base,
+                                "error": "Empty upload — file is 0 bytes"}
+            elif suffix == ".psarc" and head[:4] != b"PSAR":
+                error_result = {"status": "error", "filename": base,
+                                "error": "Not a valid PSARC file (wrong magic bytes)"}
+            elif suffix == ".sloppak":
+                if head[:2] != b"PK":
+                    error_result = {"status": "error", "filename": base,
+                                    "error": "Not a valid sloppak file (expected zip archive)"}
+                else:
+                    # ZIP magic alone admits any renamed zip — verify the sloppak
+                    # loader can actually parse a manifest.yaml inside. Without
+                    # this, /api/songs/upload returns "ok" for files the rest of
+                    # the backend would refuse to scan or load.
+                    try:
+                        await run_in_threadpool(sloppak_mod.load_manifest, tmp_path)
+                    except Exception as e:
+                        error_result = {"status": "error", "filename": base,
+                                        "error": f"Not a valid sloppak file: {e}"}
+
+        if error_result is not None:
+            try:
+                await run_in_threadpool(tmp_path.unlink)
+            except OSError:
+                pass
+            return error_result
+
+        # Single sync helper so the lock is held for the whole commit —
+        # ``async with _upload_lock`` would have released between every
+        # ``run_in_threadpool`` and let a concurrent delete or upload slip
+        # in between the dir check and the final ``os.replace``.
+        commit_result = await run_in_threadpool(
+            _commit_uploaded_song, tmp_path, dest, overwrite, base
+        )
+        if commit_result is not None:
+            return commit_result
+    except BaseException:
+        try:
+            await run_in_threadpool(tmp_path.unlink)
+        except OSError:
+            pass
+        raise
+
+    # Even on a fresh (non-overwrite) upload, evict any stale entries left
+    # over from a previous delete+re-upload of the same name.
+    await run_in_threadpool(_invalidate_song_caches, base)
+
+    log.info("Uploaded %s (%d bytes) to %s", base, bytes_read, dlc)
+    return {"status": "ok", "filename": base, "size": bytes_read,
+            "format": suffix.lstrip(".")}
+
+
+@app.delete("/api/song/{filename:path}")
+def delete_song(filename: str):
+    """Remove a song from the DLC folder and clear its cache entries.
+
+    Works for all three formats: ``.psarc`` files, ``.sloppak`` files
+    OR directories, and loose-folder songs (the directory containing the
+    chart). The path is resolved through ``_resolve_dlc_path`` so URL-encoded
+    ``..`` segments cannot escape the library root.
+    """
+    dlc = _get_dlc_dir()
+    if dlc is None:
+        return JSONResponse({"error": "DLC folder not configured"}, status_code=503)
+    resolved = _resolve_dlc_path(dlc, filename)
+    if resolved is None:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not resolved.exists():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+    if resolved == dlc.resolve():
+        return JSONResponse({"error": "Refusing to delete the DLC root"}, status_code=400)
+
+    # Only delete actual song entries. Without this, DELETE /api/song/ArtistName
+    # would recursively wipe a whole artist subfolder — far broader than the
+    # UI's per-song contract. Sloppak detection wins over loose because a
+    # sloppak dir can also contain WEM/XML (matches the scanner's precedence).
+    is_psarc = resolved.is_file() and resolved.suffix.lower() == ".psarc"
+    is_sloppak = sloppak_mod.is_sloppak(resolved)
+    is_loose = (
+        resolved.is_dir()
+        and not is_sloppak
+        and loosefolder_mod.is_loose_song(resolved)
+    )
+    if not (is_psarc or is_sloppak or is_loose):
+        return JSONResponse(
+            {"error": "Not a song entry — only PSARC files, sloppaks, "
+                      "or loose-folder songs can be deleted"},
+            status_code=400,
+        )
+
+    # Hold ``_song_io_lock`` across the filesystem removal AND the DB/cache
+    # eviction. Without it, an upload of the same filename could ``os.replace``
+    # a new file into place between our removal and DB delete, leaving the
+    # new generation stranded with no library row; or the reverse, where
+    # delete runs between an upload's directory check and its replace and
+    # the upload then resurrects the song we just removed.
+    with _song_io_lock:
+        try:
+            if resolved.is_dir():
+                shutil.rmtree(resolved)
+            else:
+                resolved.unlink()
+        except OSError as e:
+            log.error("Failed to delete %s: %s", resolved, e)
+            return JSONResponse({"error": f"Delete failed: {e}"}, status_code=500)
+
+        # Canonicalise the cache key the same way update_song_meta does so we
+        # hit the row the scanner indexed under.
+        try:
+            cache_key = resolved.relative_to(dlc.resolve()).as_posix()
+        except ValueError:
+            cache_key = filename
+        with meta_db._lock:
+            meta_db.conn.execute("DELETE FROM songs WHERE filename = ?", (cache_key,))
+            meta_db.conn.execute("DELETE FROM favorites WHERE filename = ?", (cache_key,))
+            meta_db.conn.execute("DELETE FROM loops WHERE filename = ?", (cache_key,))
+            meta_db.conn.commit()
+
+        _invalidate_song_caches(cache_key)
+
+    log.info("Deleted song %s", cache_key)
+    # If a scan was mid-flight when we removed the row, it may already have
+    # listed (and not yet processed) the file and will call ``meta_db.put()``
+    # for it after our DB delete — reinserting a ghost row. Coalesce a
+    # follow-up pass via ``_kick_scan`` so the next scan's ``delete_missing()``
+    # purges that entry. Cheap no-op when no scan is running.
+    if _scan_status["running"]:
+        _kick_scan()
+    return {"ok": True, "filename": cache_key}
 
 
 # ── Library API ───────────────────────────────────────────────────────────────

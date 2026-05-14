@@ -498,6 +498,62 @@ function _trapFocusInModal(modal) {
     });
 }
 
+// Styled async confirm dialog. Returns a Promise<boolean>. For destructive
+// prompts pass `danger: true` — confirm button turns red and Cancel gets
+// initial focus so an accidental Enter won't fire the action. `body` is
+// inserted as HTML so callers can use formatting; callers are responsible
+// for escaping any user-supplied content in it (use _escAttr).
+function _confirmDialog({ title, body = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+    return new Promise((resolve) => {
+        const previouslyFocused = document.activeElement;
+        const modal = document.createElement('div');
+        modal.className = 'slopsmith-modal fixed inset-0 z-[250] flex items-center justify-center bg-black/70 backdrop-blur-sm';
+        modal.setAttribute('role', 'alertdialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('aria-label', title || 'Confirm');
+        const confirmClass = danger
+            ? 'flex-1 bg-red-600 hover:bg-red-500 px-4 py-2 rounded-xl text-sm font-semibold text-white transition focus:outline-none focus:ring-2 focus:ring-red-400/60'
+            : 'flex-1 bg-accent hover:bg-accent-light px-4 py-2 rounded-xl text-sm font-semibold text-white transition focus:outline-none focus:ring-2 focus:ring-accent/60';
+        modal.innerHTML = `
+            <div class="bg-dark-700 border border-gray-700 rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+                <h3 class="text-lg font-bold text-white mb-3">${_escAttr(title || '')}</h3>
+                <div class="mb-5">${body}</div>
+                <div class="flex gap-3">
+                    <button type="button" data-confirm class="${confirmClass}">${_escAttr(confirmText)}</button>
+                    <button type="button" data-cancel class="px-4 py-2 bg-dark-600 hover:bg-dark-500 rounded-xl text-sm text-gray-300 transition focus:outline-none focus:ring-2 focus:ring-gray-500/40">${_escAttr(cancelText)}</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+
+        function finish(result) {
+            modal.remove();
+            document.removeEventListener('keydown', onKey, true);
+            if (previouslyFocused && document.body.contains(previouslyFocused)) {
+                try { previouslyFocused.focus({ preventScroll: true }); } catch {}
+            }
+            resolve(result);
+        }
+        function onKey(e) {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); finish(false); }
+            else if (e.key === 'Enter' && document.activeElement === modal.querySelector('[data-confirm]')) {
+                e.preventDefault(); finish(true);
+            }
+        }
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) finish(false);
+            else if (e.target.closest('[data-confirm]')) finish(true);
+            else if (e.target.closest('[data-cancel]')) finish(false);
+        });
+        document.addEventListener('keydown', onKey, true);
+        _trapFocusInModal(modal);
+        // Focus Cancel by default for destructive prompts so an accidental
+        // Enter / Space won't fire the dangerous action; otherwise focus
+        // the confirm button so Enter accepts.
+        const focusTarget = modal.querySelector(danger ? '[data-cancel]' : '[data-confirm]');
+        if (focusTarget) focusTarget.focus({ preventScroll: true });
+    });
+}
+
 // Shortcut cheat-sheet overlay. Opens on `?` (Shift+/), closes on
 // Esc (handled by the generic modal close path) or on backdrop /
 // close-button click. The list mirrors the canonical shortcut table
@@ -2376,6 +2432,191 @@ async function exportDiagnostics() {
     } catch (e) {
         status.textContent = `Export failed during download: ${e.message}`;
     }
+}
+
+async function uploadSongs(fileList) {
+    if (!fileList || fileList.length === 0) return;
+    const all = Array.from(fileList);
+    // Optional UI element — only present when on the Settings screen.
+    // The navbar entry triggers uploads from any screen, where these aren't.
+    const status = document.getElementById('rescan-status');
+    const setStatus = (s) => { if (status) status.textContent = s; };
+
+    // Client-side extension filter so we don't waste a round-trip on
+    // clearly-invalid picks. The server validates again.
+    const failures = [];
+    const files = [];
+    for (const f of all) {
+        const lower = f.name.toLowerCase();
+        if (lower.endsWith('.psarc') || lower.endsWith('.sloppak')) {
+            files.push(f);
+        } else {
+            failures.push(`${f.name}: only .psarc or .sloppak accepted`);
+        }
+    }
+    if (files.length === 0) {
+        if (failures.length) alert(failures.join('\n'));
+        return;
+    }
+
+    // The backend caps batches at _MAX_UPLOAD_FILES (50). Chunk if needed so a
+    // big drag-and-drop of an album folder still works end-to-end.
+    const BATCH = 50;
+    const chunks = [];
+    for (let i = 0; i < files.length; i += BATCH) chunks.push(files.slice(i, i + BATCH));
+
+    let uploaded = 0;
+
+    const postChunk = async (chunk, overwrite) => {
+        const form = new FormData();
+        for (const f of chunk) form.append('file', f);
+        const url = '/api/songs/upload' + (overwrite ? '?overwrite=1' : '');
+        const resp = await fetch(url, { method: 'POST', body: form });
+        if (!resp.ok) {
+            let data = {};
+            try { data = await resp.json(); } catch (_) {}
+            // Whole-request rejection (DLC misconfig, payload too large, etc.).
+            throw new Error(data.error || resp.statusText || `HTTP ${resp.status}`);
+        }
+        const body = await resp.json();
+        return body.results || [];
+    };
+
+    for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const label = chunks.length > 1
+            ? `Uploading batch ${i + 1}/${chunks.length} (${chunk.length} files)...`
+            : `Uploading ${chunk.length} file${chunk.length === 1 ? '' : 's'}...`;
+        setStatus(label);
+
+        let results;
+        try {
+            results = await postChunk(chunk, false);
+        } catch (e) {
+            for (const f of chunk) failures.push(`${f.name}: ${e.message}`);
+            continue;
+        }
+
+        // Index file objects by name so a follow-up overwrite request can
+        // resend the same blobs. Names within a chunk are unique on disk
+        // (DLC dir is flat for this purpose), but two distinct user picks
+        // could share a name — Map.set keeps the last one, which matches
+        // server-side last-write-wins semantics.
+        const byName = new Map(chunk.map(f => [f.name, f]));
+
+        const conflicts = [];
+        for (const r of results) {
+            if (r.status === 'ok') {
+                uploaded++;
+            } else if (r.status === 'exists') {
+                conflicts.push(r);
+            } else {
+                failures.push(`${r.filename}: ${r.error || 'upload failed'}`);
+            }
+        }
+
+        if (conflicts.length > 0) {
+            const names = conflicts.map(c => c.filename);
+            const preview = names.slice(0, 5).join(', ') + (names.length > 5 ? `, +${names.length - 5} more` : '');
+            const ok = confirm(
+                `${conflicts.length} file${conflicts.length === 1 ? '' : 's'} already exist in your DLC folder:\n${preview}\n\nOverwrite?`
+            );
+            if (!ok) {
+                for (const c of conflicts) failures.push(`${c.filename}: skipped (already exists)`);
+                continue;
+            }
+            const retryFiles = conflicts
+                .map(c => byName.get(c.filename))
+                .filter(Boolean);
+            setStatus(`Overwriting ${retryFiles.length} file${retryFiles.length === 1 ? '' : 's'}...`);
+            let retryResults;
+            try {
+                retryResults = await postChunk(retryFiles, true);
+            } catch (e) {
+                for (const f of retryFiles) failures.push(`${f.name}: ${e.message}`);
+                continue;
+            }
+            for (const r of retryResults) {
+                if (r.status === 'ok') uploaded++;
+                else failures.push(`${r.filename}: ${r.error || 'upload failed'}`);
+            }
+        }
+    }
+
+    if (failures.length === 0) {
+        setStatus(`Uploaded ${uploaded} file${uploaded === 1 ? '' : 's'}. Scanning...`);
+    } else {
+        // Denominator is the full user selection (`all.length`), not just the
+        // post-filter `files.length`. Otherwise picking one valid file plus
+        // one `.txt` would show "Uploaded 1/1" with a failure listed below,
+        // overstating the success rate.
+        const total = all.length;
+        const msg = `Uploaded ${uploaded}/${total}. ${failures.length} failed:\n` + failures.join('\n');
+        alert(msg);
+        setStatus(`Uploaded ${uploaded}/${total}, ${failures.length} failed.`);
+    }
+    if (uploaded > 0) {
+        // Server kicked off a background scan after the batch finished; poll
+        // for completion and refresh the library when it finishes.
+        _pollScanAndRefresh(status);
+    }
+}
+
+let _uploadScanPoller = null;
+
+function _pollScanAndRefresh(statusEl) {
+    const setStatus = (s) => { if (statusEl) statusEl.textContent = s; };
+    if (_uploadScanPoller) _uploadScanPoller.stop();
+
+    const MAX_FAILURES = 5;
+    const INTERVAL_MS = 1000;
+    let stopped = false;
+    let timerId = null;
+    let failures = 0;
+    const stop = () => {
+        stopped = true;
+        if (timerId) { clearTimeout(timerId); timerId = null; }
+        if (_uploadScanPoller && _uploadScanPoller.stop === stop) _uploadScanPoller = null;
+    };
+    _uploadScanPoller = { stop };
+
+    const tick = async () => {
+        timerId = null;
+        try {
+            const sr = await fetch('/api/scan-status');
+            if (!sr.ok) throw new Error(`HTTP ${sr.status}`);
+            const sd = await sr.json();
+            if (stopped) return;
+            failures = 0;
+            if (sd.running) {
+                const cur = sd.current ? ` · ${sd.current}` : '';
+                setStatus(`${sd.done} / ${sd.total} scanned${cur}...`);
+            } else {
+                stop();
+                if (sd.error) setStatus(`Error: ${sd.error}`);
+                else setStatus('Done!');
+                _treeStats = null;
+                _tuningNames = null;
+                // Mirror the delete path: refresh whichever collection is
+                // currently visible. Overwriting a favorited song while
+                // viewing Favorites otherwise leaves a stale entry.
+                const activeScreen = document.querySelector('.screen.active');
+                if (activeScreen?.id === 'favorites') loadFavorites();
+                else loadLibrary();
+                return;
+            }
+        } catch (e) {
+            if (stopped) return;
+            failures++;
+            if (failures >= MAX_FAILURES) {
+                stop();
+                setStatus(`Scan status unavailable: ${e.message || e}`);
+                return;
+            }
+        }
+        if (!stopped) timerId = setTimeout(tick, INTERVAL_MS);
+    };
+    timerId = setTimeout(tick, INTERVAL_MS);
 }
 
 async function rescanLibrary() {
@@ -4693,6 +4934,10 @@ function openEditModal(songData, openerEl) {
                 <button data-edit-close
                     class="px-4 py-2 bg-dark-600 hover:bg-dark-500 rounded-xl text-sm text-gray-300 transition">Cancel</button>
             </div>
+            <div class="mt-4 pt-4 border-t border-gray-800">
+                <button data-delete-filename="${_escAttr(songData.f)}"
+                    class="w-full px-4 py-2 bg-red-900/30 hover:bg-red-900/60 border border-red-900/50 hover:border-red-700 rounded-xl text-sm text-red-300 hover:text-red-100 transition">Remove from library</button>
+            </div>
         </div>`;
     document.body.appendChild(modal);
 
@@ -4719,6 +4964,13 @@ function openEditModal(songData, openerEl) {
     document.getElementById('edit-art-wrapper').addEventListener('click', () => {
         document.getElementById('edit-art-file').click();
     });
+
+    const deleteBtn = modal.querySelector('[data-delete-filename]');
+    if (deleteBtn) {
+        deleteBtn.addEventListener('click', () => {
+            deleteSongFromModal(deleteBtn.dataset.deleteFilename);
+        });
+    }
 
     // Close on backdrop click or Cancel button; restore focus to opener.
     modal.addEventListener('click', (e) => {
@@ -4781,6 +5033,86 @@ async function saveEditModal(encodedFilename) {
     const activeScreen = document.querySelector('.screen.active');
     if (activeScreen?.id === 'favorites') loadFavorites();
     else loadLibrary();
+}
+
+async function deleteSongFromModal(filename) {
+    const title = (document.getElementById('edit-title')?.value || filename).trim();
+    const ok = await _confirmDialog({
+        title: 'Remove from library?',
+        body: `<p class="text-sm text-gray-300">Remove <span class="font-semibold text-white">${_escAttr(title)}</span> from your library?</p>
+               <p class="text-xs text-red-400/90 mt-2">This permanently deletes the file from disk. This cannot be undone.</p>`,
+        confirmText: 'Remove',
+        cancelText: 'Cancel',
+        danger: true,
+    });
+    if (!ok) return;
+    let resp;
+    try {
+        resp = await fetch(`/api/song/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    } catch (e) {
+        alert(`Delete failed: ${e.message}`);
+        return;
+    }
+    if (!resp.ok) {
+        let msg = resp.statusText;
+        try { msg = (await resp.json()).error || msg; } catch (_) {}
+        alert(`Delete failed: ${msg}`);
+        return;
+    }
+    const modal = document.getElementById('edit-modal');
+    if (modal) modal.remove();
+    _treeStats = null;
+    _favTreeStats = null;
+    _tuningNames = null;
+
+    // Remove the deleted song's card from any currently-rendered grid/tree
+    // so the user sees it disappear without waiting for a refetch. A full
+    // loadLibrary() here would re-call loadGridPage(currentPage), which
+    // uses 'append' mode when currentPage > 0 and re-appends the same
+    // (now-shortened) page on top of what's already rendered — leaving
+    // the deleted card visible. Direct DOM removal also preserves scroll
+    // position, which a refetch from page 0 would lose.
+    _removeLibCardsForFilename(filename);
+
+    // Tree views group by artist with song counts; a single card removal
+    // leaves stale counts, so refresh the tree for whichever screen we're
+    // looking at (each tree-view renderer replaces innerHTML cleanly).
+    const activeScreen = document.querySelector('.screen.active');
+    if (activeScreen?.id === 'favorites') {
+        // loadFavorites() routes to either loadFavGridPage (always
+        // 'replace') or loadFavTreeView — both safe for a single delete.
+        loadFavorites();
+    } else if (libView === 'tree') {
+        loadTreeView();
+    }
+    // Main library grid view: DOM removal above is sufficient.
+}
+
+function _removeLibCardsForFilename(filename) {
+    // The grid uses data-play="<encoded filename>" on each card; the
+    // tree's song rows use the same attribute. encodeURIComponent
+    // matches what renderGridCards / the tree renderer emit.
+    const encoded = encodeURIComponent(filename);
+    const selector = `[data-play="${CSS.escape(encoded)}"]`;
+    let removed = 0;
+    for (const el of document.querySelectorAll(selector)) {
+        el.remove();
+        removed++;
+    }
+    if (removed === 0) return;
+    // Decrement the visible count badges that loadGridPage / loadTreeView
+    // populated. Counts come from the server's `total` so this is a
+    // best-effort estimate until the next refetch, but it keeps the
+    // displayed number consistent with what's on screen right now.
+    for (const id of ['lib-count', 'fav-count']) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        const m = (el.textContent || '').match(/^(\d+)/);
+        if (!m) continue;
+        const next = Math.max(0, parseInt(m[1], 10) - removed);
+        el.textContent = (el.textContent || '').replace(/^\d+/, String(next));
+    }
+    _bumpLibNavGeneration();
 }
 
 // Delegated click handlers
