@@ -5485,7 +5485,7 @@ async function loadPlugins() {
                     Plugins
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                 </button>
-                <div class="hidden absolute top-full left-0 mt-2 bg-dark-800 border border-gray-700 rounded-xl shadow-xl py-2 min-w-[180px] z-50" id="plugin-dropdown"></div>`;
+                <div class="hidden absolute top-full left-0 mt-2 bg-dark-800 border border-gray-700 rounded-xl shadow-xl py-2 min-w-[180px] max-h-[80vh] overflow-y-auto z-50" id="plugin-dropdown"></div>`;
             navContainer.appendChild(dropdown);
             const ddMenu = dropdown.querySelector('#plugin-dropdown');
 
