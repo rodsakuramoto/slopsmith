@@ -236,6 +236,11 @@ AUDIO_CACHE_DIR = CONFIG_DIR / "audio_cache"
 SLOPPAK_CACHE_DIR = CONFIG_DIR / "sloppak_cache"
 
 
+def _env_flag(name: str) -> bool:
+    """Parse a conventional boolean env flag."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ── SQLite metadata cache ─────────────────────────────────────────────────────
 
 class MetadataDB:
@@ -1254,6 +1259,35 @@ async def startup_events():
     loop = asyncio.get_running_loop()
     global _event_loop
     _event_loop = loop
+
+    # Test/CI escape hatch: tests that import the FastAPI app via TestClient
+    # don't need plugin loading or the background library scan, and those
+    # paths touch the user filesystem in ways that aren't safe under
+    # parallel test runs. Drive startup straight to a terminal "complete"
+    # phase so any frontend startup waiter that observes the lifespan also
+    # unblocks cleanly (the SSE/poll client treats only `complete` and
+    # `error` as terminal when `running` becomes false).
+    if _env_flag("SLOPSMITH_SKIP_STARTUP_TASKS"):
+        log.info("[startup] Skipping plugin load and background scan")
+        # Tests pop `server` from sys.modules across runs, but the `plugins`
+        # module is not reloaded — so LOADED_PLUGINS can carry stale entries
+        # from a previous test's startup, which `/api/plugins` would then
+        # expose despite this branch reporting zero loaded plugins. Normal
+        # startup clears it inside load_plugins; do the same here under the
+        # same lock so this skip path matches that invariant.
+        from plugins import LOADED_PLUGINS, PLUGINS_LOCK
+        with PLUGINS_LOCK:
+            LOADED_PLUGINS.clear()
+        _set_startup_status(
+            running=False,
+            phase="complete",
+            message="Startup tasks skipped (SLOPSMITH_SKIP_STARTUP_TASKS).",
+            error=None,
+            current_plugin="",
+            loaded=0,
+            total=0,
+        )
+        return
 
     _set_startup_status(
         running=True,
