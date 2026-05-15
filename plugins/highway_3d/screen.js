@@ -8228,14 +8228,12 @@
         return /\b(?:lead|rhythm|bass|combo|guitar)\b/i.test(arr);
     };
 
-    // Register guided tour. The window 'load' event has already fired by the
-    // time a dynamically-injected plugin script runs, so call register() directly.
-    if (window.slopsmithTour && typeof window.slopsmithTour.register === 'function') {
-        window.slopsmithTour.register('highway_3d', {
-            injectTriggerInto: '#player',
-        });
-    } else {
-        console.warn('[3D-Hwy] window.slopsmithTour not available; tour functionality disabled. Ensure Slopsmith includes the tour engine.');
-    }
+    // No imperative register() call needed: slopsmith#272 introduced the
+    // consolidated tour menu, which discovers this plugin's tour automatically
+    // via /api/plugins (has_tour:true from plugin.json's tour field) and
+    // gates relevance on whether highway_3d is the active viz. A register()
+    // call with only injectTriggerInto was a no-op anyway since the new menu
+    // owns trigger placement; for buildSteps / onStart / onComplete / a
+    // custom screens override, register() is still the right hook.
 
 })();
