@@ -146,6 +146,28 @@ def _zip_dir(src_dir: Path, out_zip: Path) -> None:
                 zf.write(f, f.relative_to(src_dir).as_posix())
 
 
+def _remove_path(p: Path) -> None:
+    """Remove `p` whether it is a file or a directory; no-op if absent.
+
+    Sloppak outputs can be either zip-form (file) or dir-form
+    (directory), so staging / backup paths next to them may need to
+    survive crossing between the two forms — e.g. a leftover
+    `<out>.sloppak.tmp` file from a killed zip-form convert getting
+    cleaned up before a fresh `as_dir=True` convert stages its own
+    directory at the same path. Using a single helper keeps the call
+    sites symmetric and prevents `NotADirectoryError` /
+    `IsADirectoryError` from a mismatched cleanup primitive."""
+    if p.is_symlink():
+        # Symlinks should never appear inside our staging paths, but if
+        # one does, drop the link itself rather than follow it.
+        p.unlink(missing_ok=True)
+        return
+    if p.is_dir():
+        shutil.rmtree(p, ignore_errors=True)
+    elif p.exists():
+        p.unlink(missing_ok=True)
+
+
 # ── PSARC → sloppak ───────────────────────────────────────────────────────────
 
 def convert_psarc_to_sloppak(
@@ -231,18 +253,79 @@ def convert_psarc_to_sloppak(
         )
 
         _progress(progress_cb, 0.85, "packing", "Writing output")
+        # Atomic write: build the output at a sibling `.tmp` path first,
+        # then move/rename onto `out_path`. Without this, a kill mid-write
+        # leaves a partial / truncated `.sloppak` (or worse, a half-deleted
+        # dir-form output) on disk; the host's library scan keys off the
+        # filename, so the broken file shows up as a "real" sloppak until
+        # the next successful re-conversion overwrites it.
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_out = out_path.with_name(out_path.name + ".tmp")
+        # Pre-clean stale `.tmp` from a previously-killed convert.
+        # `_remove_path` handles either form, so a zip-form `.tmp` left
+        # behind by an earlier `as_dir=False` crash doesn't block a new
+        # `as_dir=True` stage (or vice versa).
+        _remove_path(tmp_out)
         if as_dir:
+            shutil.copytree(work_dir, tmp_out)
+            # Directory rename-onto-existing isn't portable (`os.replace`
+            # raises on Windows when dst is a non-empty dir, and POSIX
+            # `rename(2)` only swaps empty dirs). Two-step swap via a
+            # `.old` sidecar so the failure window is bounded to one
+            # rename; on Windows the dst-exists case is still a brief
+            # absence rather than a partial dir.
+            backup = out_path.with_name(out_path.name + ".old")
+            # Backup slot may pre-exist as either file or dir — could
+            # be a leftover from a prior killed `as_dir=True` swap, or
+            # a stray file a user dropped there. Clear either form.
+            _remove_path(backup)
+            # `out_path` itself may pre-exist as either form (user
+            # reconverting `as_dir=True` over a previous zip-form
+            # sloppak, or vice versa). `rename` on a file works the
+            # same as on a dir, so no type sniff needed.
             if out_path.exists():
-                shutil.rmtree(out_path)
-            shutil.copytree(work_dir, out_path)
+                out_path.rename(backup)
+            try:
+                tmp_out.rename(out_path)
+            except Exception:
+                if backup.exists():
+                    backup.rename(out_path)
+                raise
+            # Backup may itself be either form (we just renamed
+            # whatever was at out_path into it); use the helper.
+            _remove_path(backup)
         else:
-            _zip_dir(work_dir, out_path)
+            _zip_dir(work_dir, tmp_out)
+            # `os.replace` can swap file-onto-file atomically, but
+            # cannot replace a non-empty directory with a file (POSIX
+            # `rename(2)` returns ENOTDIR/EISDIR; Windows fails the
+            # same way). If `out_path` is a dir-form sloppak left from
+            # a prior `as_dir=True` convert, clear it first. The brief
+            # absence window between rmtree and os.replace mirrors the
+            # dir→dir swap path's bounded gap; without this the convert
+            # would crash and the user would have to manually delete
+            # the dir to recover.
+            if out_path.is_dir():
+                _remove_path(out_path)
+            os.replace(tmp_out, out_path)
 
         _progress(progress_cb, 1.0, "done", f"Wrote {out_path.name}")
         return out_path
     finally:
         shutil.rmtree(tmp_extract, ignore_errors=True)
         shutil.rmtree(work_dir, ignore_errors=True)
+        # Clean up staging sidecars left behind if we bailed before the
+        # rename. The happy path already moved `.tmp` onto `out_path`
+        # and removed `.old`, so these are no-ops there. The `.old`
+        # leg matters specifically for kills after `out_path.rename(backup)`
+        # but before `tmp_out.rename(out_path)` in the `as_dir=True` path
+        # — without this, a stale `.old` dir accumulates next to the
+        # (re-created) `out_path` across crashes.
+        for sidecar in (
+            out_path.with_name(out_path.name + ".tmp"),
+            out_path.with_name(out_path.name + ".old"),
+        ):
+            _remove_path(sidecar)
 
 
 # ── Stem splitting via Demucs ────────────────────────────────────────────────
