@@ -29,7 +29,7 @@ tests/
 
 ## Plugin System
 
-Plugins are the primary extension point. Each plugin lives in `plugins/<name>/` with a `plugin.json` manifest:
+Plugins are the primary extension point. Each plugin lives in `plugins/<name>/` with a `plugin.json` manifest. Plugins are typically their own git repositories — see [CONTRIBUTING.md](CONTRIBUTING.md) for the licensing policy (curated plugins should be AGPL-3.0 or AGPL-compatible: MIT, BSD, Apache-2.0).
 
 ```json
 {
@@ -500,7 +500,7 @@ Full developer reference (workflow recipes, harness flag table, diagnostic schem
 ## Versioning
 
 - **`VERSION`** (repo root) — single source of truth; plain semver string (e.g. `0.2.4`). Bind-mounted into the container and copied by the Dockerfile so it's always available at `/app/VERSION`.
-- **`GET /api/version`** — returns `{"version": "<contents of VERSION>"}`. Displayed as a badge in the navbar.
+- **`GET /api/version`** — returns `{"version": "<contents of VERSION>", "source_url": "...", "license_url": "..."}`. The version drives the navbar badge; `source_url` / `license_url` populate the Settings → About links. `source_url` is configurable via the `APP_SOURCE_URL` env var (default `https://github.com/byrongamatos/slopsmith`); `license_url` falls back to `source_url + "/blob/main/LICENSE"` (GitHub-style, default branch `main`) and is overridable via the `APP_LICENSE_URL` env var — set it explicitly when the source is hosted on a non-GitHub forge (GitLab/Gitea/self-hosted) or under a non-`main` default branch. Both env values must be `http(s)`; non-http(s) values are rejected and fall back to the safe default to prevent `javascript:`/`data:` hrefs.
 - **Auto-sync** — `.github/workflows/sync-version.yml` rewrites `VERSION` via a `repository_dispatch` (`desktop-released`) fired from `slopsmith-desktop`'s release job. As an explicit automation-only exception to the "Never push directly to main" rule in Git Workflow below, the sync job commits straight to `main` as `github-actions[bot]` (version bumps are mechanical; the PR round-trip adds no signal). Human contributors must still go through feature branches + PRs. No manual VERSION edits needed. Use the workflow's `workflow_dispatch` trigger with `version: X.Y.Z` for manual runs (recovery / out-of-band bumps).
 - **`CHANGELOG.md`** — follows [Keep a Changelog](https://keepachangelog.com/) format. Update the `[Unreleased]` section with each PR; when `slopsmith-desktop` cuts a release, rename `[Unreleased]` to the new version + date (the VERSION bump itself is automated).
 

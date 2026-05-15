@@ -467,4 +467,8 @@ See `tests/browser/README.md` for full documentation on browser tests.
 
 ## License
 
-MIT
+Slopsmith is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
+
+You are free to use, modify, and redistribute Slopsmith — including running it on your own server. If you distribute modified versions, or run a modified version that interacts with users over a network, you must make the corresponding source code available under the same license. See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor terms (DCO sign-off, plugin licensing policy).
+
+Bundled and vendored third-party code retains its original license — see [`rscli/LICENSE`](rscli/LICENSE) for the F# wrapper based on [Rocksmith2014.NET](https://github.com/iminashi/Rocksmith2014.NET) (MIT), and individual plugin repositories for plugin licenses.

@@ -1951,7 +1951,11 @@ async function loadSettings() {
 let _avOffsetMs = 0;
 let _avSaveDebounce = null;
 function setAvOffsetMs(ms, skipPersist) {
-    _avOffsetMs = Number(ms) || 0;
+    // Clamp to the same bounds the Settings/player-bar sliders enforce
+    // (-1000..1000 ms). Defends against bad values from /api/settings
+    // landing as `value` on <input type=range>.
+    const n = Number(ms);
+    _avOffsetMs = Math.max(-1000, Math.min(1000, Number.isFinite(n) ? n : 0));
     // Drive the highway's render-time shift. getTime() still returns
     // the audio-aligned chart time so plugins (note detection, etc.)
     // keep scoring against the real chart clock regardless of visual
@@ -1962,6 +1966,14 @@ function setAvOffsetMs(ms, skipPersist) {
     if (avSlider) avSlider.value = _avOffsetMs;
     const avVal = document.getElementById('setting-av-offset-val');
     if (avVal) avVal.textContent = Math.round(_avOffsetMs);
+    // Sync the inline player-bar slider (live-tunable while playing)
+    const playerAvSlider = document.getElementById('player-av-offset-slider');
+    if (playerAvSlider) playerAvSlider.value = _avOffsetMs;
+    const playerAvLabel = document.getElementById('player-av-offset-label');
+    if (playerAvLabel) {
+        const rounded = Math.round(_avOffsetMs);
+        playerAvLabel.textContent = `${rounded >= 0 ? '+' : ''}${rounded}ms`;
+    }
     // Update the player HUD readout (hidden when offset = 0 to
     // avoid clutter; the keyboard shortcut is documented in the
     // Settings help text so it stays discoverable).
@@ -5800,9 +5812,43 @@ async function bootstrapPluginsAndUi() {
     fetch('/api/version')
         .then(r => { if (!r.ok) throw new Error(); return r.json(); })
         .then(d => {
-            const el = document.getElementById('app-version');
             const v = typeof d.version === 'string' ? d.version.trim() : '';
-            if (el && v && v.toLowerCase() !== 'unknown') el.textContent = 'v' + v;
+            if (v && v.toLowerCase() !== 'unknown') {
+                const navEl = document.getElementById('app-version');
+                if (navEl) navEl.textContent = 'v' + v;
+                const aboutEl = document.getElementById('app-version-about');
+                if (aboutEl) aboutEl.textContent = 'v' + v;
+            }
+            // Defense-in-depth: server validates the env-var-supplied URLs,
+            // but the About <a href> values are configurable so the UI also
+            // rejects anything that isn't http(s) with a non-empty hostname.
+            // A bare regex prefix check would accept malformed values like
+            // "https://" — `new URL` + protocol + hostname catches them
+            // (and `hostname`, not `host`, so port-only authorities like
+            // "http://:80/path" are rejected too).
+            // The source and license links are checked independently so a
+            // rejected source_url doesn't gate a valid license_url.
+            const isSafeHref = (u) => {
+                if (typeof u !== 'string' || !u) return false;
+                try {
+                    const parsed = new URL(u);
+                    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+                    // `host` includes the port — "http://:80/path" has
+                    // host ":80" but no real hostname. `hostname` is what
+                    // we actually want.
+                    return !!parsed.hostname;
+                } catch (_) {
+                    return false;
+                }
+            };
+            if (isSafeHref(d.source_url)) {
+                const srcLink = document.getElementById('about-source-link');
+                if (srcLink) srcLink.href = d.source_url;
+            }
+            if (isSafeHref(d.license_url)) {
+                const licLink = document.getElementById('about-license-link');
+                if (licLink) licLink.href = d.license_url;
+            }
         })
         .catch(() => {});
 })();
