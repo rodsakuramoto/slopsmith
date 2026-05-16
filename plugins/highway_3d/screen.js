@@ -153,7 +153,7 @@
     const S_BASE = 3 * K;
     const S_GAP = 4 * K;
 
-    const AHEAD = 3.0;
+    const AHEAD = 4.0;
     const BEHIND = 0.5;
     // Sample approach offsets dt in [0, AHEAD] into strips. Lane quads use
     // z = dZ(dt) + TS*BEHIND = TS*(BEHIND - dt), while notes use z = dZ(n.t-now).
@@ -168,7 +168,7 @@
     /** Lane quad alpha: base + highwayIntensity * scale (readable on dark floor). */
     const HWY_LANE_STRIPE_OP_BASE = 0.12;
     const HWY_LANE_STRIPE_OP_INT  = 0.24;
-    const TS = 200 * K;
+    const TS = 130 * K;
     /** Match `nextNoteByString` onset to this note (float + chart rounding; avoids ghost / glow flicker). */
     const NEXT_ON_STRING_T_EPS = 0.06;
     /**
@@ -472,10 +472,10 @@
     /** Interior gradient strip alpha on both stops (~32/255). */
     const CHORD_BOX_FILL_GRAD_ALPHA = 32 / 255;
     /** Arpeggio interior wash; dedicated gradient tex so teal map doesn’t dominate. */
-    const ARPEGGIO_BOX_LAVENDER_HEX = 0xf0e8ff;
-    const ARPEGGIO_BOX_LAVENDER_DARK_HEX = 0xd8c8f0;
-    /** Arpeggio rim accent and lane tint (magenta). */
-    const ARPEGGIO_MAGENTA_RIM_HEX = 0xc040ff;
+    const ARPEGGIO_BOX_LAVENDER_HEX = 0x454BB6;
+    const ARPEGGIO_BOX_LAVENDER_DARK_HEX = 0x2D3190;
+    /** Arpeggio rim accent and lane tint. */
+    const ARPEGGIO_MAGENTA_RIM_HEX = 0x454BB6;
 
     /** 3D chord-box rim bars (thin on all chords, including repeats in a sequence). */
     const CHORD_FRAME_RIM_MIN = 0.055;       // × K — floor thickness
@@ -1756,6 +1756,7 @@
         let _renderScale = 1;
         let lyricsCanvas = null, lyricsCtx = null;
         let _diagChord            = null;
+        let pSusRail = null, gSusRail = null, mSusRailBase = null;
         let _diagPrev             = null;
         let _diagPrevOpacity      = 0;
         let _diagPrevStartOpacity = 0;
@@ -3599,22 +3600,26 @@
             }));
             mGlow = activePalette.map(c => new T.MeshLambertMaterial({
                 color: 0xffffff, emissive: c, emissiveIntensity: 1.5,
+                transparent: true, opacity: 1.0, depthWrite: false,
             }));
             _laneTargetColor = new T.Color(0x4488ff);
             mSus = activePalette.map(c => new T.MeshLambertMaterial({
                 color: c, transparent: true, opacity: 0.35,
             }));
-            mWhiteOutline = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.6 });
+            mWhiteOutline = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.6, transparent: true, opacity: 1.0, depthWrite: false });
             mStrHitOutline = activePalette.map(c => new T.MeshLambertMaterial({
                 color: c, emissive: c, emissiveIntensity: 1.0,
+                transparent: true, opacity: 1.0, depthWrite: false,
             }));
             // Stronger coloured rim + body for accented notes (.ac); drawNote swaps these in behind ND hit/miss.
             mAccentOutline = activePalette.map(c => new T.MeshLambertMaterial({
                 color: c, emissive: c, emissiveIntensity: ACCENT_RIM_BASE_EMISSIVE,
+                transparent: true, opacity: 1.0, depthWrite: false,
             }));
             // Same colour response as mGlow (vibrancy lerp) but separate emissive drive for extra accent punch.
             mAccentCore = activePalette.map(c => new T.MeshLambertMaterial({
                 color: 0xffffff, emissive: c, emissiveIntensity: 1.5,
+                transparent: true, opacity: 1.0, depthWrite: false,
             }));
             const mkAccentHaloMats = (baseOp) => activePalette.map(c => new T.MeshBasicMaterial({
                 color: new T.Color(c),
@@ -3633,8 +3638,8 @@
             // tints. Note rendering swaps its outline.material between
             // mWhiteOutline / mHitOutline / mMissOutline based on
             // recent notedetect events.
-            mHitOutline = new T.MeshLambertMaterial({ color: 0x40ff70, emissive: 0x40ff70, emissiveIntensity: 1.0 });
-            mMissOutline = new T.MeshLambertMaterial({ color: 0xff4040, emissive: 0xff4040, emissiveIntensity: 1.0 });
+            mHitOutline = new T.MeshLambertMaterial({ color: 0x40ff70, emissive: 0x40ff70, emissiveIntensity: 1.0, transparent: true, opacity: 1.0, depthWrite: false });
+            mMissOutline = new T.MeshLambertMaterial({ color: 0xff4040, emissive: 0xff4040, emissiveIntensity: 1.0, transparent: true, opacity: 1.0, depthWrite: false });
             mSusOutline = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.3, transparent: true, opacity: 0.75, depthWrite: false });
             mBeatM = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 });
             mBeatQ = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.07 });
@@ -3651,13 +3656,11 @@
                     opacity: 0.65,
                     roughness: 1,
                     depthWrite: false,
-                    polygonOffset: true,
-                    polygonOffsetFactor: -2,
-                    polygonOffsetUnits: -2,
+                    depthTest: false,
                 });
                 const m = new T.Mesh(geo, mat);
                 m.visible = false;
-                m.renderOrder = 2;
+                m.renderOrder = 22;
                 noteG.add(m);
                 return m;
             });
@@ -3744,6 +3747,26 @@
             pLbl  = pool(lblG,  () => new T.Sprite(txtMat('0', '#fff', false, 'technique')));
             pBeat = pool(beatG, () => new T.Line(gBeat, mBeatQ));
             pSec  = pool(lblG,  () => new T.Sprite(txtMat('', '#0dd', true, 'section')));
+
+            // Chord sustain length indicator — thin horizontal plane rails.
+            // Unit plane (1×1 in XZ) laid flat; scaled to (railWidth, 1, railLen).
+            // A horizontal plane seen from the camera looking down-forward is
+            // face-on and has real apparent thickness — unlike T.Line (always 1px).
+            // depthTest:false so they never occlude gems; renderOrder 16 places
+            // them behind notes (20/21) but in front of chord fill (10).
+            gSusRail = new T.PlaneGeometry(1, 1);
+            gSusRail.rotateX(-Math.PI / 2); // lay flat in XZ plane
+            mSusRailBase = new T.MeshBasicMaterial({
+                color: CHORD_BOX_TEAL_HEX,
+                transparent: true, opacity: 0.85,
+                depthTest: false, depthWrite: false,
+                fog: false, side: T.DoubleSide,
+            });
+            pSusRail = pool(noteG, () => {
+                const m = new T.Mesh(gSusRail, mSusRailBase.clone());
+                m.renderOrder = 16;
+                return m;
+            });
 
             // Dynamic fret number labels (heat-coloured, updated each frame)
             pFretLbl = pool(lblG, () => new T.Sprite(txtMat('0', '#888', false, 'fretRow')));
@@ -3836,11 +3859,9 @@
                     transparent: true,
                     opacity: 1,
                     depthWrite: false,
+                    depthTest: false,
                     fog: false,
                     side: T.DoubleSide,
-                    polygonOffset: true,
-                    polygonOffsetFactor: 1,
-                    polygonOffsetUnits: 1,
                 }),
             ));
             pChordBox = pool(noteG, () => new T.Mesh(
@@ -3850,11 +3871,9 @@
                     transparent: true,
                     opacity: CHORD_BOX_EDGE_ALPHA,
                     depthWrite: false,
+                    depthTest: false,
                     fog: false,
                     side: T.DoubleSide,
-                    polygonOffset: true,
-                    polygonOffsetFactor: -0.6,
-                    polygonOffsetUnits: 1,
                 }),
             ));
 
@@ -3866,7 +3885,7 @@
             pBarreLine  = pool(noteG, () => new T.Mesh(new T.BoxGeometry(1, 1, 1), mBarre));
 
             // Per-note fret number below note with connector line
-            pNoteFretLabel = pool(lblG, () => new T.Sprite(txtMat('0', '#ffffff', false, 'noteFret').clone()));
+            pNoteFretLabel = pool(lblG, () => new T.Sprite(txtMat('0', '#D8A636', false, 'noteFret').clone()));
             pConnectorLine = pool(noteG, () => new T.Line(
                 new T.BufferGeometry().setFromPoints([new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0)]),
                 new T.LineBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.5 }),
@@ -5439,7 +5458,7 @@
             if (pGhostFretLbl) pGhostFretLbl.reset();
             pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset();
             pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
-            pFretColMarker.reset();
+            pFretColMarker.reset(); pSusRail.reset();
             _ndLabels = [];
             let hwyLaneArpOuterDividers = false;
             _ndSizzle = [];
@@ -6275,7 +6294,7 @@
                         // Lavender frame: authored arpeggio marker only.
                         // RS ``highDensity`` is kept out — it tags gallops & repeated
                         // strums (Frantic ~2:46), not arpeggio.
-                        const isArpeggioFrame = !isRepeat && chordHighwayLavenderArpVisual;
+                        const isArpeggioFrame = chordHighwayLavenderArpVisual;
                         const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
                         const rimHex = isArpeggioFrame ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
 
@@ -6408,6 +6427,37 @@
                             }
                         }
 
+
+                    }
+
+                    // ── Chord sustain length indicator — 3D line rails ──────────────
+                    // Left + right rail as T.Line objects in the WebGL scene so they
+                    // respect renderOrder (16) and never occlude note gems (20/21).
+                    if (chShape.size > 1 && chordOpenBoxW != null && !isRepeat && chDt < AHEAD) {
+                        const _effSus    = Math.max(maxSus, 0.4);
+                        const _dtSusEnd  = chDt + _effSus;
+                        if (_dtSusEnd > 0) {
+                            const _zNear = chDt > 0 ? dZ(chDt) : 0;
+                            const _zFar  = dZ(Math.min(_dtSusEnd, AHEAD));
+                            const _railLen = _zNear - _zFar;
+                            if (_railLen > 0.001) {
+                                const _yA   = sY(0), _yB = sY(nStr - 1);
+                                const _yBot = Math.min(_yA, _yB) - S_GAP * 0.8;
+                                const _fadeAhead = chDt > 0 ? Math.max(0, 1 - chDt / AHEAD) : 1;
+                                const _fadeSus   = Math.min(1, _dtSusEnd / 0.25);
+                                const _op  = _fadeAhead * _fadeSus * 0.9;
+                                const _hex = chordHighwayLavenderArpVisual ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
+                                const _railW = 2.5 * K; // visual width of each rail strip
+                                const _zMid  = _zNear - _railLen * 0.5; // centre in Z
+                                for (const _rx of [chordFrameXL, chordFrameXR]) {
+                                    const rl = pSusRail.get();
+                                    rl.material.color.setHex(_hex);
+                                    rl.material.opacity = _op;
+                                    rl.position.set(_rx, _yBot, _zMid);
+                                    rl.scale.set(_railW, 1, _railLen);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -6690,7 +6740,7 @@
                     const isGold = anchorGold
                         ? (f >= anchorGold.f0 && f <= anchorGold.f1)
                         : activeFrets.has(f);
-                    lb.material    = txtMat(f, isGold ? '#ffe84d' : '#9ab8cc', false, 'fretRow');
+                    lb.material    = txtMat(f, isGold ? '#D8A636' : '#9ab8cc', false, 'fretRow');
                     lb.position.set(xFretMid(f), yBottom - S_GAP * 1.4, 0.5 * K);
                     const intensity = noteState.fretHeat[f];
                     lb.material.opacity = 0.35 + intensity * 0.65;
@@ -7313,6 +7363,7 @@
                 const outline = pNote.get();
                 outline.material = (_ndMatchedMark != null || _ndState != null) ? _ndOutline
                     : (n.ac ? mAccentOutline[s] : _ndOutline);
+                outline.renderOrder = 20;
                 outline.position.set(x, y + techniqueYNow, noteZ);
                 outline.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
@@ -7328,6 +7379,7 @@
                 // ── Core (filled note body) ───────────────────────────────
                 const core = pNote.get();
                 core.material = n.ac ? mAccentCore[s] : (_showHit ? mGlow[s] : mStr[s]);
+                core.renderOrder = 21;
                 core.position.set(x, y + techniqueYNow, noteZ + 0.001);
                 core.rotation.z = approachRot + (isHarm ? Math.PI / 4 : 0);
                 if (n.f === 0) {
@@ -7338,13 +7390,6 @@
                     );
                 } else {
                     core.scale.set(rimXY, rimXY, 2.5 * rimZ);
-                }
-                if (n.f === 0) {
-                    // "0" label on open string
-                    const lb = pLbl.get();
-                    lb.material = txtMat(0, _showHit ? '#fff' : '#ddd', false, 'open');
-                    lb.scale.set(NW * 0.7 * _textSizeMul * openWScale, NH * 0.8 * _textSizeMul * openWScale, 1);
-                    lb.position.set(x, y + techniqueYNow, noteZ + 0.01 * K);
                 }
                 // Fret digits on fretted (n.f > 0) flying notes deliberately
                 // omitted: the showFretOnNote setting and its UI helper text
@@ -7405,6 +7450,7 @@
                             for (let i = 0; i < offsets.length; i++) {
                                 const xOff = xCenter + offsets[i];
                                 const trOut = pSusOutline.get();
+                                trOut.renderOrder = 18;
                                 trOut.position.set(xOff, y, zCenter);
                                 trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
                                 const tr = pSus.get();
@@ -7412,6 +7458,7 @@
                                 // held correctly glows bright (mGlow), else
                                 // the usual dim sustain material.
                                 tr.material = _ndGood ? mGlow[s] : mSus[s];
+                                tr.renderOrder = 19;
                                 tr.position.set(xOff, y, zCenter);
                                 tr.scale.set(tw, th, segLen);
                             }
@@ -7424,6 +7471,7 @@
                             for (let si = 0; si < offsets.length; si++) {
                                 const strandX = x + offsets[si];
                                 const olMesh = pSusRibbonOl.get();
+                                olMesh.renderOrder = 18;
                                 olMesh.scale.set(1, 1, 1);
                                 olMesh.rotation.set(0, 0, 0);
                                 olMesh.position.set(0, 0, 0);
@@ -7434,6 +7482,7 @@
                                     y, sliceDur, susStart, now, n, slideSt,
                                 );
                                 const body = pSusRibbon.get();
+                                body.renderOrder = 19;
                                 body.scale.set(1, 1, 1);
                                 body.rotation.set(0, 0, 0);
                                 body.position.set(0, 0, 0);
@@ -7550,7 +7599,7 @@
                     const alpha = Math.max(0, Math.min(1, dt / 0.5)) * Math.min(1, (AHEAD - dt) / (AHEAD * 0.4));
 
                     const fretLabel  = pNoteFretLabel.get();
-                    const cachedMat  = txtMat(n.f, '#ffffff', false, 'noteFret');
+                    const cachedMat  = txtMat(n.f, '#D8A636', false, 'noteFret');
                     if (fretLabel.material.map !== cachedMat.map) {
                         fretLabel.material.map = cachedMat.map;
                         fretLabel.material.needsUpdate = true;
@@ -7884,7 +7933,8 @@
                 chordFrameGradTex?.dispose?.();
                 chordFrameGradTexArp?.dispose?.();
             }
-            gNote?.dispose?.(); gSus?.dispose?.(); gBeat?.dispose?.(); gTechArrow?.dispose?.(); gTapChevron?.dispose?.();
+            gNote?.dispose?.(); gSus?.dispose?.(); gBeat?.dispose?.(); gSusRail?.dispose?.(); gTechArrow?.dispose?.(); gTapChevron?.dispose?.();
+            mSusRailBase?.dispose?.(); mSusRailBase = null; gSusRail = null;
             for (const m of mStr) m?.dispose?.();
             for (const m of mGlow) m?.dispose?.();
             for (const m of mSus) m?.dispose?.();
