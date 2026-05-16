@@ -276,7 +276,7 @@
     const FOCUS_D = 600 * K;
     const CAM_LERP_BASE = 0.02;
 
-    // Camera-X targeting (issue #34). The visible AHEAD = 3.0 s window is
+    // Camera-X targeting (issue #34). The visible AHEAD = 4.0 s window is
     // far too coarse for picking where the camera should sit — a single
     // 17th-fret bend 2.5 s away yanks tgtX several frets even though the
     // immediate playing area hasn't moved. These constants are bounds for
@@ -7944,7 +7944,7 @@
                 chordFrameGradTexArp?.dispose?.();
             }
             gNote?.dispose?.(); gSus?.dispose?.(); gBeat?.dispose?.(); gSusRail?.dispose?.(); gTechArrow?.dispose?.(); gTapChevron?.dispose?.();
-            mSusRailBase?.dispose?.(); mSusRailBase = null; gSusRail = null;
+            mSusRailBase?.dispose?.(); mSusRailBase = null; gSusRail = null; pSusRail = null;
             for (const m of mStr) m?.dispose?.();
             for (const m of mGlow) m?.dispose?.();
             for (const m of mSus) m?.dispose?.();
