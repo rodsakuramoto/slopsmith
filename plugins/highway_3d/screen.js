@@ -168,6 +168,7 @@
     /** Lane quad alpha: base + highwayIntensity * scale (readable on dark floor). */
     const HWY_LANE_STRIPE_OP_BASE = 0.12;
     const HWY_LANE_STRIPE_OP_INT  = 0.24;
+    /** Note travel speed. Tuned to Rocksmith's default note feel via play tests (PR #303). */
     const TS = 130 * K;
     /** Match `nextNoteByString` onset to this note (float + chart rounding; avoids ghost / glow flicker). */
     const NEXT_ON_STRING_T_EPS = 0.06;
@@ -472,10 +473,10 @@
     /** Interior gradient strip alpha on both stops (~32/255). */
     const CHORD_BOX_FILL_GRAD_ALPHA = 32 / 255;
     /** Arpeggio interior wash; dedicated gradient tex so teal map doesn’t dominate. */
-    const ARPEGGIO_BOX_LAVENDER_HEX = 0x454BB6;
-    const ARPEGGIO_BOX_LAVENDER_DARK_HEX = 0x2D3190;
+    const ARPEGGIO_BOX_BLUE_HEX = 0x454BB6;
+    const ARPEGGIO_BOX_BLUE_DARK_HEX = 0x2D3190;
     /** Arpeggio rim accent and lane tint. */
-    const ARPEGGIO_MAGENTA_RIM_HEX = 0x454BB6;
+    const ARPEGGIO_RIM_BLUE_HEX = 0x454BB6;
 
     /** 3D chord-box rim bars (thin on all chords, including repeats in a sequence). */
     const CHORD_FRAME_RIM_MIN = 0.055;       // × K — floor thickness
@@ -3660,7 +3661,11 @@
                 });
                 const m = new T.Mesh(geo, mat);
                 m.visible = false;
-                m.renderOrder = 22;
+                // Board projection ghost frame. depthTest:false above, so
+                // renderOrder alone decides stacking — keep it above the
+                // chord frame (12/13) but below note gems (20/21) so it
+                // stays visible on the fretboard without covering notes.
+                m.renderOrder = 14;
                 noteG.add(m);
                 return m;
             });
@@ -3810,7 +3815,7 @@
                 color: 0xffffff, transparent: true, opacity: 0.08, fog: false, depthWrite: false,
             });
             mLaneDividerArp = new T.MeshBasicMaterial({
-                color: ARPEGGIO_MAGENTA_RIM_HEX,
+                color: ARPEGGIO_RIM_BLUE_HEX,
                 transparent: true, opacity: 0.08, fog: false, depthWrite: false,
             });
             _ownedSharedMats.push(mLaneDivider, mLaneDividerArp);
@@ -3836,12 +3841,12 @@
             chordFrameGradTex.colorSpace = T.SRGBColorSpace;
             chordFrameGradTex.needsUpdate = true;
 
-            const arR = ARPEGGIO_BOX_LAVENDER_HEX >> 16 & 255;
-            const arG = ARPEGGIO_BOX_LAVENDER_HEX >> 8 & 255;
-            const arB = ARPEGGIO_BOX_LAVENDER_HEX & 255;
-            const arDR = ARPEGGIO_BOX_LAVENDER_DARK_HEX >> 16 & 255;
-            const arDG = ARPEGGIO_BOX_LAVENDER_DARK_HEX >> 8 & 255;
-            const arDB = ARPEGGIO_BOX_LAVENDER_DARK_HEX & 255;
+            const arR = ARPEGGIO_BOX_BLUE_HEX >> 16 & 255;
+            const arG = ARPEGGIO_BOX_BLUE_HEX >> 8 & 255;
+            const arB = ARPEGGIO_BOX_BLUE_HEX & 255;
+            const arDR = ARPEGGIO_BOX_BLUE_DARK_HEX >> 16 & 255;
+            const arDG = ARPEGGIO_BOX_BLUE_DARK_HEX >> 8 & 255;
+            const arDB = ARPEGGIO_BOX_BLUE_DARK_HEX & 255;
             chordFrameGradTexArp = new T.DataTexture(
                 new Uint8Array([ arR, arG, arB, aFill, arDR, arDG, arDB, aFill, arR, arG, arB, aFill ]),
                 3, 1, T.RGBAFormat);
@@ -6296,7 +6301,7 @@
                         // strums (Frantic ~2:46), not arpeggio.
                         const isArpeggioFrame = chordHighwayLavenderArpVisual;
                         const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
-                        const rimHex = isArpeggioFrame ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
+                        const rimHex = isArpeggioFrame ? ARPEGGIO_RIM_BLUE_HEX : CHORD_BOX_TEAL_HEX;
 
                         const repDim = isRepeat ? 0.78 : 1;
                         const edgeOp = fade * repDim * CHORD_BOX_EDGE_ALPHA * (isRepeat ? 0.85 : 1) * chordTailMul;
@@ -6430,9 +6435,10 @@
 
                     }
 
-                    // ── Chord sustain length indicator — 3D line rails ──────────────
-                    // Left + right rail as T.Line objects in the WebGL scene so they
-                    // respect renderOrder (16) and never occlude note gems (20/21).
+                    // ── Chord sustain length indicator — 3D plane rails ─────────────
+                    // Left + right rail as plane meshes (PlaneGeometry +
+                    // MeshBasicMaterial) in the WebGL scene so they respect
+                    // renderOrder (16) and never occlude note gems (20/21).
                     if (chShape.size > 1 && chordOpenBoxW != null && !isRepeat && chDt < AHEAD) {
                         const _effSus    = Math.max(maxSus, 0.4);
                         const _dtSusEnd  = chDt + _effSus;
@@ -6446,7 +6452,7 @@
                                 const _fadeAhead = chDt > 0 ? Math.max(0, 1 - chDt / AHEAD) : 1;
                                 const _fadeSus   = Math.min(1, _dtSusEnd / 0.25);
                                 const _op  = _fadeAhead * _fadeSus * 0.9;
-                                const _hex = chordHighwayLavenderArpVisual ? ARPEGGIO_MAGENTA_RIM_HEX : CHORD_BOX_TEAL_HEX;
+                                const _hex = chordHighwayLavenderArpVisual ? ARPEGGIO_RIM_BLUE_HEX : CHORD_BOX_TEAL_HEX;
                                 const _railW = 2.5 * K; // visual width of each rail strip
                                 const _zMid  = _zNear - _railLen * 0.5; // centre in Z
                                 for (const _rx of [chordFrameXL, chordFrameXR]) {
