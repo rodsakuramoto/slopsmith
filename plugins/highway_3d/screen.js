@@ -478,6 +478,10 @@
     /** Arpeggio rim accent and lane tint. */
     const ARPEGGIO_RIM_BLUE_HEX = 0x454BB6;
 
+    /** Fret-number label tints — gold on approaching/active notes, muted blue when idle. */
+    const FRET_LABEL_GOLD_HEX = '#D8A636';
+    const FRET_LABEL_IDLE_HEX = '#9ab8cc';
+
     /** 3D chord-box rim bars (thin on all chords, including repeats in a sequence). */
     const CHORD_FRAME_RIM_MIN = 0.055;       // × K — floor thickness
     const CHORD_FRAME_RIM_FRAC_H = 0.028;    // × fullChordBoxH
@@ -3890,7 +3894,7 @@
             pBarreLine  = pool(noteG, () => new T.Mesh(new T.BoxGeometry(1, 1, 1), mBarre));
 
             // Per-note fret number below note with connector line
-            pNoteFretLabel = pool(lblG, () => new T.Sprite(txtMat('0', '#D8A636', false, 'noteFret').clone()));
+            pNoteFretLabel = pool(lblG, () => new T.Sprite(txtMat('0', FRET_LABEL_GOLD_HEX, false, 'noteFret').clone()));
             pConnectorLine = pool(noteG, () => new T.Line(
                 new T.BufferGeometry().setFromPoints([new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0)]),
                 new T.LineBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.5 }),
@@ -6746,7 +6750,7 @@
                     const isGold = anchorGold
                         ? (f >= anchorGold.f0 && f <= anchorGold.f1)
                         : activeFrets.has(f);
-                    lb.material    = txtMat(f, isGold ? '#D8A636' : '#9ab8cc', false, 'fretRow');
+                    lb.material    = txtMat(f, isGold ? FRET_LABEL_GOLD_HEX : FRET_LABEL_IDLE_HEX, false, 'fretRow');
                     lb.position.set(xFretMid(f), yBottom - S_GAP * 1.4, 0.5 * K);
                     const intensity = noteState.fretHeat[f];
                     lb.material.opacity = 0.35 + intensity * 0.65;
@@ -7605,7 +7609,7 @@
                     const alpha = Math.max(0, Math.min(1, dt / 0.5)) * Math.min(1, (AHEAD - dt) / (AHEAD * 0.4));
 
                     const fretLabel  = pNoteFretLabel.get();
-                    const cachedMat  = txtMat(n.f, '#D8A636', false, 'noteFret');
+                    const cachedMat  = txtMat(n.f, FRET_LABEL_GOLD_HEX, false, 'noteFret');
                     if (fretLabel.material.map !== cachedMat.map) {
                         fretLabel.material.map = cachedMat.map;
                         fretLabel.material.needsUpdate = true;
