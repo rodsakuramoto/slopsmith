@@ -235,6 +235,10 @@
     const SINGLE_SUS_OFFSETS = Object.freeze([0]);
     const BEND_HALFSTEP_WORLD_Y = S_GAP * 0.8;
     const VIBRATO_HALF_WAVE_S = 0.08;
+    // Bend ribbon envelope: fraction of the sustain spent ramping up to
+    // the bent pitch, and releasing back down (rest is the held plateau).
+    const BEND_ENV_RISE_FRAC = 0.35;
+    const BEND_ENV_RELEASE_FRAC = 0.30;
     const TREMOLO_BUMP_S = 0.06;
 
     /** Longitudinal samples for sustain-technique prism (indexed BufferGeometry). */
@@ -531,14 +535,6 @@
     /* ======================================================================
      *  Pure helpers
      * ====================================================================== */
-
-    function bendText(bn) {
-        if (bn === 0.5) return '½';
-        if (bn === 1) return 'full';
-        if (bn === 1.5) return '1½';
-        if (bn >= 2) return String(Math.round(bn));
-        return bn.toFixed(1);
-    }
 
     const fretX = f => {
         if (f <= 0) return 0;
@@ -1728,7 +1724,7 @@
         let _canvasReplacedHandler = null;
         let ambLight = null, dirLight = null;
         let fretG = null, tuningLblG = null, noteG = null, beatG = null, lblG = null;
-        let gNote = null, gSus = null, gBeat = null, gTechArrow = null, gTapChevron = null;
+        let gNote = null, gSus = null, gBeat = null, gTapChevron = null;
         let mStr = [], mGlow = [], mSus = [], mStrHitOutline = [], mAccentOutline = [], mAccentCore = [], mAccentHaloNear = [], mAccentHaloMid = [], mAccentHaloFar = [];
         let mWhiteOutline = null, mSusOutline = null;
         // Shared materials for the legato technique meshes — one per geometry
@@ -1736,7 +1732,7 @@
         // material allocation in dense HO/PO/tap passages. Allocated in
         // initScene() alongside the other scene materials and disposed in
         // teardown.
-        let mTechArrow = null, mTapChevron = null;
+        let mTapChevron = null;
         // Barre indicator material (white vertical line at the barre fret
         // during chord linger). Promoted from inline pool-factory authoring
         // to a named module-scope reference so _applyGlow() can mutate
@@ -1983,7 +1979,7 @@
         const _laneSegArp = [];
         let _laneSegLen = 0;
         let pChordBox, pChordFrameFill, pChordLbl, pBarreLine;
-        let pNoteFretLabel, pConnectorLine, pDropLine, pTechArrow, pTapChevron, pAccentHalo;
+        let pNoteFretLabel, pConnectorLine, pDropLine, pTapChevron, pAccentHalo;
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
         /** Horizontal gradient for chord box interior fill. */
@@ -2609,6 +2605,76 @@
                 depthWrite: false,
             });
             txtCache[k] = mat;
+            return mat;
+        }
+
+        // Technique-marker sprite materials (triangle / chevron). Keyed by a
+        // packed NUMBER, not a string — triMat/bendChevronMat are called from
+        // the drawNote hot path, so a string cache key would allocate per
+        // note per frame. Disposed in teardown. `hex` is a 0xRRGGBB number;
+        // the low nibble of the key tags the variant (0 ▲, 1 ▼, 3-6 chevron
+        // step-count) so triangle and chevron entries can't collide.
+        const _techMatCache = new Map();
+
+        // Hammer-on / pull-off triangle marker: a white ▲ (up) / ▼ (down)
+        // with a thick border in the gem's string colour.
+        function triMat(up, hex) {
+            const h = (hex >>> 0) & 0xffffff;
+            const key = h * 16 + (up ? 0 : 1);
+            const cached = _techMatCache.get(key);
+            if (cached) return cached;
+            const S = 256, m = S * 0.15;
+            const c = document.createElement('canvas');
+            c.width = c.height = S;
+            const g = c.getContext('2d');
+            g.beginPath();
+            if (up) { g.moveTo(S / 2, m); g.lineTo(S - m, S - m); g.lineTo(m, S - m); }
+            else    { g.moveTo(S / 2, S - m); g.lineTo(S - m, m); g.lineTo(m, m); }
+            g.closePath();
+            g.lineJoin = 'round';
+            g.fillStyle = '#ffffff';
+            g.fill();
+            g.lineWidth = S * 0.15;
+            g.strokeStyle = '#' + (hex >>> 0).toString(16).padStart(6, '0');
+            g.stroke();
+            const mat = new T.SpriteMaterial({
+                map: new T.CanvasTexture(c), transparent: true,
+                depthTest: false, depthWrite: false,
+            });
+            _techMatCache.set(key, mat);
+            return mat;
+        }
+
+        // Strength-of-bend chevron stack: `steps` (1-4) chevrons in the gem's
+        // string colour (Rocksmith bend notation — 1 per half-step).
+        function bendChevronMat(steps, hex) {
+            const h = (hex >>> 0) & 0xffffff;
+            const key = h * 16 + 2 + steps;   // steps 1-4 → low nibble 3-6
+            const cached = _techMatCache.get(key);
+            if (cached) return cached;
+            const S = 256;
+            const c = document.createElement('canvas');
+            c.width = c.height = S;
+            const g = c.getContext('2d');
+            g.strokeStyle = '#' + (hex >>> 0).toString(16).padStart(6, '0');
+            g.lineWidth = S * 0.10;
+            g.lineJoin = g.lineCap = 'round';
+            const padX = S * 0.18;
+            const rowH = S / steps;
+            const amp = Math.min(rowH * 0.55, S * 0.24);
+            for (let i = 0; i < steps; i++) {
+                const cy = (i + 0.5) * rowH;
+                g.beginPath();
+                g.moveTo(padX, cy + amp * 0.5);
+                g.lineTo(S / 2, cy - amp * 0.5);
+                g.lineTo(S - padX, cy + amp * 0.5);
+                g.stroke();
+            }
+            const mat = new T.SpriteMaterial({
+                map: new T.CanvasTexture(c), transparent: true,
+                depthTest: false, depthWrite: false,
+            });
+            _techMatCache.set(key, mat);
             return mat;
         }
 
@@ -3559,17 +3625,6 @@
             gBeat = new T.BufferGeometry().setFromPoints(
                 [new T.Vector3(0, 0, 0), new T.Vector3(1, 0, 0)],
             );
-            const arrowShape = new T.Shape();
-            arrowShape.moveTo(-0.5, 0);
-            arrowShape.lineTo(0, 1);
-            arrowShape.lineTo(0.5, 0);
-            arrowShape.closePath();
-            gTechArrow = new T.ExtrudeGeometry(arrowShape, {
-                depth: 0.04 * K,
-                bevelEnabled: false,
-            });
-            gTechArrow.translate(0, -0.5, 0); // Center the geometry vertically
-
             // Tap chevron (open V pointing downward) — filled outline for extrusion into a solid mesh
 
             const chevronShape = new T.Shape();
@@ -3728,19 +3783,8 @@
             // hands out fresh meshes that all reference the same material,
             // so a dense HO/PO passage doesn't churn N MeshLambertMaterial
             // allocations and N GPU material switches.
-            // Transparent + no depth write/test so HO/PO draws in the transparent
-            // pass where drawNote assigns renderOrder 1000 — otherwise an opaque
-            // arrow renders before mStr core and gets fully covered (# technique).
-            mTechArrow = new T.MeshLambertMaterial({
-                color: 0xffffff,
-                emissive: 0xffffff,
-                emissiveIntensity: 0.9,
-                transparent: true,
-                opacity: 1.0,
-                side: T.DoubleSide,
-                depthWrite: false,
-                depthTest: false,
-            });
+            // Transparent + no depth write/test so the tap chevron draws in
+            // the transparent pass where drawNote assigns renderOrder 1000.
             mTapChevron = new T.MeshLambertMaterial({
                 color: 0xd4d4d4,
                 emissive: 0xd4d4d4,
@@ -3751,7 +3795,6 @@
                 depthWrite: false,
                 depthTest: false,
             });
-            pTechArrow = pool(noteG, () => new T.Mesh(gTechArrow, mTechArrow));
             pTapChevron = pool(noteG, () => new T.Mesh(gTapChevron, mTapChevron));
             pLbl  = pool(lblG,  () => new T.Sprite(txtMat('0', '#fff', false, 'technique')));
             pBeat = pool(beatG, () => new T.Line(gBeat, mBeatQ));
@@ -4336,7 +4379,6 @@
             if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.0 * g;
             if (mMissOutline)  mMissOutline.emissiveIntensity  = 1.0 * g;
             if (mSusOutline)   mSusOutline.emissiveIntensity   = 0.3 * g;
-            if (mTechArrow)    mTechArrow.emissiveIntensity    = 0.9 * g;
             if (mTapChevron)   mTapChevron.emissiveIntensity   = 0.9 * g;
             if (mBarre)        mBarre.emissiveIntensity        = 0.9 * g;
             for (let si = 0; si < activePalette.length; si++) {
@@ -5460,7 +5502,7 @@
             }
             _syncOpenStringPitchLabels(bundle);
 
-            pNote.reset(); pSus.reset(); pSusOutline.reset(); pSusRibbon.reset(); pSusRibbonOl.reset(); pTechArrow.reset(); pTapChevron.reset(); pAccentHalo.reset(); pLbl.reset();
+            pNote.reset(); pSus.reset(); pSusOutline.reset(); pSusRibbon.reset(); pSusRibbonOl.reset(); pTapChevron.reset(); pAccentHalo.reset(); pLbl.reset();
             pBeat.reset(); pSec.reset();
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
@@ -7168,7 +7210,17 @@
             const bn = Number(n?.bn) || 0;
             if (!(bn > 0) || !(n?.sus > 0)) return 0;
             const p = Math.max(0, Math.min(1, (chartTime - n.t) / Math.max(n.sus, 1e-6)));
-            return bn * p;
+            // rise → hold → release: ramp up over the first ~35 %, hold, then
+            // release back down over the last ~30 %. Depicts the bend gesture
+            // (up and back down) rather than a monotone climb that only ever
+            // showed the bend going up. Drives both the sustain ribbon's Y
+            // contour and the gem's techniqueYNow offset.
+            const RISE = BEND_ENV_RISE_FRAC, REL = BEND_ENV_RELEASE_FRAC;
+            let env;
+            if (p < RISE) env = p / RISE;
+            else if (p < 1 - REL) env = 1;
+            else env = (1 - p) / REL;
+            return bn * Math.max(0, Math.min(1, env));
         }
 
         function vibratoSemisAtTime(n, chartTime) {
@@ -7539,23 +7591,37 @@
                     ? NH * 1.5 * sLbl * openWScale
                     : NH * 1.5 * sLbl;
                 if (n.bn > 0) {
+                    // Strength-of-bend chevron stack — one chevron per
+                    // half-step (Rocksmith bend notation), in the string
+                    // colour, pinned to the gem. Fixed world size so it
+                    // perspective-shrinks with the gem rather than being
+                    // distFactor-scaled. `n.bn` is already in semitones
+                    // (sloppak spec) — a half-step bend is bn === 1.
+                    const steps = Math.max(1, Math.min(4, Math.round(n.bn)));
                     const l = pLbl.get();
-                    l.material = txtMat('↑' + bendText(n.bn), '#fff', true, 'technique');
-                    l.scale.set(NH * 3.6 * sLbl, NH * 1.5 * sLbl, 1); l.position.set(x, yo, noteZ); yo += NH * 1.2 * sLbl;
+                    l.material = bendChevronMat(steps, activePalette[s] || 0xffffff);
+                    const cs = NH * 2.4;
+                    l.scale.set(cs, cs, 1);
+                    l.position.set(x, y + techniqueYNow + NH * 1.1, noteZ + 0.005);
                     l.renderOrder = TECH_RO;
+                    // Reserve stack space above the chevron so a co-occurring
+                    // tremolo / label sits clear instead of overlapping it.
+                    yo = Math.max(yo, y + techniqueYNow + NH * 2.5);
                 }
                 if (n.ho || n.po || n.tp) {
                     if (n.ho || n.po) {
-                        const arrow = pTechArrow.get();
-                        const arrowScale = NH * 0.75 * sLbl;
-                        arrow.position.set(x, y + techniqueYNow, noteZ + 1.1 * K);
-                        arrow.rotation.z = (isHarm ? Math.PI / 4 : 0);
-                        // gTechArrow points UP in local space (apex at +y).
-                        // HO ascends in pitch → arrow stays up (positive y-scale).
-                        // PO descends in pitch → flip y-scale negative so the
-                        // arrow points down.
-                        arrow.scale.set(arrowScale, n.ho ? arrowScale : -arrowScale, 1);
-                        arrow.renderOrder = TECH_RO;
+                        // Hammer-on / pull-off: a ▲ (up) / ▼ (down) triangle
+                        // marker — white fill, string-coloured border — pinned
+                        // to the gem. Fixed world size; renderOrder + the
+                        // depthTest-off material keep it above the note body.
+                        const tri = pLbl.get();
+                        tri.material = triMat(!!n.ho, activePalette[s] || 0xffffff);
+                        const triScale = NH * 1.8;
+                        tri.scale.set(triScale, triScale, 1);
+                        tri.position.set(x, y + techniqueYNow + NH * 0.7, noteZ + 0.005);
+                        tri.renderOrder = TECH_RO;
+                        // Reserve stack space above the triangle.
+                        yo = Math.max(yo, y + techniqueYNow + NH * 1.8);
                     } else {
                         const chevron = pTapChevron.get();
                         const chevronScale = NH * 0.8 * sLbl; // Slightly increased for readability
@@ -7943,7 +8009,7 @@
                 chordFrameGradTex?.dispose?.();
                 chordFrameGradTexArp?.dispose?.();
             }
-            gNote?.dispose?.(); gSus?.dispose?.(); gBeat?.dispose?.(); gSusRail?.dispose?.(); gTechArrow?.dispose?.(); gTapChevron?.dispose?.();
+            gNote?.dispose?.(); gSus?.dispose?.(); gBeat?.dispose?.(); gSusRail?.dispose?.(); gTapChevron?.dispose?.();
             mSusRailBase?.dispose?.(); mSusRailBase = null; gSusRail = null; pSusRail = null;
             for (const m of mStr) m?.dispose?.();
             for (const m of mGlow) m?.dispose?.();
@@ -7966,6 +8032,13 @@
                 tm.map?.dispose();
                 tm.dispose();
             }
+            // Technique-marker sprite materials (triMat / bendChevronMat) —
+            // own numeric-keyed cache, not reachable via txtCache.
+            for (const tm of _techMatCache.values()) {
+                tm.map?.dispose();
+                tm.dispose();
+            }
+            _techMatCache.clear();
             // Dispose per-sprite cloned materials (e.g. pmMark._pmMat).
             // These aren't reachable via scene.traverse once the sprite
             // gets reassigned a different material, so the array tracks
@@ -7985,10 +8058,11 @@
             ambLight = dirLight = null;
             mStr = []; mGlow = []; mSus = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = null; stringLines = []; stringLineGlows = [];
             for (const m of _inlayMats) m?.dispose?.(); _inlayMats = []; _inlayLabels = [];
-            // mTechArrow / mTapChevron are owned by pooled meshes attached
-            // to noteG; the scene.traverse() dispose pass above already
-            // frees them once any pool factory has instantiated a mesh.
-            mTechArrow = mTapChevron = null;
+            // mTapChevron: dispose explicitly — if no tap marker ever
+            // spawned a pooled mesh, the scene.traverse() pass above never
+            // reaches this material.
+            mTapChevron?.dispose?.();
+            mTapChevron = null;
             // mBarre is a shared material that all pBarreLine pool meshes
             // reference. If no barre chord ever appears, the pool factory
             // is never called, so no mesh carries mBarre into the scene
@@ -8009,12 +8083,12 @@
             _renderScale = 1;
             mBeatM = mBeatQ = null;
             pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
-            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTechArrow = pTapChevron = pAccentHalo = null;
+            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pNoteFretLabel = pConnectorLine = pDropLine = pTapChevron = pAccentHalo = null;
             mLaneOdd = mLaneEven = mLaneDivider = mLaneDividerArp = gLanePlane = gGhostFretPlane = null;
             chordFrameGradTex = chordFrameGradTexArp = null;
             pFretColMarker = null;
             _fretMarkerWaveCache.clear();
-            gNote = gSus = gBeat = gTechArrow = gTapChevron = null;
+            gNote = gSus = gBeat = gTapChevron = null;
             tgtX = curX = xFretMid(CAM_LOCK_CENTER_FRET); tgtDist = curDist = CAM_DIST_BASE; tgtLookY = curLookY = 0; nStr = NSTR; _oobStringWarned = false;
             _lookaheadCamX = xFretMid(CAM_LOCK_CENTER_FRET);
             _lookaheadFretSpan = DEFAULT_LOOKAHEAD_FRET_SPAN;
