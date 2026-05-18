@@ -227,11 +227,15 @@
 
     // Shorter, flatter notes (joel style)
     const NW = 5 * K, NH = 3 * K, ND = 0.5 * K;
-    // Sustain-trail X offsets per note class. Module-scoped to avoid
-    // per-call allocation in drawNote()'s hot path. Open strings get
-    // two parallel trails framed inside the wide flat note body;
-    // fretted notes get a single centered trail.
-    const OPEN_SUS_OFFSETS = Object.freeze([-NW * 3, NW * 3]);
+    // Sustain-trail X offset for fretted notes. Module-scoped + frozen
+    // so the hot path's `offsets.length` loop sees a stable singleton
+    // reference. The standalone-open-string path builds a fresh pair
+    // each call because its offset magnitude depends on the per-note
+    // `openWScale` (set in drawNote at line 7367 from the open-string
+    // body's lane width), so a module-scoped constant can't capture
+    // it; the allocation is the same one the prior code did via
+    // `const baseOff = NW * 3 * openWScale` plus the inline `[-, +]`
+    // literal in the chord-member branch — just consolidated.
     const SINGLE_SUS_OFFSETS = Object.freeze([0]);
     const BEND_HALFSTEP_WORLD_Y = S_GAP * 0.8;
     const VIBRATO_HALF_WAVE_S = 0.08;
@@ -6349,35 +6353,50 @@
                     // Horizontals for chord frame + open-string mesh width. With anchors,
                     // span matches HWY lane columns (wire dMin..dMax); no extra pad.
                     let chordFrameXL = null, chordFrameXR = null, chordOpenBoxW = null;
+                    let chordFrameAnchorMatched = false;
                     if (chShape.size > 1) {
-                        if (chAncB) {
+                        let fMinCh = 99, fMaxCh = 0, anyFretted = false;
+                        for (const [, f] of chShape) {
+                            if (f > 0) {
+                                anyFretted = true;
+                                fMinCh = Math.min(fMinCh, f);
+                                fMaxCh = Math.max(fMaxCh, f);
+                            }
+                        }
+                        // Prefer the fretted-note span over the anchor span
+                        // when the chord has any fretted notes. The anchor
+                        // can legitimately cover a wide region (e.g. a
+                        // passage that roams frets 0–12), and using it
+                        // verbatim for the chord frame produced an
+                        // oversized box around chord shapes that mix open
+                        // and fretted strings (frame ran from the nut to
+                        // fret 12 for a chord whose only fretted notes were
+                        // at frets 2–3). The open strings in the chord
+                        // remain at the nut (drawn separately by the
+                        // open-string body); the frame just hugs the
+                        // fretted constituents now.
+                        if (anyFretted) {
+                            chordFrameXL = xFret(fMinCh - 1);
+                            chordFrameXR = xFret(Math.max(fMaxCh, fMinCh + 2));
+                        } else if (chAncB) {
                             chordFrameXL = xFret(chAncB.dMin);
                             chordFrameXR = xFret(chAncB.dMax);
+                            chordFrameAnchorMatched = true;
                         } else {
-                            let fMinCh = 99, fMaxCh = 0, anyFretted = false;
-                            for (const [, f] of chShape) {
-                                if (f > 0) {
-                                    anyFretted = true;
-                                    fMinCh = Math.min(fMinCh, f);
-                                    fMaxCh = Math.max(fMaxCh, f);
-                                }
-                            }
-                            if (anyFretted) {
-                                chordFrameXL = xFret(fMinCh - 1);
-                                chordFrameXR = xFret(Math.max(fMaxCh, fMinCh + 2));
-                            } else {
-                                const wNut = openNoteLaneBoxW(ch.t);
-                                chordFrameXL = chordCX - wNut * 0.5;
-                                chordFrameXR = chordCX + wNut * 0.5;
-                            }
+                            const wNut = openNoteLaneBoxW(ch.t);
+                            chordFrameXL = chordCX - wNut * 0.5;
+                            chordFrameXR = chordCX + wNut * 0.5;
                         }
                         if (chordFrameXL != null && chordFrameXR != null) {
                             const span = Math.abs(chordFrameXR - chordFrameXL);
                             if (span > 1e-8) {
                                 // Anchor-driven lane stripes span [dMin..dMax] wire-to-wire with
-                                // no horizontal pad — match that so the 3D frame doesn’t spill past
-                                // the blue dynamic highway columns.
-                                if (chAncB) chordOpenBoxW = span;
+                                // no horizontal pad — match that ONLY when the frame is actually
+                                // following the anchor (all-open chord, fallback path). The
+                                // fretted-span path always pads so the frame breathes around
+                                // the outermost fretted notes; without the pad it sat exactly
+                                // on the fret lines and looked clipped.
+                                if (chordFrameAnchorMatched) chordOpenBoxW = span;
                                 else {
                                     const padX = NW * 0.4;
                                     chordOpenBoxW = span + padX * 2;
@@ -7849,7 +7868,11 @@
             // slide-target notes (e.g. linkNext hold→slide: gem suppressed,
             // slide trail stays visible as the continuation of the sustain).
             // _ndGood is false for skipBody notes → trail uses dim mSus[s].
-            if (hasSus) {
+            // Chord-member open strings (fromChord && f === 0) skip the
+            // sustain trail entirely — fretted constituents already carry
+            // the chord's sustains; an extra ribbon under the wide open
+            // body looked like clutter. The note BODY still draws above.
+            if (hasSus && !(fromChord && n.f === 0)) {
                     const susStart = Math.max(n.t, now);
                     const remSus = susEnd - susStart;
                     if (remSus > 0.01) {
@@ -7870,26 +7893,25 @@
                             }
                             tw = Math.max(tw, ftSide * 1.05);
                         }
-                        // Open strings get two parallel trails offset along
-                        // X — visually echoes the wide flat open-note body.
-                        // Fretted notes keep the single-trail path. Offsets
-                        // arrays are module-scoped (see OPEN_SUS_OFFSETS /
-                        // SINGLE_SUS_OFFSETS) so this hot path doesn't
-                        // allocate per call.
-                        let offsets;
-                        if (n.f === 0) {
-                            if (openChordBoxWidth != null && openChordBoxWidth > 1e-8) {
-                                const boxHalf = openChordBoxWidth * 0.48;
-                                const baseOff = NW * 3 * openWScale;
-                                const maxOff = Math.max(0, boxHalf - tw * 0.5 - 0.25 * K);
-                                const xOffMag = Math.min(baseOff, maxOff);
-                                offsets = xOffMag > 0.12 * K ? [-xOffMag, xOffMag] : [0];
-                            } else {
-                                offsets = OPEN_SUS_OFFSETS;
-                            }
-                        } else {
-                            offsets = SINGLE_SUS_OFFSETS;
-                        }
+                        // Standalone open strings get two parallel trails
+                        // offset along X — visually echoes the wide flat
+                        // open-note body. Fretted notes keep the
+                        // single-trail path. Offsets are scaled by
+                        // `openWScale` (the same body-width scale
+                        // computed at line 7367) so the trails stay
+                        // underneath the body's edges no matter how wide
+                        // the anchor lane is. Chord-member open strings
+                        // can't reach here (guarded at the `hasSus`
+                        // check above).
+                        //
+                        // openTrailOff is always > 0 because openWScale
+                        // is clamped >= 0.22 at line 7368 (or defaults
+                        // to 1 when there's no openChordBoxWidth), so
+                        // openTrailOff >= NW * 3 * 0.22 = 3.3 * K.
+                        // No degenerate-small-offset fallback needed.
+                        const offsets = (n.f === 0)
+                            ? [-(NW * 3 * openWScale), NW * 3 * openWScale]
+                            : SINGLE_SUS_OFFSETS;
                         const slideSt = slideTrailEnd(n);
                         const ribbonSusTrail = !!(
                             (slideSt && n.f > 0 && (n.sus || 0) > 1e-4)
