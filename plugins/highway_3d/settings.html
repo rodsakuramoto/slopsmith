@@ -55,7 +55,13 @@
     <script>
     (function () {
         const sel = document.getElementById('h3d-fret-spacing');
-        if (sel) sel.value = localStorage.getItem('h3dFretSpacing') === 'logarithmic' ? 'logarithmic' : 'uniform';
+        if (sel) {
+            try {
+                sel.value = localStorage.getItem('highway_3d.fretSpacing') === 'logarithmic' ? 'logarithmic' : 'uniform';
+            } catch (_) {
+                sel.value = 'uniform';
+            }
+        }
     })();
     </script>
 </div>

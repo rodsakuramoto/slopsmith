@@ -554,11 +554,12 @@
     const _fretXUniStep = _fretXLog(NFRETS) / NFRETS;
     const _fretXUni = f => f <= 0 ? 0 : f * _fretXUniStep;
 
-    let _h3dFretUniform = localStorage.getItem('h3dFretSpacing') !== 'logarithmic';
+    let _h3dFretUniform = true;
+    try { _h3dFretUniform = localStorage.getItem('highway_3d.fretSpacing') !== 'logarithmic'; } catch (_) {}
     const fretX = f => _h3dFretUniform ? _fretXUni(f) : _fretXLog(f);
 
     window.h3dSetFretSpacing = mode => {
-        localStorage.setItem('h3dFretSpacing', mode);
+        try { localStorage.setItem('highway_3d.fretSpacing', mode); } catch (_) {}
         location.reload();
     };
 
@@ -2642,18 +2643,26 @@
          * mesh instead of a billboard Sprite. Cached on userData to avoid allocations.
          */
         function _spriteMat2MeshMat(sm) {
-            let mb = sm.userData.h3dTechMeshMat;
-            if (!mb) {
-                mb = new T.MeshBasicMaterial({
+            // Always return a fresh clone so each consumer can mutate
+            // opacity independently without affecting other meshes that
+            // share the same underlying sprite (and therefore the same
+            // cached MeshBasicMaterial). The clone shares the CanvasTexture
+            // map (no extra GPU upload), so the only cost is a small JS
+            // object per call — acceptable for technique markers (~2/frame max).
+            let base = sm.userData.h3dTechMeshMat;
+            if (!base) {
+                base = new T.MeshBasicMaterial({
                     map: sm.map,
                     transparent: true,
                     depthTest: false,
                     depthWrite: false,
                     side: T.DoubleSide,
                 });
-                sm.userData.h3dTechMeshMat = mb;
+                sm.userData.h3dTechMeshMat = base;
             }
-            return mb;
+            const clone = base.clone();
+            _ownedClonedMats.push(clone);
+            return clone;
         }
 
         function _disposeOpenStringPitchSprites() {
@@ -8420,6 +8429,8 @@
                 const tm = txtCache[k];
                 tm.userData.h3dGhostFretMeshMat?.dispose?.();
                 tm.userData.h3dGhostFretMeshMat = null;
+                tm.userData.h3dTechMeshMat?.dispose?.();
+                tm.userData.h3dTechMeshMat = null;
                 tm.map?.dispose();
                 tm.dispose();
             }
