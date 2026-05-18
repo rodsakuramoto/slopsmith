@@ -6380,25 +6380,17 @@
                                 fMaxCh = Math.max(fMaxCh, f);
                             }
                         }
-                        // Prefer the fretted-note span over the anchor span
-                        // when the chord has any fretted notes. The anchor
-                        // can legitimately cover a wide region (e.g. a
-                        // passage that roams frets 0–12), and using it
-                        // verbatim for the chord frame produced an
-                        // oversized box around chord shapes that mix open
-                        // and fretted strings (frame ran from the nut to
-                        // fret 12 for a chord whose only fretted notes were
-                        // at frets 2–3). The open strings in the chord
-                        // remain at the nut (drawn separately by the
-                        // open-string body); the frame just hugs the
-                        // fretted constituents now.
-                        if (anyFretted) {
-                            chordFrameXL = xFret(fMinCh - 1);
-                            chordFrameXR = xFret(Math.max(fMaxCh, fMinCh + 2));
-                        } else if (chAncB) {
+                        // Always prefer the anchor span so chord frames and
+                        // arpeggio frames align with the highway lane window.
+                        // Fretted-note span is only used when no anchor is
+                        // available (e.g. sloppak without anchor data).
+                        if (chAncB) {
                             chordFrameXL = xFret(chAncB.dMin);
                             chordFrameXR = xFret(chAncB.dMax);
                             chordFrameAnchorMatched = true;
+                        } else if (anyFretted) {
+                            chordFrameXL = xFret(fMinCh - 1);
+                            chordFrameXR = xFret(Math.max(fMaxCh, fMinCh + 2));
                         } else {
                             const wNut = openNoteLaneBoxW(ch.t);
                             chordFrameXL = chordCX - wNut * 0.5;
