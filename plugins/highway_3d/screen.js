@@ -3935,8 +3935,8 @@
                 }),
             ));
 
-            // PM strum X fill — 4 cantos + centro; as 4 asas (esq,dir,topo,base) ficam vazias.
-            // 16 vértices, 14 triângulos.
+            // PM strum X fill — 4 corner regions + centre; the 4 arms (L,R,T,B) are left empty.
+            // 16 vertices, 14 triangles.
             //  0=A(-1,1)  1=TLC(-0.48,1)  2=T(-0.012,0.257)  3=TRC(0.5,1)
             //  4=BR(1,1)  5=REB(1,0.5)   6=R(0.476,-0.011)  7=RET(1,-0.5)
             //  8=C(1,-1)  9=BRC(0.48,-1) 10=B(-0.003,-0.276) 11=BLC(-0.48,-1)
@@ -3963,22 +3963,22 @@
                 ]);
                 // prettier-ignore
                 const idx = new Uint16Array([
-                    // canto topo-esq: A,TLC,T,L,LEB
+                    // top-left corner: A,TLC,T,L,LEB
                      0,  1,  2,
                      0,  2, 14,
                      0, 14, 15,
-                    // canto topo-dir: TRC,BR,REB,R,T
+                    // top-right corner: TRC,BR,REB,R,T
                      3,  4,  5,
                      3,  5,  6,
                      3,  6,  2,
-                    // centro: T,R,B,L
+                    // centre: T,R,B,L
                      2,  6, 10,
                      2, 10, 14,
-                    // canto base-dir: RET,C,BRC,B,R
+                    // bottom-right corner: RET,C,BRC,B,R
                      7,  8,  9,
                      7,  9, 10,
                      7, 10,  6,
-                    // canto base-esq: LET,L,B,BLC,D
+                    // bottom-left corner: LET,L,B,BLC,D
                     13, 14, 10,
                     13, 10, 11,
                     13, 11, 12,
@@ -4000,8 +4000,8 @@
                 }),
             ));
 
-            // FH (frethand mute) strum X fill — 5 regiões: 4 cantos + centro.
-            // 12 vértices, 10 triângulos. Asas esq/dir só vão até fx=±0.50 (sem blocos laterais).
+            // FH (frethand mute) strum X fill — 5 regions: 4 corner quadrants + centre diamond.
+            // 12 vertices, 10 triangles. L/R wings stop at fx=±0.50 (no solid lateral blocks).
             //  0=LET(-0.50,+1)  1=TLC(-0.15,+1)  2=T(0,+0.42)   3=TRC(+0.15,+1)
             //  4=RET(+0.50,+1)  5=REB(+0.50,-1)  6=R(+0.28,0)   7=B(0,-0.42)
             //  8=BRC(+0.15,-1)  9=BLC(-0.15,-1) 10=LEB(-0.50,-1) 11=L(-0.28,0)
@@ -4023,19 +4023,19 @@
                 ]);
                 // prettier-ignore
                 const idx = new Uint16Array([
-                    // canto topo-esq: LET,TLC,T,L
+                    // top-left corner: LET,TLC,T,L
                      0,  1,  2,
                      0,  2, 11,
-                    // canto topo-dir: TRC,RET,R,T
+                    // top-right corner: TRC,RET,R,T
                      3,  4,  6,
                      3,  6,  2,
-                    // canto base-dir: REB,R,B,BRC
+                    // bottom-right corner: REB,R,B,BRC
                      5,  6,  7,
                      5,  7,  8,
-                    // canto base-esq: LEB,L,B,BLC
+                    // bottom-left corner: LEB,L,B,BLC
                     10, 11,  7,
                     10,  7,  9,
-                    // centro: L,T,R,B
+                    // centre diamond: L,T,R,B
                     11,  2,  6,
                     11,  6,  7,
                 ]);
@@ -6753,10 +6753,10 @@
                         if (isRepeat && chordNotes.some(cn => cn.pm)) {
                             // Fill (dark, transparent) — renderOrder 10 = below lines
                             const pmf = pPMXFill.get();
-                            pmf.renderOrder = 10.5; // acima do pChordFrameFill (10), abaixo das linhas X (11)
+                            pmf.renderOrder = 10.5; // above pChordFrameFill (10), below X lines (11)
                             pmf.rotation.set(0, 0, 0);
                             pmf.position.set(cx, cY, z - 0.0045 * K);
-                            pmf.scale.set(innerW * 0.5, -innerH * 0.5, 1); // Y negado: espelha o sistema do XLINES (ay = cY - fya*hH)
+                            pmf.scale.set(innerW * 0.5, -innerH * 0.5, 1); // Y negated: mirrors XLINES convention (ay = cY - fya*hH)
                             pmf.material.opacity = edgeOp;
 
                             const lw  = ft * 0.55;      // line visual thickness
@@ -6790,15 +6790,15 @@
                         }
 
                         // ── Frethand-mute strum indicator — FH X outline + dark fill ───
-                        // 4 nós de convergência (L,R,T,B) + 8 terminais nas bordas sup/inf.
-                        // Asas esq/dir vão até fx=±0.50 (não preenchem as laterais do box).
+                        // 4 convergence nodes (L,R,T,B) + 8 terminals on top/bottom borders.
+                        // L/R wings stop at fx=±0.50 — no solid lateral fill blocks.
                         if (isRepeat && chordNotes.some(cn => cn.mt)) {
-                            // Fill (dark) — renderOrder 10.5 = acima do frame fill, abaixo das linhas
+                            // Fill (dark) — renderOrder 10.5 = above frame fill, below X lines
                             const fhf = pFHXFill.get();
                             fhf.renderOrder = 10.5;
                             fhf.rotation.set(0, 0, 0);
                             fhf.position.set(cx, cY, z - 0.0045 * K);
-                            fhf.scale.set(innerW * 0.5, -innerH * 0.5, 1); // Y negado: fy+ = cima na geometria
+                            fhf.scale.set(innerW * 0.5, -innerH * 0.5, 1); // Y negated: fy+ = up in geometry space
                             fhf.material.opacity = edgeOp;
 
                             const lw = ft * 0.55;
