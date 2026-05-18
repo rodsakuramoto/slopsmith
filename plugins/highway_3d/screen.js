@@ -7675,9 +7675,32 @@
             const PROJ_WIN_G = 0.6;
             const projFactorG = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN_G));
             const inGhostWin = n.f > 0 && isNextOnString && dt > -ghostHold && dt < PROJ_WIN_G && projFactorG > 0.001;
-            let _ndGood = false;   // set to true inside !skipBody if note_detect confirms hit/active
-            let _ndState = null;   // set inside !skipBody; null → fall back to hit heuristic
-            let _showHit = hit;    // default; overridden inside !skipBody when provider has verdict
+            // slopsmith#254 — query the provider once per note, before both !skipBody
+            // blocks, so _showHit can be a const and _ndGood is available for the
+            // sustain trail (which renders even when skipBody=true for slide targets).
+            let _ndGood = false;    // true when provider confirms hit/active
+            let _ndState = null;    // 'hit'|'active'|'miss'|null; null → fall back to proximity heuristic
+            let _ndCs = null;       // raw provider response kept for alpha/color in _ndSizzle
+            let _ndCsIsObj = false; // typeof _ndCs === 'object'
+            if (_ndGetNoteState) {
+                let _raw = null;
+                try { _raw = _ndGetNoteState(n, n.t); } catch (e) { _raw = null; }
+                if (_raw) {
+                    _ndCsIsObj = typeof _raw === 'object';
+                    const _st = _ndCsIsObj ? _raw.state : _raw;
+                    if (_st === 'miss') {
+                        _ndState = 'miss';
+                        _ndCs = _raw;
+                    } else if (_st === 'hit' || _st === 'active') {
+                        _ndState = _st;
+                        _ndGood = true;
+                        _ndCs = _raw;
+                    }
+                }
+            }
+            // Provider verdict wins when present; otherwise fall back to the
+            // proximity heuristic, including the pre-hit ghost window preview.
+            const _showHit = (_ndState === 'miss') ? false : (_ndState ? _ndGood : (hit || (n.f > 0 && inGhostWin)));
 
             if (!skipBody) {
 
@@ -7727,59 +7750,29 @@
                 const rimXY = n.ac ? ACCENT_RIM_XY_SCALE_MUL : 1;
                 const rimZ = n.ac ? ACCENT_RIM_Z_SCALE_MUL : 1;
 
-                // slopsmith#254 — core's per-note judgment provider is
-                // authoritative over the event-driven marks above (and over
-                // the proximity-based `hit` heuristic). 'active' (a sustained
-                // note currently being held on-pitch) reads the same as
-                // 'hit': bright string-tinted outline (mGlow[s]) + bright
-                // body + bright sustain trail + the contained sparkle/sizzle
-                // overlay (drawNotedetectSizzle). 'miss' → red outline AND
-                // suppress the bright body even if the note is near the line.
-                // Called with the note's chart time, not `now`: note_detect
-                // keys its noteResults map by chart time, so `n.t` is the key
-                // (it reads the live time internally for the fade window).
-                // _ndState declared above; reset for this note
-                _ndState = null;
-                if (_ndGetNoteState) {
-                    let _cs = null;
-                    try { _cs = _ndGetNoteState(n, n.t); } catch (e) { _cs = null; }
-                    if (_cs) {
-                        const _isObj = typeof _cs === 'object';
-                        const _st = _isObj ? _cs.state : _cs;
-                        if (_st === 'miss') {
-                            _ndState = 'miss';
-                            _ndOutline = mMissOutline;
-                        } else if (_st === 'hit' || _st === 'active') {
-                            _ndState = _st;
-                            _ndGood = true;
-                            _ndOutline = mGlow[s];
-                            // Carry the provider's alpha (and optional color)
-                            // through to the sizzle so a struck-note fade or
-                            // a custom palette comes through (#254 review).
-                            // _noteState already clamps alpha to [0,1] and only
-                            // returns the object when alpha > 0.
-                            //
-                            // Skip sizzle on chord constituents: chord plays
-                            // already get rich feedback from the chord-rim
-                            // color (green for a clean grab, red otherwise)
-                            // plus the bright string-tinted gem. The 2D sparkle particles are
-                            // per-note and chord-heavy songs would spawn 4-6×
-                            // sparkles per chord every frame, which became a
-                            // measurable framerate hit once Rocksmith-style
-                            // lenient chord scoring flagged every chord
-                            // constituent as a hit. Standalone single notes
-                            // still sparkle.
-                            if (!fromChord && _ndSizzle.length < 40) {
-                                const _a = (_isObj && Number.isFinite(_cs.alpha)) ? Math.max(0, Math.min(1, _cs.alpha)) : 1;
-                                const _col = (_isObj && typeof _cs.color === 'string') ? _cs.color : null;
-                                _ndSizzle.push({ x, y: y + techniqueYNow, z: noteZ, s, alpha: _a, color: _col });
-                            }
+                // slopsmith#254 — apply visual overrides from the provider verdict
+                // (_ndState/_ndGood/_ndCs computed in the hoisted block above).
+                // 'miss' → red outline; 'hit'/'active' → string-tinted outline + sizzle.
+                // The authoritative _showHit (body brightness, sustain glow) is
+                // already a const from the hoisted block — no reassignment needed here.
+                if (_ndCs) {
+                    if (_ndState === 'miss') {
+                        _ndOutline = mMissOutline;
+                    } else if (_ndGood) {
+                        _ndOutline = mGlow[s];
+                        // Carry the provider's alpha (and optional color) through
+                        // to the sizzle so a struck-note fade or custom palette
+                        // comes through (#254 review).
+                        // Skip sizzle on chord constituents — per-note sparkles
+                        // on every chord note at lenient scoring rates became a
+                        // measurable framerate hit; standalone notes still sparkle.
+                        if (!fromChord && _ndSizzle.length < 40) {
+                            const _a = (_ndCsIsObj && Number.isFinite(_ndCs.alpha)) ? Math.max(0, Math.min(1, _ndCs.alpha)) : 1;
+                            const _col = (_ndCsIsObj && typeof _ndCs.color === 'string') ? _ndCs.color : null;
+                            _ndSizzle.push({ x, y: y + techniqueYNow, z: noteZ, s, alpha: _a, color: _col });
                         }
                     }
                 }
-                // Provider verdict wins when present; otherwise fall back to
-                // the proximity heuristic, including the pre-hit ghost window.
-                _showHit = (_ndState === 'miss') ? false : (_ndState ? _ndGood : (hit || (n.f > 0 && inGhostWin)));
 
                 // Accent: soft neon outer glow (reference: diffused halo fading out).
                 // Three additive shells drawn behind outline/core; colour = string hue.
