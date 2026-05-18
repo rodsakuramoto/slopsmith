@@ -2410,7 +2410,7 @@
             //   1. black outer border  rx=0.430h ry=0.255h
             //   2. string-color body   rx=0.418h ry=0.232h
             //   3. black inner ring    rx=0.407h ry=0.218h
-            //   4. string-color inner  rx=0.295h ry=0.218h
+            //   4. string-color inner  rx=0.264h ry=0.218h
             //   5. black center dot    rx=0.134h ry=0.120h
             const k = 'technique|pinchHarmonicIcon|rs2014-v5b|' + baseCol.getHexString();
             if (txtCache[k]) return txtCache[k];
@@ -2533,7 +2533,7 @@
             const h = 512;
             const outerW = 132, innerW = 114;
             // pad must satisfy: pad ≥ outerW / Math.SQRT2  (≈ outerW × 0.707)
-            const pad = Math.ceil(outerW / Math.SQRT2) + 2; // 112
+            const pad = Math.ceil(outerW / Math.SQRT2) + 2; // 96
             const c = document.createElement('canvas');
             c.width = h; c.height = h;
             const x = c.getContext('2d');
