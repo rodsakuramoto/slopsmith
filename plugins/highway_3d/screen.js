@@ -6349,7 +6349,14 @@
                     prevChordSig = runSig;
                     prevChordTime = ch.t;
 
-                    const chAncB = anchorLaneBoundsAt(anchors, ch.t);
+                    // For upcoming chords use the anchor at ch.t so the frame
+                    // previews the correct neck region. For lingering past chords
+                    // (chDt <= 0) use the anchor at `now` so the frame stays
+                    // aligned with the current lane as the song transitions between
+                    // anchor regions — otherwise a post-hit linger frame keeps its
+                    // old X while the lane has already moved to a new position.
+                    const chDtEarly = ch.t - now;
+                    const chAncB = anchorLaneBoundsAt(anchors, chDtEarly > 0 ? ch.t : now);
                     // Open-string X: chart <anchor> lane centre when present (not curX /
                     // fretted centroid), matching highway span.
                     let chordCX = curX;
@@ -6537,7 +6544,7 @@
                     }
 
                     // Chord frame-box: rim bars + interior fill gradient.
-                    const chDt = ch.t - now;
+                    const chDt = chDtEarly; // already computed above for anchor selection
                     const chordTailMul = hwyPostHitTailFadeMul(chDt, chordTailHoldS, chordNextSoon, chordTailFadeS);
                     if (chShape.size > 1 && chDt > -chordTailHoldS && chDt < AHEAD && chordOpenBoxW != null
                     ) {
@@ -6552,9 +6559,17 @@
                         const fullChordBoxH = yMaxF - yMinF;
                         let height = fullChordBoxH;
                         if (isRepeat) height *= 0.5;
-                        const cY = (yMinF + yMaxF) / 2;
-                        const yBot = cY - height * 0.5;
-                        const yTop = cY + height * 0.5;
+                        // Repeat frames use half height but anchor at yMinF (board
+                        // level) rather than centering in the string range. With the
+                        // camera tilted downward, a centered half-height frame puts
+                        // its bottom bar mid-strings — far above the board — causing
+                        // perspective-induced apparent X-misalignment with the lane
+                        // tiles (which sit at board level). Anchoring at yMinF keeps
+                        // the bottom bar near the board so both frame and lane tile
+                        // edges share the same projected screen X.
+                        const yBot = yMinF;
+                        const yTop = yMinF + height;
+                        const cY = (yBot + yTop) * 0.5;
                         const fade = Math.max(0, 1 - chDt / AHEAD);
                         const chordAccent = chordNotes.some(cn => cn.ac);
 
