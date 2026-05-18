@@ -672,6 +672,10 @@
             data[i * 4 + 3] = a;
         }
         const tex = new ThreeLib.DataTexture(data, w, 1, ThreeLib.RGBAFormat);
+        // LinearFilter on both axes so the bloom plane interpolates smoothly
+        // when scaled — the default NearestFilter causes visible banding.
+        tex.magFilter = ThreeLib.LinearFilter;
+        tex.minFilter = ThreeLib.LinearFilter;
         tex.needsUpdate = true;
         return tex;
     }
@@ -1868,6 +1872,10 @@
         // by the scene.traverse-based dispose. Track them here so
         // teardown can dispose them explicitly.
         const _ownedClonedMats = [];
+        // Per-mesh technique-marker clones — keyed by mesh, disposed when
+        // the source sprite's map changes or on teardown. Replaces the old
+        // unbounded push-per-frame approach in _spriteMat2MeshMat.
+        const _techMeshMatClones = new Set();
         // Shared (non-clone) materials and geometries that pool factories
         // reference but that aren't guaranteed to be reachable via
         // scene.traverse() — e.g. mLaneEven is only reached if at least one
@@ -2646,13 +2654,21 @@
          * texture, so technique markers can be applied to a rotatable PlaneGeometry
          * mesh instead of a billboard Sprite. Cached on userData to avoid allocations.
          */
-        function _spriteMat2MeshMat(sm) {
-            // Always return a fresh clone so each consumer can mutate
-            // opacity independently without affecting other meshes that
-            // share the same underlying sprite (and therefore the same
-            // cached MeshBasicMaterial). The clone shares the CanvasTexture
-            // map (no extra GPU upload), so the only cost is a small JS
-            // object per call — acceptable for technique markers (~2/frame max).
+        function _spriteMat2MeshMat(mesh, sm) {
+            // Cache the cloned MeshBasicMaterial on the receiving mesh so the
+            // same mesh–sprite pairing reuses one material object across frames
+            // instead of allocating a new clone every frame (unbounded growth).
+            // The clone is invalidated only when the source sprite's map changes
+            // (different technique or colour). Opacity is always set by the
+            // caller immediately after, so stale-value risk is zero.
+            const cached = mesh.userData.h3dTechMeshMatClone;
+            if (cached && cached.map === sm.map) return cached;
+            // Source texture changed or first call for this mesh — dispose old.
+            if (cached) {
+                _techMeshMatClones.delete(cached);
+                cached.dispose();
+                mesh.userData.h3dTechMeshMatClone = null;
+            }
             let base = sm.userData.h3dTechMeshMat;
             if (!base) {
                 base = new T.MeshBasicMaterial({
@@ -2665,7 +2681,8 @@
                 sm.userData.h3dTechMeshMat = base;
             }
             const clone = base.clone();
-            _ownedClonedMats.push(clone);
+            mesh.userData.h3dTechMeshMatClone = clone;
+            _techMeshMatClones.add(clone);
             return clone;
         }
 
@@ -8009,7 +8026,7 @@
                     const steps = Math.max(1, Math.min(4, Math.round(n.bn)));
                     const bendSm = bendChevronMat(steps, activePalette[s] || 0xffffff);
                     const l = pTechPlane.get();
-                    l.material = _spriteMat2MeshMat(bendSm);
+                    l.material = _spriteMat2MeshMat(l, bendSm);
                     const cs = NH * 2.4;
                     l.scale.set(cs, cs, 1);
                     l.position.set(x, y + techniqueYNow + NH * 1.1, noteZ + 0.005);
@@ -8024,7 +8041,7 @@
                         // so it tilts with the gem instead of billboarding.
                         const triSm = triMat(!!n.ho, activePalette[s] || 0xffffff);
                         const tri = pTechPlane.get();
-                        tri.material = _spriteMat2MeshMat(triSm);
+                        tri.material = _spriteMat2MeshMat(tri, triSm);
                         tri.scale.set(NH * 1.8, NH * 1.60, 1);
                         tri.position.set(x, y + techniqueYNow, noteZ + 0.005);
                         tri.rotation.z = approachRot;
@@ -8050,7 +8067,7 @@
                         ? muteXMat('#ffffff', '#000000')
                         : muteXMat('#000000', '#ffffff');
                     const muteMark = pTechPlane.get();
-                    muteMark.material = _spriteMat2MeshMat(muteSprite);
+                    muteMark.material = _spriteMat2MeshMat(muteMark, muteSprite);
                     muteMark.material.opacity = hit ? 1.0 : 0.8;
                     // Arms cover 62.5% of canvas (pad=outerW/√2 for square caps).
                     // Scale by 1/0.625 = 1.60 to map arm tips to gem corners.
@@ -8069,7 +8086,7 @@
                 if (n.hm || n.hp) {
                     const harmSprite = n.hm ? naturalHarmonicMat() : pinchHarmonicMat(activePalette[s]);
                     const harmMark = pTechPlane.get();
-                    harmMark.material = _spriteMat2MeshMat(harmSprite);
+                    harmMark.material = _spriteMat2MeshMat(harmMark, harmSprite);
                     harmMark.material.opacity = _showHit ? 1.0 : 0.85;
                     const harmScaleX = n.f === 0 ? NW * 1.90 * openWScale : NW * 1.90;
                     harmMark.scale.set(harmScaleX, NH * 2.0, 1);
@@ -8462,6 +8479,11 @@
             // them at allocation time.
             for (const m of _ownedClonedMats) m?.dispose?.();
             _ownedClonedMats.length = 0;
+            // Per-mesh technique-marker clones (from _spriteMat2MeshMat).
+            // The Set tracks the live clone for each pool mesh; dispose all
+            // on teardown so no GPU material leaks between init() cycles.
+            for (const m of _techMeshMatClones) m?.dispose?.();
+            _techMeshMatClones.clear();
             // Shared pool-factory materials/geometries (mLaneOdd/Even, etc.) —
             // see _ownedSharedMats comment near the declaration. Dispose is
             // idempotent so the scene.traverse() pass above won't double-free.
