@@ -45,7 +45,7 @@ test('_isSlideTgt is threaded into drawNote as the skipBody argument', () => {
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
     assert.match(
         src,
-        /drawNote\(\s*\n\s*n,\s*\n\s*now,\s*\n\s*singleOpenX,\s*\n\s*skipLabel,\s*\n\s*_isSlideTgt,/,
+        /drawNote\(\s*n\s*,\s*now\s*,\s*singleOpenX\s*,\s*skipLabel\s*,\s*_isSlideTgt\s*,/,
         '_isSlideTgt must be passed as drawNote\'s skipBody argument',
     );
 });

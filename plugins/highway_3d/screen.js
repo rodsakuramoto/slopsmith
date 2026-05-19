@@ -2068,7 +2068,7 @@
         let gPMXFill = null; // shared geometry for PM X fill — disposed in teardown
         let gFHXFill = null; // shared geometry for FH X fill — disposed in teardown
         let pNoteFretLabel, pConnectorLine, pDropLine, pTapChevron, pAccentHalo;
-        let pChordAccentHalo = null; // per-instance cloned mats so opacity differs per shell
+        let pChordAccentHalo = null, gChordAccentHalo = null; // per-instance cloned mats so opacity differs per shell
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
         /** Horizontal gradient for chord box interior fill. */
@@ -3707,8 +3707,13 @@
             mAccentHaloFar = mkAccentHaloMats(ACCENT_HALO_OP_FAR);
             // Chord/arpeggio frame accent bloom — per-instance cloned materials
             // so near/far shells can have independent opacity values.
+            // Shared unit-box geometry — pooled halo meshes are scaled/rotated
+            // per draw, so one geometry serves the whole pool (same pattern as
+            // gNote / gSusRailBloom). Materials stay per-instance below so each
+            // accent shell can carry its own opacity.
+            gChordAccentHalo = new T.BoxGeometry(1, 1, 1);
             pChordAccentHalo = pool(noteG, () => new T.Mesh(
-                new T.BoxGeometry(1, 1, 1),
+                gChordAccentHalo,
                 new T.MeshBasicMaterial({
                     transparent: true, opacity: 0.8, depthWrite: false,
                     blending: T.AdditiveBlending, side: T.DoubleSide, fog: true,
@@ -8476,6 +8481,7 @@
             gSusRailBloom?.dispose?.(); mSusRailBloomBase?.dispose?.(); _bloomGaussTex?.dispose?.();
             gSusRailBloom = null; mSusRailBloomBase = null; _bloomGaussTex = null; pSusRailBloom = null;
             gTechPlane?.dispose?.(); gTechPlane = null; pTechPlane = null;
+            gChordAccentHalo?.dispose?.(); gChordAccentHalo = null;
             for (const m of mStr) m?.dispose?.();
             for (const m of mGlow) m?.dispose?.();
             for (const m of mSus) m?.dispose?.();
