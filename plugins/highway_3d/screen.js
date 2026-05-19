@@ -2680,6 +2680,16 @@
                 });
                 sm.userData.h3dTechMeshMat = base;
             }
+            // First conversion for this mesh: the pTechPlane pool factory gave
+            // it a placeholder MeshBasicMaterial that the caller is about to
+            // overwrite with the clone below. Dispose it now — once
+            // mesh.material is reassigned the placeholder is orphaned and
+            // teardown's scene.traverse() pass can no longer reach it, so it
+            // would leak one GPU material per pooled mesh for the renderer's
+            // lifetime.
+            if (!cached && mesh.material && mesh.material !== base) {
+                mesh.material.dispose?.();
+            }
             const clone = base.clone();
             mesh.userData.h3dTechMeshMatClone = clone;
             _techMeshMatClones.add(clone);
