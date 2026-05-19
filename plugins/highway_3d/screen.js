@@ -7924,7 +7924,10 @@
             // Rendered for ALL notes with sustain, including skipBody=true
             // slide-target notes (e.g. linkNext hold→slide: gem suppressed,
             // slide trail stays visible as the continuation of the sustain).
-            // _ndGood is false for skipBody notes → trail uses dim mSus[s].
+            // _ndGetNoteState is queried for every note (skipBody slide
+            // targets included), so the trail picks bright mGlow[s] when the
+            // provider confirms hit/active and dim mSus[s] otherwise — a
+            // slide-target trail is not forced dim.
             // Chord-member open strings (fromChord && f === 0) skip the
             // sustain trail entirely — fretted constituents already carry
             // the chord's sustains; an extra ribbon under the wide open
