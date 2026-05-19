@@ -665,7 +665,9 @@
 
     // Build a horizontal gaussian DataTexture for the sustain-rail bloom effect.
     // Returns a W×1 RGBA texture where alpha follows exp(-0.5*(u−0.5)²/σ²),
-    // peaking at 1.0 in the centre and falling to ~0 at the edges.
+    // peaking at 1.0 in the centre. With the default σ=0.28 the edges retain
+    // ~0.20 alpha (not fully transparent) — a deliberately soft, wide falloff
+    // so the additive bloom fades gradually rather than cutting off sharply.
     // Power-of-two width keeps WebGL mipmapping happy.
     function _makeGaussTex(ThreeLib, w = 128, sigma = 0.28) {
         const data = new Uint8Array(w * 4);
