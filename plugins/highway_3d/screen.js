@@ -563,7 +563,15 @@
     const fretX = f => _h3dFretUniform ? _fretXUni(f) : _fretXLog(f);
 
     window.h3dSetFretSpacing = mode => {
-        try { localStorage.setItem('highway_3d.fretSpacing', mode); } catch (_) {}
+        // Validate against the two supported modes before persisting so an
+        // unexpected input can't leave an invalid value in localStorage
+        // (mirrors h3dBgSetFretNumberGhostScope's allowlist guard). No-op
+        // when the stored mode is already what was requested.
+        const m = mode === 'logarithmic' ? 'logarithmic' : 'uniform';
+        try {
+            if (localStorage.getItem('highway_3d.fretSpacing') === m) return;
+            localStorage.setItem('highway_3d.fretSpacing', m);
+        } catch (_) {}
         location.reload();
     };
 
@@ -5742,10 +5750,15 @@
             }
 
             // ── Slide-target gem-suppression pre-pass (chart-static) ──────
-            // Detects notes in bundle.notes that are the "linkNext" destination
+            // Detects notes in bundle.notes that are the slide/link destination
             // of a preceding note. The gem (outline+core) is suppressed via
             // skipBody=true, but the sustain/slide trail still renders because
             // the trail block is now outside the !skipBody gate in drawNote().
+            //
+            // NOTE: an authored `linkNext` flag is NOT present in bundle.notes —
+            // note_to_wire() in lib/song.py emits only t, s, f, sus, sl, slu,
+            // bn, ho, po, hm, hp, pm, mt, vb, tr, ac, tp. So this is an
+            // intentional timing/fret heuristic, not a link-flag lookup.
             //
             // Two source patterns (source has sus > 0):
             //   Case 1 — source has sl/slu: destination.f === source's slide target
@@ -5759,12 +5772,15 @@
                     const checkSrc = (srcT, srcS, srcF, srcSus, srcSl) => {
                         if (!(srcSus > 0)) return;
                         const endT = srcT + srcSus;
+                        // Reuse the renderer's shared next-on-string tolerance
+                        // rather than a separate hardcoded literal.
+                        const EPS = NEXT_ON_STRING_T_EPS;
                         let lo = 0, hi = notes.length;
-                        while (lo < hi) { const m = (lo + hi) >> 1; if (notes[m].t < endT - 0.06) lo = m + 1; else hi = m; }
+                        while (lo < hi) { const m = (lo + hi) >> 1; if (notes[m].t < endT - EPS) lo = m + 1; else hi = m; }
                         for (let j = lo; j < notes.length; j++) {
                             const q = notes[j];
-                            if (q.t > endT + 0.06) break;
-                            if (q.s !== srcS || Math.abs(q.t - endT) >= 0.06) continue;
+                            if (q.t > endT + EPS) break;
+                            if (q.s !== srcS || Math.abs(q.t - endT) >= EPS) continue;
                             const qSl = (Number.isFinite(q.sl) && q.sl >= 0) ? q.sl
                                       : (Number.isFinite(q.slu) && q.slu >= 0) ? q.slu : -1;
                             if (srcSl >= 0 && q.f === srcSl) { stSet.add(`${q.t}_${q.s}`); break; } // case 1
