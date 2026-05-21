@@ -6817,11 +6817,18 @@
                                 fMaxCh = Math.max(fMaxCh, f);
                             }
                         }
-                        // Always prefer the anchor span so chord frames and
-                        // arpeggio frames align with the highway lane window.
-                        // Fretted-note span is only used when no anchor is
-                        // available (e.g. sloppak without anchor data).
-                        if (chAncB) {
+                        // Prefer the anchor span so chord frames and arpeggio
+                        // frames align with the highway lane window — BUT only
+                        // when the chord's fretted notes actually fall within
+                        // the anchor range. If the anchor at this chord's time
+                        // doesn't cover the chord's frets (e.g. a chord at frets
+                        // 2–4 with an anchor locked to frets 5–8), the framebox
+                        // would clip the very gems it's supposed to contain, so
+                        // fall back to chord-fret-based bounds instead.
+                        const anchorCoversChordFrets = chAncB && anyFretted
+                            ? (fMinCh >= chAncB.dMin && fMaxCh <= chAncB.dMax)
+                            : true; // all-open chord: anchor centre is fine
+                        if (chAncB && anchorCoversChordFrets) {
                             chordFrameXL = xFret(chAncB.dMin);
                             chordFrameXR = xFret(chAncB.dMax);
                             chordFrameAnchorMatched = true;
