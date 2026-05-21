@@ -2814,6 +2814,13 @@
                 base = new T.MeshBasicMaterial({
                     map: sm.map,
                     transparent: true,
+                    // depthTest: false — cross-note Z ordering is handled by
+                    // per-note renderOrder (_noteRO in drawNote) rather than the
+                    // depth buffer. This is necessary because close notes often use
+                    // mGlow (depthWrite:false), so the depth buffer can't reliably
+                    // occlude far markers near the hit line. With per-note RO, far
+                    // labels get a low RO (render first) and close note geometry gets
+                    // a high RO (renders last, appears on top) — no depthTest needed.
                     depthTest: false,
                     depthWrite: false,
                     side: T.DoubleSide,
@@ -8487,6 +8494,15 @@
             const hasTechniqueVibrato = noteHasVibrato(n);
             const techniqueYNow = sustained ? techniqueYOffsetWorld(n, now) : 0;
             const noteZ = sustained ? 0 : Math.min(0, dZ(dt));
+            // Per-note Z-based renderOrder: far notes get a low RO (render
+            // first, get overdrawn by close geometry), close notes get a high
+            // RO (render last, appear on top). Range 50–700 keeps all note
+            // geometry above the lane (1-2) and chord frames (10-19).
+            // Declared here (before both !skipBody blocks) so outline, core,
+            // technique labels AND sustain trails all share the same value.
+            // This replaces depthTest-based occlusion, which breaks near the
+            // hit line because mGlow (hit state) has depthWrite:false.
+            const _noteRO = Math.max(50, Math.round(700 + noteZ / K));
             const x = n.f === 0 ? (openX !== undefined ? openX : curX) : xFretMid(n.f);
             const isHarm = n.hm || n.hp;
 
@@ -8653,7 +8669,7 @@
                 const outline = pNote.get();
                 outline.material = (_ndMatchedMark != null || _ndState != null) ? _ndOutline
                     : (n.ac ? mAccentOutline[s] : _ndOutline);
-                outline.renderOrder = 20;
+                outline.renderOrder = _noteRO;
                 outline.position.set(x, y + techniqueYNow, noteZ);
                 outline.rotation.z = approachRot;
                 // slopsmith#254 — a provider hit/miss verdict gets a fatter
@@ -8689,7 +8705,7 @@
                 core.material = (_ndState === 'miss') ? mMissCore
                     : (n.ac ? mAccentCore[s]
                         : (_showHit ? mGlow[s] : mStr[s]));
-                core.renderOrder = 21;
+                core.renderOrder = _noteRO + 1;
                 core.position.set(x, y + techniqueYNow, noteZ + 0.001);
                 core.rotation.z = approachRot;
                 if (n.f === 0) {
@@ -8771,7 +8787,7 @@
                             for (let i = 0; i < offsets.length; i++) {
                                 const xOff = xCenter + offsets[i];
                                 const trOut = pSusOutline.get();
-                                trOut.renderOrder = 18;
+                                trOut.renderOrder = _noteRO - 2;
                                 trOut.position.set(xOff, y, zCenter);
                                 trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
                                 const tr = pSus.get();
@@ -8779,7 +8795,7 @@
                                 // held correctly glows bright (mGlow), else
                                 // the usual dim sustain material.
                                 tr.material = _ndGood ? mGlow[s] : mSus[s];
-                                tr.renderOrder = 19;
+                                tr.renderOrder = _noteRO - 1;
                                 tr.position.set(xOff, y, zCenter);
                                 tr.scale.set(tw, th, segLen);
                             }
@@ -8792,7 +8808,7 @@
                             for (let si = 0; si < offsets.length; si++) {
                                 const strandX = x + offsets[si];
                                 const olMesh = pSusRibbonOl.get();
-                                olMesh.renderOrder = 18;
+                                olMesh.renderOrder = _noteRO - 2;
                                 olMesh.scale.set(1, 1, 1);
                                 olMesh.rotation.set(0, 0, 0);
                                 olMesh.position.set(0, 0, 0);
@@ -8803,7 +8819,7 @@
                                     y, sliceDur, susStart, now, n, slideSt,
                                 );
                                 const body = pSusRibbon.get();
-                                body.renderOrder = 19;
+                                body.renderOrder = _noteRO - 1;
                                 body.scale.set(1, 1, 1);
                                 body.rotation.set(0, 0, 0);
                                 body.position.set(0, 0, 0);
@@ -8845,7 +8861,7 @@
                 // renderOrder the transparent note core (mStr) can still paint
                 // afterward and hide H/P/T, PM X, bends, etc. Same contract as
                 // fret-row labels (issue #35, CLAUDE pitfall #7 corollary).
-                const TECH_RO = 1000;
+                const TECH_RO = _noteRO + 2; // per-note Z-based; see _noteRO above
                 let yo = y + techniqueYNow + NH * 0.8 * sLbl;
                 const specialMarkerScale = n.f === 0
                     ? NH * 1.5 * sLbl * openWScale
@@ -8860,7 +8876,7 @@
                     l.material = _spriteMat2MeshMat(l, bendSm);
                     const cs = NH * 2.4;
                     l.scale.set(cs, cs, 1);
-                    l.position.set(x, y + techniqueYNow + NH * 1.1, noteZ + 0.005);
+                    l.position.set(x, y + techniqueYNow + NH * 1.1, noteZ + K);
                     l.rotation.z = approachRot;
                     l.renderOrder = TECH_RO;
                     // Reserve stack space above the chevron.
@@ -8874,7 +8890,7 @@
                         const tri = pTechPlane.get();
                         tri.material = _spriteMat2MeshMat(tri, triSm);
                         tri.scale.set(NH * 1.8, NH * 1.60, 1);
-                        tri.position.set(x, y + techniqueYNow, noteZ + 0.005);
+                        tri.position.set(x, y + techniqueYNow, noteZ + K);
                         tri.rotation.z = approachRot;
                         tri.renderOrder = TECH_RO;
                         // Reserve stack space above the triangle for stacked labels.
@@ -8907,7 +8923,7 @@
                         : NW * 1.60;
                     const muteScaleY = NH * 1.60;
                     muteMark.scale.set(muteScaleX, muteScaleY, 1);
-                    muteMark.position.set(x, y + techniqueYNow, noteZ + 0.1 * K);
+                    muteMark.position.set(x, y + techniqueYNow, noteZ + K);
                     muteMark.rotation.z = approachRot;
                     muteMark.renderOrder = TECH_RO;
                 }
@@ -8921,7 +8937,7 @@
                     harmMark.material.opacity = _showHit ? 1.0 : 0.85;
                     const harmScaleX = n.f === 0 ? NW * 1.90 * openWScale : NW * 1.90;
                     harmMark.scale.set(harmScaleX, NH * 2.0, 1);
-                    harmMark.position.set(x, y + techniqueYNow, noteZ + 0.15 * K);
+                    harmMark.position.set(x, y + techniqueYNow, noteZ + K);
                     harmMark.rotation.z = approachRot;
                     harmMark.renderOrder = TECH_RO;
                 }
