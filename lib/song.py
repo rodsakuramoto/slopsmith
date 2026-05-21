@@ -623,11 +623,31 @@ def parse_arrangement(xml_path: str) -> Arrangement:
                 t = _float(c, "time")
                 chord_notes = [_parse_note(cn) for cn in c.findall("chordNote")]
                 cid = _int(c, "chordId")
+                # Chord-level technique flags — propagated to synthetic notes
+                # when there are no <chordNote> children (gallop/repeat strums).
+                _ch_pm  = _bool(c, "palmMute")
+                _ch_mt  = _bool(c, "mute")
+                _ch_acc = _bool(c, "accent")
+                _ch_hd_note = _bool(c, "hopo")
                 if not chord_notes and cid < len(chord_templates):
                     ct = chord_templates[cid]
                     for s in range(len(ct.frets)):
                         if ct.frets[s] >= 0:
-                            chord_notes.append(Note(time=t, string=s, fret=ct.frets[s]))
+                            chord_notes.append(Note(
+                                time=t, string=s, fret=ct.frets[s],
+                                palm_mute=_ch_pm, mute=_ch_mt,
+                                accent=_ch_acc,
+                            ))
+                elif chord_notes and (_ch_pm or _ch_mt or _ch_acc):
+                    # Propagate chord-level flags to chordNote children that
+                    # don't set them explicitly (e.g. chordNote palmMute="").
+                    for cn in chord_notes:
+                        if _ch_pm and not cn.palm_mute:
+                            cn.palm_mute = True
+                        if _ch_mt and not cn.mute:
+                            cn.mute = True
+                        if _ch_acc and not cn.accent:
+                            cn.accent = True
                 lv_chords.append(Chord(
                     time=t, chord_id=cid, notes=chord_notes,
                     high_density=_chord_high_density(c),
