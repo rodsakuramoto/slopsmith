@@ -6574,6 +6574,10 @@
             }
 
             // ── Single notes ──────────────────────────────────────────────
+            // Tracks which (chordId → Set<stringIndex>) pairs already had
+            // brackets drawn by the note-stream loop, so the chord loop can
+            // skip duplicate bracket draws for the same string.
+            const _noteStreamBracketStrings = new Map();
             _scrLastFretForString.fill(undefined, 0, nStr);
             const lastFretForString = _scrLastFretForString;
             if (notes) {
@@ -6644,6 +6648,11 @@
                                 ? Math.max(0.22, singleOpenLaneW * 0.96 / (40 * K)) * 20 * K
                                 : null;
                             drawArpBrackets(_bx, sY(n.s), _arpBounds.start - now, _arpBounds.end, now, n.s, n.f === 0, _openHalfW);
+                            // Record that this (chordId, string) pair has brackets so the
+                            // chord loop doesn't draw a second set on the same string.
+                            let _nsbSet = _noteStreamBracketStrings.get(arGhostCid);
+                            if (!_nsbSet) { _nsbSet = new Set(); _noteStreamBracketStrings.set(arGhostCid, _nsbSet); }
+                            _nsbSet.add(n.s);
                         }
                     }
                     lastFretForString[n.s] = n.f;
@@ -6966,7 +6975,10 @@
                     // All others are suppressed until chDtEarly <= 0 so the frame doesn't
                     // flood the player's view with simultaneous gems before they arrive.
                     // The first note is the earliest match in the note stream within the
-                    // handshape window; falls back to chordNotes[0] for chord-only charts.
+                    // handshape window. If no note-stream note matches the chord shape
+                    // within the handshape (i.e. there is no sequential arpeggio pattern),
+                    // _arpApproachFirstNote stays null and ALL chord gems are shown — this
+                    // handles chords that are played simultaneously even when tagged as arp.
                     let _arpApproachFirstNote = null;
                     if (chordHighwayLavenderArpVisual && !deferChordGems
                         && chDtEarly > 0 && hsHintFrame.hs) {
@@ -6986,9 +6998,9 @@
                                 }
                             }
                         }
-                        if (_arpApproachFirstNote === null && chordNotes.length > 0) {
-                            _arpApproachFirstNote = chordNotes[0];
-                        }
+                        // No fallback to chordNotes[0]: if the note stream has no sequential
+                        // notes matching this shape, the chord is played simultaneously and
+                        // all gems must be shown.
                     }
 
                     // ── Deferred-arpeggio gem fallback ─────────────────────────────────
@@ -7017,6 +7029,8 @@
                             // Suppress non-first gems while an authored arpeggio frame
                             // approaches — but not for the deferred fallback path, where
                             // all chord gems serve as the only visual preview.
+                            // _arpApproachFirstNote is null when no sequential note-stream
+                            // pattern was found, so simultaneous chords are unaffected.
                             if (!_deferFallback && _arpApproachFirstNote !== null && cn !== _arpApproachFirstNote) continue;
                             const skipLabel = !firstInShapeRun || lastFretForString[cn.s] === cn.f;
                             // Reuse _scrChordNote scratch instead of `{ ...cn }` spread
@@ -7058,17 +7072,27 @@
                     }
 
                     // ── Arpeggio note brackets [ ] ────────────────────────
-                    // Only for authored arpeggio frames whose gems come from the
-                    // chord itself (!deferChordGems). Note-stream arpeggios draw
+                    // Drawn for authored arpeggio frames whose gems come from the
+                    // chord itself (!deferChordGems), AND for the deferred-fallback
+                    // path (_deferFallback) where chord gems are shown as a preview
+                    // even though deferChordGems=true. Note-stream arpeggios draw
                     // their brackets in the notes[] loop above.
-                    if (chordHighwayLavenderArpVisual && !deferChordGems) {
+                    if ((chordHighwayLavenderArpVisual && !deferChordGems) || _deferFallback) {
                         const _arpBracketDt = ch.t - now;
                         if (_arpBracketDt < AHEAD) {
-                            const _arpEnd = !isNaN(hsEnd(hsHintFrame.hs))
+                            const _arpEnd = (hsHintFrame.hs && !isNaN(hsEnd(hsHintFrame.hs)))
                                 ? hsEnd(hsHintFrame.hs)
                                 : ch.t + maxSus + CHORD_HWY_LINGER_S;
+                            // The notes[] loop already drew brackets for any note-stream
+                            // note that entered AHEAD, recording (chordId → strings) in
+                            // _noteStreamBracketStrings. Skip chord-loop brackets for any
+                            // string already covered — applies to both the authored path
+                            // (chordHighwayLavenderArpVisual && !deferChordGems) and the
+                            // deferred-fallback path (_deferFallback).
+                            const _nsBrackets = _noteStreamBracketStrings.get(ch.id);
                             for (const cn of chordNotes) {
                                 if (!validString(cn.s)) continue;
+                                if (_nsBrackets && _nsBrackets.has(cn.s)) continue;
                                 const _bx = cn.f === 0
                                     ? (chordCX !== undefined ? chordCX : curX)
                                     : xFretMid(cn.f);
