@@ -6655,10 +6655,13 @@
                                 ? Math.max(0.22, singleOpenLaneW * 0.96 / (40 * K)) * 20 * K
                                 : null;
                             drawArpBrackets(_bx, sY(n.s), _arpBounds.start - now, _arpBounds.end, now, n.s, n.f === 0, _openHalfW);
-                            // Record that this (chordId, string) pair has brackets so the
-                            // chord loop doesn't draw a second set on the same string.
-                            let _nsbSet = _noteStreamBracketStrings.get(arGhostCid);
-                            if (!_nsbSet) { _nsbSet = new Set(); _noteStreamBracketStrings.set(arGhostCid, _nsbSet); }
+                            // Record that this (chordId:occurrenceStart, string) pair has brackets
+                            // so the chord loop doesn't draw a second set on the same string.
+                            // Key includes the arp occurrence start time so two separate arp
+                            // sequences sharing the same chord template ID don't suppress each other.
+                            const _nsbKey = arGhostCid + ':' + _arpBoundsForNote.start;
+                            let _nsbSet = _noteStreamBracketStrings.get(_nsbKey);
+                            if (!_nsbSet) { _nsbSet = new Set(); _noteStreamBracketStrings.set(_nsbKey, _nsbSet); }
                             _nsbSet.add(n.s);
                         }
                     }
@@ -7103,12 +7106,12 @@
                                 ? hsEnd(hsHintFrame.hs)
                                 : ch.t + maxSus + CHORD_HWY_LINGER_S;
                             // The notes[] loop already drew brackets for any note-stream
-                            // note that entered AHEAD, recording (chordId → strings) in
-                            // _noteStreamBracketStrings. Skip chord-loop brackets for any
-                            // string already covered — applies to both the authored path
-                            // (chordHighwayLavenderArpVisual && !deferChordGems) and the
-                            // deferred-fallback path (_deferFallback).
-                            const _nsBrackets = _noteStreamBracketStrings.get(ch.id);
+                            // note that entered AHEAD, recording (chordId:occurrenceStart → strings)
+                            // in _noteStreamBracketStrings. Use the same composite key (template id +
+                            // handshape start time) so two arp occurrences sharing a chord template
+                            // ID are treated as distinct occurrences — not one suppressing the other.
+                            const _nsBracketsKey = ch.id + ':' + _hsStartT;
+                            const _nsBrackets = _noteStreamBracketStrings.get(_nsBracketsKey);
                             for (const cn of chordNotes) {
                                 if (!validString(cn.s)) continue;
                                 if (_nsBrackets && _nsBrackets.has(cn.s)) continue;
@@ -8837,7 +8840,7 @@
                     }
             }
 
-            if (!skipBody) {
+            if (!skipBody && !arpGhostOnlyMode) {
                 // ── Technique labels ──────────────────────────────────────
                 // Label scale = base × LBL_MULT × distFactor.
                 // distFactor compensates for perspective shrink so a
