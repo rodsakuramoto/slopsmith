@@ -7958,9 +7958,8 @@
                         : activeFrets.has(f);
                     lb.material    = txtMat(f, isGold ? FRET_LABEL_GOLD_HEX : FRET_LABEL_IDLE_HEX, false, 'fretRow');
                     lb.position.set(xFretMid(f), yBottom - S_GAP * 1.4, 0.5 * K);
-                    const intensity = noteState.fretHeat[f];
-                    lb.material.opacity = 0.35 + intensity * 0.65;
-                    const scale = (3.5 + intensity * 2.2) * _textSizeMul * fretLabelScaleForFret(f);
+                    lb.material.opacity = isGold ? 1.0 : 0.55;
+                    const scale = 3.5 * _textSizeMul * fretLabelScaleForFret(f);
                     lb.scale.set(scale * K, scale * K, 1);
                     lb.renderOrder = 1000;
                 }
