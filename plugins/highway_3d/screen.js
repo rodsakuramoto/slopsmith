@@ -7086,12 +7086,17 @@
                     }
 
                     // ── Arpeggio note brackets [ ] ────────────────────────
-                    // Drawn for authored arpeggio frames whose gems come from the
-                    // chord itself (!deferChordGems), AND for the deferred-fallback
-                    // path (_deferFallback) where chord gems are shown as a preview
-                    // even though deferChordGems=true. Note-stream arpeggios draw
-                    // their brackets in the notes[] loop above.
-                    if ((chordHighwayLavenderArpVisual && !deferChordGems) || _deferFallback) {
+                    // Drawn only for explicitly authored arpeggio frames
+                    // (chordHighwayLavenderArpVisual = explicit handshape arp mark).
+                    // Covers both paths: gems shown directly from the chord
+                    // (!deferChordGems) and the deferred-fallback preview path
+                    // (_deferFallback). The inferred-arpeggio path (inferredArpPattern
+                    // only, no explicit mark) intentionally does NOT draw brackets —
+                    // the inference heuristic can false-positive on fast strummed
+                    // chords, and brackets on non-arp chords confuse players.
+                    // Note-stream arpeggios draw their own brackets in the notes[]
+                    // loop above.
+                    if (chordHighwayLavenderArpVisual && (!deferChordGems || _deferFallback)) {
                         const _arpBracketDt = ch.t - now;
                         if (_arpBracketDt < AHEAD) {
                             const _arpEnd = (hsHintFrame.hs && !isNaN(hsEnd(hsHintFrame.hs)))
@@ -9367,7 +9372,7 @@
             _ndMissMarks = [];
             _ndLabels = [];
             _ndSizzle = [];
-            _chordVerdicts = new WeakMap();
+            _chordVerdicts = new Map();
             _bgUnmountStyle();
             bgGroup = null; _bgLastT = 0;
             _diagChord = null; _diagPrev = null; _diagPrevOpacity = 0; _diagPrevStartOpacity = 0; _diagPrevStartT = null;
