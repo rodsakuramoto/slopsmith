@@ -7196,7 +7196,16 @@
 
                     // Chord frame-box: rim bars + interior fill gradient.
                     const chDt = chDtEarly; // already computed above for anchor selection
-                    const chordTailMul = hwyPostHitTailFadeMul(chDt, chordTailHoldS, chordNextSoon, chordTailFadeS);
+                    const chordTailMul = (() => {
+                        // When a next chord exists, fade this frame over exactly
+                        // the inter-chord gap so it reaches 0 the moment the next
+                        // chord crosses the hit line — no hold, no linger overlap.
+                        if (chDt < 0 && cjNext != null) {
+                            const gapS = Math.max(1e-3, cjNext.t - ch.t);
+                            return Math.max(0, 1 - (-chDt) / gapS);
+                        }
+                        return hwyPostHitTailFadeMul(chDt, chordTailHoldS, chordNextSoon, chordTailFadeS);
+                    })();
                     if (chShape.size > 1 && chDt > -chordTailHoldS && chDt < AHEAD && chordOpenBoxW != null
                     ) {
                         const z = Math.min(0, dZ(chDt));
@@ -7398,7 +7407,7 @@
                         fill.material.map = isArpeggioFrame ? chordFrameGradTexArp : chordFrameGradTex;
                         fill.material.color.setRGB(1, 1, 1);
 
-                        // renderOrder 17/18 — above sustain rails (16) but below note gems (20/21)
+                        // renderOrder 17/18 — above sustain trails (12/13) and rails (16), below note gems (50-700)
                         drawFrameBox(cx, yBot + ft * 0.5, width, ft, 17);
                         const withTopFrame = !isRepeat;
                         if (withTopFrame) {
@@ -8851,7 +8860,7 @@
                             for (let i = 0; i < offsets.length; i++) {
                                 const xOff = xCenter + offsets[i];
                                 const trOut = pSusOutline.get();
-                                trOut.renderOrder = _noteRO - 2;
+                                trOut.renderOrder = 12; // below chord frame (17/18)
                                 trOut.position.set(xOff, y, zCenter);
                                 trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
                                 const tr = pSus.get();
@@ -8859,7 +8868,7 @@
                                 // held correctly glows bright (mGlow), else
                                 // the usual dim sustain material.
                                 tr.material = _ndGood ? mGlow[s] : mSus[s];
-                                tr.renderOrder = _noteRO - 1;
+                                tr.renderOrder = 13; // below chord frame (17/18)
                                 tr.position.set(xOff, y, zCenter);
                                 tr.scale.set(tw, th, segLen);
                             }
@@ -8872,7 +8881,7 @@
                             for (let si = 0; si < offsets.length; si++) {
                                 const strandX = x + offsets[si];
                                 const olMesh = pSusRibbonOl.get();
-                                olMesh.renderOrder = _noteRO - 2;
+                                olMesh.renderOrder = 12; // below chord frame (17/18)
                                 olMesh.scale.set(1, 1, 1);
                                 olMesh.rotation.set(0, 0, 0);
                                 olMesh.position.set(0, 0, 0);
@@ -8883,7 +8892,7 @@
                                     y, sliceDur, susStart, now, n, slideSt,
                                 );
                                 const body = pSusRibbon.get();
-                                body.renderOrder = _noteRO - 1;
+                                body.renderOrder = 13; // below chord frame (17/18)
                                 body.scale.set(1, 1, 1);
                                 body.rotation.set(0, 0, 0);
                                 body.position.set(0, 0, 0);
