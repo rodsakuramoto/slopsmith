@@ -192,7 +192,7 @@
     const CHORD_HWY_LINGER_S = 0.48;
     /** Linear fade at end of `CHORD_HWY_LINGER_S` (applies to chord UI and board ghost numbers). */
     const CHORD_HWY_FADE_S = 0.32;
-    const GHOST_HOLD_AFTER_ONSET = CHORD_HWY_LINGER_S;
+    const GHOST_HOLD_AFTER_ONSET = 0.48;
     const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
     /** Purple lane rails: extend past last matched chord/note so Z reaches frame end. */
     const ARP_HWY_RAIL_END_TAIL_S = 0.38;
@@ -1854,6 +1854,8 @@
         let _probe = null;
         /** Snapshotted in update() for drawNote() ghost / glow (single source vs per-caller isNext). */
         let _drawNextByString = null;
+        /** Most-recent past event time per string (within 0.6 s back), for _nextAnyT deadline. */
+        let _drawRecentByString = null;
         /** Snapshotted in update() — drawNote() is a sibling of update(), not nested in its closure. */
         let _drawChordTemplates = null;
         let _laneTargetColor = null;
@@ -6373,6 +6375,75 @@
             _drawNextByString = nextNoteByString;
             _drawChordTemplates = bundle.chordTemplates ?? null;
 
+            // ── Recent-past event per string (for _nextAnyT deadline) ─────
+            // Once a note/chord passes `now` it leaves _drawNextByString,
+            // resetting _nextAnyT and letting old gems linger too long.
+            // Scan up to 0.6 s back so drawNote can include these in the
+            // deadline calculation even after they've been played.
+            {
+                const _recArr = new Array(nStr).fill(-Infinity);
+                if (notes) {
+                    let _ri = lowerBoundT(notes, now);
+                    for (let i = _ri - 1; i >= 0; i--) {
+                        const n = notes[i];
+                        if (n.t < now - 0.6) break;
+                        if (validString(n.s) && n.t > _recArr[n.s]) _recArr[n.s] = n.t;
+                    }
+                }
+                if (chords) {
+                    for (let _ci = chords.length - 1; _ci >= 0; _ci--) {
+                        const ch = chords[_ci];
+                        if (ch.t > now) continue;
+                        if (ch.t < now - 0.6) break;
+                        if (!ch.notes) continue;
+                        for (const cn of ch.notes) {
+                            if (validString(cn.s) && ch.t > _recArr[cn.s]) _recArr[cn.s] = ch.t;
+                        }
+                    }
+                }
+                _drawRecentByString = _recArr;
+            }
+
+            // ── Ghost preview gap prepass ──────────────────────────────────
+            // For each note/chord in the upcoming 0.65s window, record the
+            // onset time of its immediate predecessor on the same string.
+            // drawNote() uses this to shrink the ghost preview window from
+            // the fixed 0.6s down to min(0.6, gap) so in dense passages the
+            // fret label doesn't float 0.6s ahead with no gem in sight.
+            //
+            // Two-pointer merge over time-sorted notes + chords so the
+            // predecessor is correct even when notes and chords interleave.
+            // Plain object with numeric key avoids per-frame string allocation;
+            // key = Math.round(t*1e4)*10 + s (unique for notes > 0.1 ms apart).
+            const _ghostPrevBuf = Object.create(null);
+            {
+                const _gLastT = new Array(nStr).fill(-Infinity);
+                let _gni = notes ? lowerBoundT(notes, now - 1) : 0;
+                let _gci = 0;
+                if (chords) while (_gci < chords.length && chords[_gci].t < now - 1) _gci++;
+                while (true) {
+                    const nt = (notes && _gni < notes.length) ? notes[_gni].t : Infinity;
+                    const ct = (chords && _gci < chords.length) ? chords[_gci].t : Infinity;
+                    const minT = nt <= ct ? nt : ct;
+                    if (minT > now + 0.65 || minT === Infinity) break;
+                    if (nt <= ct) {
+                        const n = notes[_gni++];
+                        if (validString(n.s)) {
+                            _ghostPrevBuf[Math.round(n.t * 1e4) * 10 + n.s] = _gLastT[n.s];
+                            _gLastT[n.s] = n.t;
+                        }
+                    } else {
+                        const ch = chords[_gci++];
+                        if (ch.notes) for (const cn of ch.notes) {
+                            if (validString(cn.s)) {
+                                _ghostPrevBuf[Math.round(ch.t * 1e4) * 10 + cn.s] = _gLastT[cn.s];
+                                _gLastT[cn.s] = ch.t;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Ramp strGlow while the board ghost is visible so the flying note
             // core + rim read as one solid string-coloured shape with proj.
             // Window is (0, PROJ_WIN_MERGE=0.6s) — use lowerBoundT + break.
@@ -6712,6 +6783,7 @@
                         arGhostCid,
                         arGhostCid != null,
                         _arpBoundsForNote,
+                        _ghostPrevBuf[Math.round(n.t * 1e4) * 10 + n.s] ?? -Infinity,
                     );
                     if (arGhostCid != null) {
                         const _arpBounds = _arpBoundsForNote;
@@ -7015,6 +7087,16 @@
                         cjNext = cj;
                         break;
                     }
+                    // Nearest following event (chord OR single note) — used by
+                    // chordTailMul so the framebox vanishes the moment any next
+                    // event is played, not just when the next chord arrives.
+                    let _chNextEventT = cjNext != null ? cjNext.t : Infinity;
+                    for (let _si = 0; _si < nStr; _si++) {
+                        const _nf = _drawNextByString && _drawNextByString[_si];
+                        if (_nf && _nf.t > ch.t + 1e-6) _chNextEventT = Math.min(_chNextEventT, _nf.t);
+                        const _rt = _drawRecentByString && _drawRecentByString[_si];
+                        if (_rt > ch.t + 1e-6) _chNextEventT = Math.min(_chNextEventT, _rt);
+                    }
                     let chordTailHoldS = CHORD_HWY_LINGER_S;
                     let chordNextSoon = false;
                     if (cjNext && cjNext.t > ch.t + 1e-6) {
@@ -7134,6 +7216,8 @@
                                 true,
                                 ch.id,
                                 chordSusTrailMatchArpFrame,
+                                null,
+                                _ghostPrevBuf[Math.round(ch.t * 1e4) * 10 + cn.s] ?? -Infinity,
                             );
                             lastFretForString[cn.s] = cn.f;
                             // gate by THIS note's own sustain against the
@@ -7197,11 +7281,11 @@
                     // Chord frame-box: rim bars + interior fill gradient.
                     const chDt = chDtEarly; // already computed above for anchor selection
                     const chordTailMul = (() => {
-                        // When a next chord exists, fade this frame over exactly
-                        // the inter-chord gap so it reaches 0 the moment the next
-                        // chord crosses the hit line — no hold, no linger overlap.
-                        if (chDt < 0 && cjNext != null) {
-                            const gapS = Math.max(1e-3, cjNext.t - ch.t);
+                        // When any next event (chord OR single note) exists, fade this
+                        // frame over exactly the gap so it reaches 0 the moment the
+                        // next event crosses the hit line — no hold, no linger overlap.
+                        if (chDt < 0 && _chNextEventT < Infinity) {
+                            const gapS = Math.max(1e-3, _chNextEventT - ch.t);
                             return Math.max(0, 1 - (-chDt) / gapS);
                         }
                         return hwyPostHitTailFadeMul(chDt, chordTailHoldS, chordNextSoon, chordTailFadeS);
@@ -8528,7 +8612,7 @@
         }
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
-        function drawNote(n, now, openX, skipLabel, skipBody, linger = 0.05, openChordBoxWidth, fromChord = false, chordId, susTrailMatchArpFrame = false, arpBounds = null) {
+        function drawNote(n, now, openX, skipLabel, skipBody, linger = 0.10, openChordBoxWidth, fromChord = false, chordId, susTrailMatchArpFrame = false, arpBounds = null, prevOnsetT = -Infinity) {
             const s = n.s;
             // Belt + suspenders: callers already gate via validString(),
             // but drawNote is also entered through { ...cn } chord-note
@@ -8544,6 +8628,33 @@
             const y = sY(s);
             const susEnd = n.t + (n.sus || 0);
             const hasSus = n.sus > 0;
+            // Nearest next note across ALL strings — used by both paths below.
+            // Also include _drawRecentByString so that once an event passes
+            // `now` (and leaves _drawNextByString) the deadline still holds:
+            // without this, the next future event resets _nextAnyT and old
+            // gems linger on screen after the new chord/note is already playing.
+            let _nextAnyT = Infinity;
+            for (let _si = 0; _si < nStr; _si++) {
+                const _nf = _drawNextByString && _drawNextByString[_si];
+                if (_nf && _nf.t > n.t + 1e-6) _nextAnyT = Math.min(_nextAnyT, _nf.t);
+                const _rt = _drawRecentByString && _drawRecentByString[_si];
+                if (_rt > n.t + 1e-6) _nextAnyT = Math.min(_nextAnyT, _rt);
+            }
+            // Deadline: absolute time after which the gem is culled.
+            //   Sustain long (sus >= linger): die immediately at susEnd — no tail.
+            //   Sustain short (sus < linger):  tail = linger - sus after susEnd,
+            //     capped by gap to next note (any string) so the gem disappears
+            //     when the next note arrives if it comes before the tail runs out.
+            //   No sustain: linger from onset, same gap-cap rule.
+            let _lingerDeadline;
+            if (hasSus) {
+                const extraLinger = Math.max(0, linger - (n.sus || 0));
+                _lingerDeadline = Math.min(susEnd + extraLinger, _nextAnyT);
+            } else {
+                const _gap = _nextAnyT - n.t;
+                _lingerDeadline = n.t + (_gap < linger ? _gap : linger);
+            }
+            const _overLinger = now > _lingerDeadline;
             // For arp-persisted notes past their time: bypass the early exit so
             // the board projection (fretboard ghost + fret labels) keeps rendering
             // until arpBounds.end. The gem/sustain blocks are gated by arpGhostOnlyMode.
@@ -8551,17 +8662,15 @@
                 && (arpBounds.start - now) < 0.6   // same as PROJ_WIN
                 && now <= arpBounds.end + 0.05;
             const arpGhostOnlyMode = arpGhostShouldRun
-                && dt < -linger && (!hasSus || now > susEnd);
-            // Smart cull past the normal ~50 ms linger: keep the gem alive
-            // only if a note-state verdict is actually available to display.
-            // The probe result is cached in _ndProbed/_ndProbedState so the
-            // later _ndGetNoteState query that drives the outline/core tint
-            // reuses it (avoids two provider calls per note per frame).
+                && _overLinger && (!hasSus || now > susEnd);
+            // Smart cull: keep the gem alive only if a note-state verdict is
+            // available to display. Probe result cached in _ndProbed/_ndProbedState
+            // so the later getNoteState query reuses it (avoids two provider calls).
             // arpGhostShouldRun takes precedence — arp ghosts stay alive
             // regardless of verdict state so their board projections persist.
             let _ndProbed = false;
             let _ndProbedState = null;
-            if (dt < -linger && (!hasSus || now > susEnd) && !arpGhostShouldRun) {
+            if (_overLinger && (!hasSus || now > susEnd) && !arpGhostShouldRun) {
                 if (!_ndHasProvider || dt < -NOTEDETECT_GEM_VERDICT_WINDOW) return;
                 let _ndProbe = null;
                 try { _ndProbe = _ndGetNoteState(n, n.t); } catch (e) { _ndProbe = null; }
@@ -8602,9 +8711,14 @@
             // For skipBody=true (slide targets), defaults are safe no-ops.
             const openSlabThickMul = n.f === 0 ? 1.5 : 1;
             const approachRot = n.f > 0 ? Math.max(0, Math.min(1, dt / AHEAD)) * Math.PI / 2 : 0;
-            const PROJ_WIN_G = 0.6;
-            const projFactorG = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN_G));
-            const inGhostWin = n.f > 0 && isNextOnString && dt > -ghostHold && dt < PROJ_WIN_G && projFactorG > 0.001;
+            // Ghost preview window: capped to the gap from the previous note
+            // on this string so dense passages don't show the preview 0.6 s
+            // ahead with no visible gem. Minimum 0.05 s so the ghost isn't
+            // completely suppressed even in very tight passages.
+            const _rawGap = n.t - prevOnsetT;
+            const effectiveProjWin = _rawGap > 0 ? Math.min(0.6, Math.max(0.05, _rawGap)) : 0.6;
+            const projFactorG = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / effectiveProjWin));
+            const inGhostWin = n.f > 0 && isNextOnString && dt > -ghostHold && dt < effectiveProjWin && projFactorG > 0.001;
             // slopsmith#254 — query the provider once per note, before both !skipBody
             // blocks, so _showHit can be a const and _ndGood is available for the
             // sustain trail (which renders even when skipBody=true for slide targets).
@@ -8639,7 +8753,7 @@
                 : (_ndState ? _ndGood
                 : (hit || (n.f > 0 && inGhostWin)));
 
-            if (!skipBody && !arpGhostOnlyMode) {
+            if (!skipBody && !arpGhostOnlyMode && !_overLinger) {
 
                 // ── Outline (slightly larger, bright emissive) ────────────
                 // Notedetect feedback (#9): if a recent hit/miss event
@@ -8809,7 +8923,7 @@
             // sustain trail entirely — fretted constituents already carry
             // the chord's sustains; an extra ribbon under the wide open
             // body looked like clutter. The note BODY still draws above.
-            if (hasSus && !(fromChord && n.f === 0)) {
+            if (hasSus && !_overLinger && !(fromChord && n.f === 0)) {
                     const susStart = Math.max(n.t, now);
                     const remSus = susEnd - susStart;
                     if (remSus > 0.01) {
@@ -8906,7 +9020,7 @@
                     }
             }
 
-            if (!skipBody && !arpGhostOnlyMode) {
+            if (!skipBody && !arpGhostOnlyMode && !_overLinger) {
                 // ── Technique labels ──────────────────────────────────────
                 // Label scale = base × LBL_MULT × distFactor.
                 // distFactor compensates for perspective shrink so a
@@ -9041,8 +9155,11 @@
             }
 
             // ── Board ghost: filled rim at Z=0 (always drawn for isNext) ─
-            const PROJ_WIN = 0.6;
-            const projFactor = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / PROJ_WIN));
+            // effectiveProjWin already computed above (gap-capped, shared
+            // with projFactorG / inGhostWin). Arp ghosts always use the
+            // full 0.6 s window — their timing is authored, not gap-driven.
+            const _PROJ_WIN_ARP = 0.6;
+            const projFactor = Math.max(0, Math.min(1, 1 - Math.max(dt, 0) / effectiveProjWin));
             // isBlocked suppresses the pre-impact ghost for sustains so it
             // doesn't peek out from under the incoming note body in the
             // last 150ms. Gate on dt > 0 so the post-hit linger window
@@ -9051,17 +9168,17 @@
             // sustain frames silently suppress the ghost too.
             const isBlocked = dt > 0 && dt < 0.15 && n.sus > 0;
             // For arpeggio notes: ALL notes show their ghost simultaneously
-            // the moment the FIRST note enters PROJ_WIN — exactly when
+            // the moment the FIRST note enters _PROJ_WIN_ARP — exactly when
             // isNextOnString would reveal the first note's ghost on its own.
             // Using arpBounds.start as the shared reference makes every note
             // in the arpeggio fade in together, keyed off that single anchor.
             const arpDtToStart = arpBounds != null ? arpBounds.start - now : Infinity;
-            const arpProjFactor = Math.max(0, Math.min(1, 1 - Math.max(arpDtToStart, 0) / PROJ_WIN));
+            const arpProjFactor = Math.max(0, Math.min(1, 1 - Math.max(arpDtToStart, 0) / _PROJ_WIN_ARP));
             const arpGhostActive = arpBounds != null
-                && arpDtToStart < PROJ_WIN
+                && arpDtToStart < _PROJ_WIN_ARP
                 && now <= arpBounds.end + 0.05;
             if (n.f > 0 && projectionVisible && (
-                (isNextOnString && dt > -ghostHold && dt < PROJ_WIN && projFactor > 0.001 && !isBlocked)
+                (!_overLinger && isNextOnString && dt > -ghostHold && dt < effectiveProjWin && projFactor > 0.001 && !isBlocked)
                 || arpGhostActive
             )) {
                 // Ghost stays at final "on the board" orientation — not the
@@ -9552,7 +9669,7 @@
             lyricsCanvas = lyricsCtx = null;
             projMeshArr = null;
             _probe = null;
-            _drawNextByString = null;
+            _drawNextByString = null; _drawRecentByString = null;
             _drawChordTemplates = null;
             _laneTargetColor = null;
             _renderScale = 1;
