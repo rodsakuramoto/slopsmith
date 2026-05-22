@@ -508,9 +508,26 @@
     const ARPEGGIO_RIM_BLUE_HEX = 0x454BB6;
     /** Post-hit chord-frame rim tints driven by the note-state provider
      *  (slopsmith#254). Applied only to the teal frame during the linger
-     *  fade (chDt <= 0) when a scorer is attached. */
-    const CHORD_BOX_HIT_HEX = 0x40e060;
-    const CHORD_BOX_MISS_HEX = 0xe04040;
+     *  fade (chDt <= 0) when a scorer is attached.
+     *  Derived from CHORD_BOX_TEAL_HEX:
+     *    hit  → teal lerped 65 % toward white (bright teal).
+     *    miss → teal at 25 % brightness (dark teal).
+     *  Legacy green/red kept as unused fallback constants. */
+    const CHORD_BOX_HIT_HEX  = 0x40e060;  // legacy (unused)
+    const CHORD_BOX_MISS_HEX = 0xe04040;  // legacy (unused)
+    const CHORD_BOX_HIT_BRIGHT_HEX = (() => {
+        const c = CHORD_BOX_TEAL_HEX;
+        const r = Math.min(255, Math.round(((c >> 16) & 255) + (255 - ((c >> 16) & 255)) * 0.65));
+        const g = Math.min(255, Math.round(((c >>  8) & 255) + (255 - ((c >>  8) & 255)) * 0.65));
+        const b = Math.min(255, Math.round(( c        & 255) + (255 - ( c        & 255)) * 0.65));
+        return (r << 16) | (g << 8) | b;
+    })();
+    const CHORD_BOX_MISS_DARK_HEX = (() => {
+        const c = CHORD_BOX_TEAL_HEX;
+        return ((Math.round(((c >> 16) & 255) * 0.25) << 16) |
+                (Math.round(((c >>  8) & 255) * 0.25) <<  8) |
+                 Math.round(( c        & 255) * 0.25));
+    })();
 
     /** Fret-number label tints — gold on approaching/active notes, muted blue when idle. */
     const FRET_LABEL_GOLD_HEX = '#D8A636';
@@ -1823,7 +1840,16 @@
         // when a recent notedetect:hit / :miss event matches the note's
         // (s, f, t).
         let mHitOutline = null, mMissOutline = null, mMissCore = null;
-        let pSusOutline = null;
+        let mHitEdge = null, mMissEdge = null;
+        // Per-string verdict materials used for outline + lateral face fill.
+        // mHitBright[s]: boosted emissive of string colour (hit flash).
+        // mMissDark[s]:  darkened (~25%) string colour (miss).
+        // Built in initScene() after mGlow. Arrays share the same material
+        // instances so outline and face fill always match exactly.
+        let mHitBright = [], mHitBrightArrays = [];
+        let mMissDark  = [], mMissDarkArrays  = [];
+        let mEdgeTransparent = null;
+        let pSusOutline = null, pNoteEdge = null;
         let projMeshArr = null;
         let _probe = null;
         /** Snapshotted in update() for drawNote() ghost / glow (single source vs per-caller isNext). */
@@ -3859,8 +3885,38 @@
             // tints. Note rendering swaps its outline.material between
             // mWhiteOutline / mHitOutline / mMissOutline based on
             // recent notedetect events.
-            mHitOutline = new T.MeshLambertMaterial({ color: 0x40ff70, emissive: 0x40ff70, emissiveIntensity: 1.0, transparent: true, opacity: 1.0, depthWrite: false });
-            mMissOutline = new T.MeshLambertMaterial({ color: 0xff4040, emissive: 0xff4040, emissiveIntensity: 1.0, transparent: true, opacity: 1.0, depthWrite: false });
+            mHitOutline = new T.MeshLambertMaterial({ color: 0xFFFCCF, emissive: 0xFFFCCF, emissiveIntensity: 1.0, transparent: true, opacity: 1.0, depthWrite: false });
+            mMissOutline = new T.MeshLambertMaterial({ color: 0x252525, emissive: 0x252525, emissiveIntensity: 1.0, transparent: true, opacity: 1.0, depthWrite: false });
+            // Face-fill materials for hit/miss feedback: semi-transparent mesh
+            // drawn over the gem's faces so all six sides receive the tint.
+            mHitEdge  = new T.MeshBasicMaterial({ color: 0xFFFCCF, transparent: true, opacity: 0.35, side: T.DoubleSide, depthWrite: false });
+            mMissEdge = new T.MeshBasicMaterial({ color: 0x252525, transparent: true, opacity: 0.55, side: T.DoubleSide, depthWrite: false });
+            // Transparent placeholder for front (+Z, group 4) and back (-Z, group 5).
+            // BoxGeometry group order: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z(front), 5=-Z(back)
+            mEdgeTransparent = new T.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+
+            // Hit: bright version of the string colour — boosted emissive so the
+            // outline + lateral faces flash visibly brighter than the normal body.
+            mHitBright = activePalette.map(c => new T.MeshLambertMaterial({
+                color: 0xffffff, emissive: c, emissiveIntensity: 5.0 * glowMul,
+                transparent: true, opacity: 1.0, depthWrite: false,
+            }));
+            mHitBrightArrays = mHitBright.map(m => [m, m, m, m, mEdgeTransparent, mEdgeTransparent]);
+
+            // Miss: darkened (25%) version of the string colour — clearly dim but
+            // still string-tinted so the player knows which lane they missed.
+            const _darken = (c, f) =>
+                ((Math.round(((c >> 16) & 255) * f) << 16) |
+                 (Math.round(((c >>  8) & 255) * f) <<  8) |
+                  Math.round( (c        & 255) * f));
+            mMissDark = activePalette.map(c => {
+                const dc = _darken(c, 0.25);
+                return new T.MeshLambertMaterial({
+                    color: dc, emissive: dc, emissiveIntensity: 0.8,
+                    transparent: true, opacity: 1.0, depthWrite: false,
+                });
+            });
+            mMissDarkArrays = mMissDark.map(m => [m, m, m, m, mEdgeTransparent, mEdgeTransparent]);
             // Dark charcoal core for missed gems: pairs with the red
             // mMissOutline ring to produce an "extinguished" gem look that
             // reads as a miss on every string, including those whose hue
@@ -3898,6 +3954,7 @@
 
             // ── Pools ──────────────────────────────────────────────────────
             pNote = pool(noteG, () => new T.Mesh(gNote, mStr[0]));
+            pNoteEdge = pool(noteG, () => new T.Mesh(gNote, mHitEdge));
             pAccentHalo = pool(noteG, () => new T.Mesh(gNote, mAccentHaloFar[0]));
             pSus = pool(noteG, () => new T.Mesh(gSus, mSus[0]));
             pSusOutline = pool(noteG, () => new T.Mesh(gSus, mSusOutline));
@@ -4630,6 +4687,14 @@
                     mAccentOutline[s].emissive.setHex(c);
                 }
                 if (mAccentCore[s]) mAccentCore[s].emissive.setHex(c);
+                // Verdict materials: retint to new string colour.
+                if (mHitBright[s]) { mHitBright[s].emissive.setHex(c); }
+                if (mMissDark[s]) {
+                    const dc = ((Math.round(((c >> 16) & 255) * 0.25) << 16) |
+                                (Math.round(((c >>  8) & 255) * 0.25) <<  8) |
+                                 Math.round( (c        & 255) * 0.25));
+                    mMissDark[s].color.setHex(dc); mMissDark[s].emissive.setHex(dc);
+                }
                 for (const haloArr of [mAccentHaloNear, mAccentHaloMid, mAccentHaloFar]) {
                     if (haloArr[s]) haloArr[s].color.setHex(c);
                 }
@@ -4715,6 +4780,9 @@
             if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.0 * g;
             if (mMissOutline)  mMissOutline.emissiveIntensity  = 1.0 * g;
             if (mMissCore)     mMissCore.emissiveIntensity     = 0.4 * g;
+            for (let s = 0; s < mHitBright.length; s++) {
+                if (mHitBright[s]) mHitBright[s].emissiveIntensity = 5.0 * g;
+            }
             if (mSusOutline)   mSusOutline.emissiveIntensity   = 0.3 * g;
             if (mTapChevron)   mTapChevron.emissiveIntensity   = 0.9 * g;
             if (mBarre)        mBarre.emissiveIntensity        = 0.9 * g;
@@ -5894,7 +5962,7 @@
             }
             _syncOpenStringPitchLabels(bundle);
 
-            pNote.reset(); pSus.reset(); pSusOutline.reset(); pSusRibbon.reset(); pSusRibbonOl.reset(); pTapChevron.reset(); pAccentHalo.reset(); pLbl.reset();
+            pNote.reset(); pNoteEdge.reset(); pSus.reset(); pSusOutline.reset(); pSusRibbon.reset(); pSusRibbonOl.reset(); pTapChevron.reset(); pAccentHalo.reset(); pLbl.reset();
             pBeat.reset(); pSec.reset();
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
@@ -7201,9 +7269,9 @@
                         if (chDt <= 0 && _ndHasProvider) {
                             const latched = _chordVerdicts.get(verdictKey);
                             if (latched === 'green') {
-                                rimHex = CHORD_BOX_HIT_HEX;
+                                rimHex = CHORD_BOX_HIT_BRIGHT_HEX;
                             } else if (latched === 'red') {
-                                rimHex = CHORD_BOX_MISS_HEX;
+                                rimHex = CHORD_BOX_MISS_DARK_HEX;
                             } else if (latched === 'unmatched') {
                                 // The first scan past the verdict window
                                 // came up empty (no constituent ever had a
@@ -7256,10 +7324,10 @@
                                 }
                                 if (anyMiss) {
                                     _chordVerdicts.set(verdictKey, 'red');
-                                    rimHex = CHORD_BOX_MISS_HEX;
+                                    rimHex = CHORD_BOX_MISS_DARK_HEX;
                                 } else if (allHit) {
                                     _chordVerdicts.set(verdictKey, 'green');
-                                    rimHex = CHORD_BOX_HIT_HEX;
+                                    rimHex = CHORD_BOX_HIT_BRIGHT_HEX;
                                 } else if (chDt < -_ND_UNMATCHED_LATCH_AFTER && !anyState) {
                                     // The engine verdict typically lands
                                     // ~0.4 s after the chord crosses the
@@ -8533,8 +8601,9 @@
             // sustain trail (which renders even when skipBody=true for slide targets).
             let _ndGood = false;    // true when provider confirms hit/active
             let _ndState = null;    // 'hit'|'active'|'miss'|null; null → fall back to proximity heuristic
-            let _ndCs = null;       // raw provider response kept for alpha/color in _ndSizzle
+            let _ndCs = null;       // raw provider response — truthy when provider returned a verdict
             let _ndCsIsObj = false; // typeof _ndCs === 'object'
+            let _ndFaceMat = null;  // [mat×4, transparent×2] array for lateral face fill, or null
             if (_ndGetNoteState) {
                 // Reuse the smart-cull probe result if we already called
                 // _ndGetNoteState for this gem above; otherwise probe now.
@@ -8584,7 +8653,7 @@
                     for (let i = 0; i < _ndHitMarks.length; i++) {
                         const m = _ndHitMarks[i];
                         if (m.s === n.s && m.f === n.f && Math.abs(m.noteTime - n.t) < _ND_TIME_EPS) {
-                            _ndOutline = mHitOutline; _ndMatchedMark = m; _ndHadHitMark = true; break;
+                            _ndOutline = mHitBright[s] ?? mGlow[s]; _ndFaceMat = mHitBrightArrays[s] ?? null; _ndMatchedMark = m; _ndHadHitMark = true; break;
                         }
                     }
                 }
@@ -8592,7 +8661,7 @@
                     for (let i = 0; i < _ndMissMarks.length; i++) {
                         const m = _ndMissMarks[i];
                         if (m.s === n.s && m.f === n.f && Math.abs(m.noteTime - n.t) < _ND_TIME_EPS) {
-                            _ndOutline = mMissOutline; _ndMatchedMark = m; break;
+                            _ndOutline = mMissDark[s] ?? mMissOutline; _ndFaceMat = mMissDarkArrays[s] ?? null; _ndMatchedMark = m; break;
                         }
                     }
                 }
@@ -8609,31 +8678,16 @@
                 const rimXY = n.ac ? ACCENT_RIM_XY_SCALE_MUL : 1;
                 const rimZ = n.ac ? ACCENT_RIM_Z_SCALE_MUL : 1;
 
-                // slopsmith#254 — apply visual overrides from the provider verdict
-                // (_ndState/_ndGood/_ndCs computed in the hoisted block above).
-                // 'miss' → red outline; 'hit'/'active' → green outline + sizzle.
-                // A string-tinted outline (the old behaviour) was hard to read
-                // as a verdict — it looked the same as an un-judged note on
-                // that string. A dedicated green border (mHitOutline) reads
-                // unambiguously against the red miss border.
-                // The authoritative _showHit (body brightness, sustain glow) is
-                // already a const from the hoisted block — no reassignment needed here.
+                // slopsmith#254 — apply outline + lateral face-fill overrides from provider verdict.
+                // hit/active → bright string outline (mGlow[s]) + string-colour lateral faces;
+                // miss → dark outline + dark lateral faces; front/back faces stay transparent.
                 if (_ndCs) {
                     if (_ndState === 'miss') {
-                        _ndOutline = mMissOutline;
+                        _ndOutline = mMissDark[s] ?? mMissOutline;
+                        _ndFaceMat = mMissDarkArrays[s] ?? null;
                     } else if (_ndGood) {
-                        _ndOutline = mHitOutline;
-                        // Carry the provider's alpha (and optional color) through
-                        // to the sizzle so a struck-note fade or custom palette
-                        // comes through (#254 review).
-                        // Skip sizzle on chord constituents — per-note sparkles
-                        // on every chord note at lenient scoring rates became a
-                        // measurable framerate hit; standalone notes still sparkle.
-                        if (!fromChord && _ndSizzle.length < 40) {
-                            const _a = (_ndCsIsObj && Number.isFinite(_ndCs.alpha)) ? Math.max(0, Math.min(1, _ndCs.alpha)) : 1;
-                            const _col = (_ndCsIsObj && typeof _ndCs.color === 'string') ? _ndCs.color : null;
-                            _ndSizzle.push({ x, y: y + techniqueYNow, z: noteZ, s, alpha: _a, color: _col });
-                        }
+                        _ndOutline = mHitBright[s] ?? mGlow[s];
+                        _ndFaceMat = mHitBrightArrays[s] ?? null;
                     }
                 }
 
@@ -8674,17 +8728,11 @@
                     }
                 }
                 const outline = pNote.get();
-                outline.material = (_ndMatchedMark != null || _ndState != null) ? _ndOutline
-                    : (n.ac ? mAccentOutline[s] : _ndOutline);
+                outline.material = n.ac ? mAccentOutline[s] : _ndOutline;
                 outline.renderOrder = _noteRO;
                 outline.position.set(x, y + techniqueYNow, noteZ);
                 outline.rotation.z = approachRot;
-                // slopsmith#254 — a provider hit/miss verdict gets a fatter
-                // outline shell so the green / red border reads clearly as a
-                // ring around the gem. The default 1.1x rim is a hairline on
-                // small fretted gems (it only showed up on the wide open-note
-                // slabs), so a verdict bumps it to 1.5x.
-                const ndRim = (_ndState === 'miss' || _ndGood) ? 1.5 : 1.1;
+                const ndRim = 1.1;
                 if (n.f === 0) {
                     outline.scale.set(
                         (35 * K / NW) * ndRim * rimXY * openWScale,
@@ -8695,23 +8743,32 @@
                     outline.scale.set(ndRim * rimXY, ndRim * rimXY, 2.8 * rimZ);
                 }
 
+                // ── Lateral face fill (top / bottom / left / right only) ─────
+                // Material array: groups 0-3 (±X ±Y) get the verdict colour;
+                // groups 4-5 (+Z front / -Z back) are transparent so the large
+                // front face shows only the core body's string colour beneath.
+                if (_ndFaceMat) {
+                    const edges = pNoteEdge.get();
+                    edges.material = _ndFaceMat;
+                    edges.renderOrder = _noteRO + 2;
+                    edges.position.set(x, y + techniqueYNow, noteZ + 0.001);
+                    edges.rotation.z = approachRot;
+                    if (n.f === 0) {
+                        edges.scale.set(
+                            (40 * K / NW) * rimXY * openWScale * 1.02,
+                            0.1 * openSlabThickMul * 1.02,
+                            0.6 * rimZ * 1.02,
+                        );
+                    } else {
+                        edges.scale.set(rimXY * 1.02, rimXY * 1.02, 2.5 * rimZ * 1.02);
+                    }
+                }
+
                 // ── Core (filled note body) ───────────────────────────────
                 const core = pNote.get();
-                // slopsmith#254 — on a provider miss verdict, paint the gem
-                // core a dark charcoal (mMissCore) and let the red rim
-                // dominate, so the fail reads as an "extinguished" gem
-                // regardless of which string's natural color it sits on
-                // (a red rim on a red string disappears otherwise). Hits
-                // grab attention with bright mGlow + sizzle; misses get a
-                // distinct dark-with-red-rim look — clear without needing
-                // a string-color contrast that doesn't exist for every lane.
-                // A miss takes priority over the accent (`n.ac`) override —
-                // a missed accented note is still a miss; without this
-                // reordering the brighter mAccentCore would mask the fail
-                // signal on every accent.
-                core.material = (_ndState === 'miss') ? mMissCore
-                    : (n.ac ? mAccentCore[s]
-                        : (_showHit ? mGlow[s] : mStr[s]));
+                // Body always keeps the string colour. Verdict feedback is
+                // carried by the outline shell and lateral face fill.
+                core.material = n.ac ? mAccentCore[s] : mStr[s];
                 core.renderOrder = _noteRO + 1;
                 core.position.set(x, y + techniqueYNow, noteZ + 0.001);
                 core.rotation.z = approachRot;
@@ -9424,6 +9481,10 @@
             // via scene.traverse if no event ever fired (never attached
             // to a mesh), so dispose explicitly.
             mHitOutline?.dispose?.(); mMissOutline?.dispose?.(); mMissCore?.dispose?.();
+            mHitEdge?.dispose?.(); mHitEdge = null; mMissEdge?.dispose?.(); mMissEdge = null;
+            mEdgeTransparent?.dispose?.(); mEdgeTransparent = null;
+            for (const m of mHitBright) m?.dispose?.(); mHitBright = []; mHitBrightArrays = [];
+            for (const m of mMissDark)  m?.dispose?.(); mMissDark  = []; mMissDarkArrays  = [];
             for (const k in txtCache) {
                 const tm = txtCache[k];
                 tm.userData.h3dGhostFretMeshMat?.dispose?.();
@@ -9487,7 +9548,7 @@
             _laneTargetColor = null;
             _renderScale = 1;
             mBeatM = mBeatQ = null;
-            pNote = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
+            pNote = pNoteEdge = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
             pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pArpBracket = pNoteFretLabel = pConnectorLine = pDropLine = pTapChevron = pAccentHalo = pChordAccentHalo = pPMXFill = pFHXFill = null;
             if (gPMXFill) { gPMXFill.dispose(); gPMXFill = null; }
             if (gFHXFill) { gFHXFill.dispose(); gFHXFill = null; }
@@ -9670,7 +9731,6 @@
                     if (bundle.lyricsVisible && bundle.lyrics?.length) {
                         lyricsBottom = drawLyrics(bundle.lyrics, bundle.currentTime, lyricsCtx, lyricsCanvas.width, lyricsCanvas.height) || 0;
                     }
-                    drawNotedetectSizzle(lyricsCtx, lyricsCanvas.width, lyricsCanvas.height);
                     drawNotedetectLabels(lyricsCtx, lyricsCanvas.width, lyricsCanvas.height);
                     // Draw outgoing diagram first so the incoming diagram renders on top,
                     // making the entrance scale-in animation visible during crossfades.
