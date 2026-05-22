@@ -3883,48 +3883,44 @@
                     blending: T.AdditiveBlending, side: T.DoubleSide, fog: true,
                 }),
             ));
-            // Notedetect feedback (issue #9): bright green / red outline
-            // tints. Note rendering swaps its outline.material between
+            // Notedetect feedback (issue #9): neon spring-green / magenta-red outline
+            // tints. Hit = 0x22ff88 (hue ~150°, cyan-shifted green — distinct from the
+            // string green 0x30d040 at hue ~128°). Miss = 0xff0066 (hue ~345°, hot
+            // magenta-red — distinct from the string red 0xff2828 at hue ~0°).
+            // Note rendering swaps its outline.material between
             // mWhiteOutline / mHitOutline / mMissOutline based on
             // recent notedetect events.
-            mHitOutline = new T.MeshLambertMaterial({ color: 0xFFFCCF, emissive: 0xFFFCCF, emissiveIntensity: 1.0, transparent: true, opacity: 1.0, depthWrite: false });
-            mMissOutline = new T.MeshLambertMaterial({ color: 0x252525, emissive: 0x252525, emissiveIntensity: 1.0, transparent: true, opacity: 1.0, depthWrite: false });
+            mHitOutline = new T.MeshLambertMaterial({ color: 0x22ff88, emissive: 0x22ff88, emissiveIntensity: 1.2, transparent: true, opacity: 1.0, depthWrite: false });
+            mMissOutline = new T.MeshLambertMaterial({ color: 0xff0066, emissive: 0xff0066, emissiveIntensity: 1.2, transparent: true, opacity: 1.0, depthWrite: false });
             // Face-fill materials for hit/miss feedback: semi-transparent mesh
             // drawn over the gem's faces so all six sides receive the tint.
-            mHitEdge  = new T.MeshBasicMaterial({ color: 0xFFFCCF, transparent: true, opacity: 0.35, side: T.DoubleSide, depthWrite: false });
-            mMissEdge = new T.MeshBasicMaterial({ color: 0x252525, transparent: true, opacity: 0.55, side: T.DoubleSide, depthWrite: false });
+            mHitEdge  = new T.MeshBasicMaterial({ color: 0x22ff88, transparent: true, opacity: 0.40, side: T.DoubleSide, depthWrite: false });
+            mMissEdge = new T.MeshBasicMaterial({ color: 0xff0066, transparent: true, opacity: 0.55, side: T.DoubleSide, depthWrite: false });
             // Transparent placeholder for front (+Z, group 4) and back (-Z, group 5).
             // BoxGeometry group order: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z(front), 5=-Z(back)
             mEdgeTransparent = new T.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
 
-            // Hit: bright version of the string colour — boosted emissive so the
-            // outline + lateral faces flash visibly brighter than the normal body.
-            mHitBright = activePalette.map(c => new T.MeshLambertMaterial({
-                color: 0xffffff, emissive: c, emissiveIntensity: 5.0 * glowMul,
+            // Hit: fixed neon spring-green on every string — 0x22ff88 is cyan-shifted
+            // enough to be readable even on the green string (0x30d040). The outline
+            // + lateral faces flash green regardless of which string was hit.
+            mHitBright = activePalette.map(() => new T.MeshLambertMaterial({
+                color: 0x22ff88, emissive: 0x22ff88, emissiveIntensity: 4.0 * glowMul,
                 transparent: true, opacity: 1.0, depthWrite: false,
             }));
             mHitBrightArrays = mHitBright.map(m => [m, m, m, m, mEdgeTransparent, mEdgeTransparent]);
 
-            // Miss: darkened (25%) version of the string colour — clearly dim but
-            // still string-tinted so the player knows which lane they missed.
-            const _darken = (c, f) =>
-                ((Math.round(((c >> 16) & 255) * f) << 16) |
-                 (Math.round(((c >>  8) & 255) * f) <<  8) |
-                  Math.round( (c        & 255) * f));
-            mMissDark = activePalette.map(c => {
-                const dc = _darken(c, 0.25);
-                return new T.MeshLambertMaterial({
-                    color: dc, emissive: dc, emissiveIntensity: 0.8,
-                    transparent: true, opacity: 1.0, depthWrite: false,
-                });
-            });
+            // Miss: fixed dark charcoal body on every string — pairs with the magenta-red
+            // mMissOutline ring so the gem reads as "extinguished" + red-rimmed on any
+            // string, including the red string (0xff2828) which would otherwise blend.
+            mMissDark = activePalette.map(() => new T.MeshLambertMaterial({
+                color: 0x181818, emissive: 0x1a0010, emissiveIntensity: 0.6,
+                transparent: true, opacity: 1.0, depthWrite: false,
+            }));
             mMissDarkArrays = mMissDark.map(m => [m, m, m, m, mEdgeTransparent, mEdgeTransparent]);
-            // Dark charcoal core for missed gems: pairs with the red
-            // mMissOutline ring to produce an "extinguished" gem look that
-            // reads as a miss on every string, including those whose hue
-            // is already red. Lower emissive than the outline so the ring
-            // dominates and the gem reads as a dark body with a red rim.
-            mMissCore = new T.MeshLambertMaterial({ color: 0x181818, emissive: 0x401010, emissiveIntensity: 0.4, transparent: true, opacity: 1.0, depthWrite: false });
+            // Dark charcoal core for missed gems: magenta-red emissive tint pairs with
+            // mMissOutline (0xff0066) to produce an "extinguished with red rim" look
+            // that reads as a miss on every string, including the red and green ones.
+            mMissCore = new T.MeshLambertMaterial({ color: 0x181818, emissive: 0x440018, emissiveIntensity: 0.4, transparent: true, opacity: 1.0, depthWrite: false });
             mSusOutline = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.3, transparent: true, opacity: 0.75, depthWrite: false });
             mBeatM = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 });
             mBeatQ = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.07 });
@@ -4689,14 +4685,8 @@
                     mAccentOutline[s].emissive.setHex(c);
                 }
                 if (mAccentCore[s]) mAccentCore[s].emissive.setHex(c);
-                // Verdict materials: retint to new string colour.
-                if (mHitBright[s]) { mHitBright[s].emissive.setHex(c); }
-                if (mMissDark[s]) {
-                    const dc = ((Math.round(((c >> 16) & 255) * 0.25) << 16) |
-                                (Math.round(((c >>  8) & 255) * 0.25) <<  8) |
-                                 Math.round( (c        & 255) * 0.25));
-                    mMissDark[s].color.setHex(dc); mMissDark[s].emissive.setHex(dc);
-                }
+                // Verdict materials use fixed colours (0x22ff88 hit, 0xff0066 miss)
+                // that are independent of the string palette — no retint needed.
                 for (const haloArr of [mAccentHaloNear, mAccentHaloMid, mAccentHaloFar]) {
                     if (haloArr[s]) haloArr[s].color.setHex(c);
                 }
@@ -4779,11 +4769,11 @@
                 // alongside mGlow (accent fill boost).
             }
             if (mWhiteOutline) mWhiteOutline.emissiveIntensity = 0.6 * g;
-            if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.0 * g;
-            if (mMissOutline)  mMissOutline.emissiveIntensity  = 1.0 * g;
+            if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.2 * g;
+            if (mMissOutline)  mMissOutline.emissiveIntensity  = 1.2 * g;
             if (mMissCore)     mMissCore.emissiveIntensity     = 0.4 * g;
             for (let s = 0; s < mHitBright.length; s++) {
-                if (mHitBright[s]) mHitBright[s].emissiveIntensity = 5.0 * g;
+                if (mHitBright[s]) mHitBright[s].emissiveIntensity = 4.0 * g;
             }
             if (mSusOutline)   mSusOutline.emissiveIntensity   = 0.3 * g;
             if (mTapChevron)   mTapChevron.emissiveIntensity   = 0.9 * g;
