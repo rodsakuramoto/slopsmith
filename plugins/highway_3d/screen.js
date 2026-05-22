@@ -7333,6 +7333,10 @@
                         const isArpeggioFrame = chordHighwayLavenderArpVisual;
                         const ftSide = isArpeggioFrame ? ft * 1.55 : ft;
                         let rimHex = isArpeggioFrame ? ARPEGGIO_RIM_BLUE_HEX : CHORD_BOX_TEAL_HEX;
+                        // Capture the neutral frame color before any verdict overwrite.
+                        // Used for the mute X lines so hit/miss feedback only shows on
+                        // the outer borders of the framebox, not inside the X pattern.
+                        const baseRimHex = rimHex;
                         // slopsmith#254 — once the chord crosses the hit
                         // line, tint the teal frame by the note-state
                         // provider verdict: green on a clean grab, red on a
@@ -7700,7 +7704,7 @@
                                 const ang = Math.atan2(by - ay, bx - ax);
                                 const seg = pChordBox.get();
                                 seg.renderOrder = 11;
-                                seg.material.color.setHex(rimHex);
+                                seg.material.color.setHex(baseRimHex);
                                 seg.position.set(mx, my, z - 0.005 * K);
                                 seg.scale.set(len, lw, thickZ * 0.5);
                                 seg.rotation.set(0, 0, ang);
@@ -7742,7 +7746,7 @@
                                 const ang = Math.atan2(by - ay, bx - ax);
                                 const seg = pChordBox.get();
                                 seg.renderOrder = 11;
-                                seg.material.color.setHex(rimHex);
+                                seg.material.color.setHex(baseRimHex);
                                 seg.position.set(mx, my, z - 0.005 * K);
                                 seg.scale.set(len, lw, thickZ * 0.5);
                                 seg.rotation.set(0, 0, ang);
