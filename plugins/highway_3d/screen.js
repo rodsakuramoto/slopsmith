@@ -189,10 +189,10 @@
      * 3D highway post-strum tail — chord frame + ghost fret digit share the same
      * hold and fade so timing stays consistent.
      */
-    const CHORD_HWY_LINGER_S = 0.48;
+    const CHORD_HWY_LINGER_S = 0.75;
     /** Linear fade at end of `CHORD_HWY_LINGER_S` (applies to chord UI and board ghost numbers). */
     const CHORD_HWY_FADE_S = 0.32;
-    const GHOST_HOLD_AFTER_ONSET = 0.48;
+    const GHOST_HOLD_AFTER_ONSET = 0.75;
     const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
     /** Purple lane rails: extend past last matched chord/note so Z reaches frame end. */
     const ARP_HWY_RAIL_END_TAIL_S = 0.38;
@@ -1811,6 +1811,10 @@
         let gNote = null, gSus = null, gBeat = null, gTapChevron = null;
         let mStr = [], mGlow = [], mSus = [], mStrHitOutline = [], mAccentOutline = [], mAccentCore = [], mAccentHaloNear = [], mAccentHaloMid = [], mAccentHaloFar = [];
         let mWhiteOutline = null, mSusOutline = null;
+        // Dedicated sustain-trail outline materials for hit/miss feedback.
+        // Match mSusOutline's opacity (0.75) so they don't bleed through
+        // the semi-transparent body (mSus[s]) and tint its interior.
+        let mHitSusOutline = null, mMissSusOutline = null;
         // Shared materials for the legato technique meshes — one per geometry
         // type, reused across every pooled mesh instance to avoid per-mesh
         // material allocation in dense HO/PO/tap passages. Allocated in
@@ -2081,6 +2085,13 @@
         // emit notedetect:hit/miss events still work via _ndHitMarks.
         let _ndGetNoteState = null;
         let _ndHasProvider = false;  // true iff a note-state provider is registered (slopsmith#254)
+        // Sustain verdict latch — persists a provider's hit/miss verdict for the
+        // full duration of a sustained note. Once hitGlowDuration expires the
+        // provider stops returning state; the latch re-injects the last verdict
+        // so the green/red color stays alive until susEnd.
+        // Key: Math.round(n.t * 1e4) * 10 + n.s  (matches _ghostPrevBuf scheme)
+        // Value: 'hit' | 'miss'
+        let _susVerdictLatch = new Map();
 
         // Object pools
         let pNote, pSus, pLbl, pBeat, pSec;
@@ -3887,7 +3898,9 @@
             // Transparent placeholder for front (+Z, group 4) and back (-Z, group 5).
             // BoxGeometry group order: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z(front), 5=-Z(back)
             mEdgeTransparent = new T.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
-            mMissEdgeArrays = [mMissEdge, mMissEdge, mMissEdge, mMissEdge, mEdgeTransparent, mEdgeTransparent];
+            // mMissEdgeArrays: use mMissOutline (same Lambert+emissive material as the gem
+            // border) so the lateral face fill matches the outline colour exactly.
+            mMissEdgeArrays = [mMissOutline, mMissOutline, mMissOutline, mMissOutline, mEdgeTransparent, mEdgeTransparent];
 
             // Hit: fixed neon spring-green on every string — 0x22ff88 is cyan-shifted
             // enough to be readable even on the green string (0x30d040). The outline
@@ -3910,7 +3923,13 @@
             // mMissOutline (0xff0066) to produce an "extinguished with red rim" look
             // that reads as a miss on every string, including the red and green ones.
             mMissCore = new T.MeshLambertMaterial({ color: 0x181818, emissive: 0x440018, emissiveIntensity: 0.4, transparent: true, opacity: 1.0, depthWrite: false });
-            mSusOutline = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.3, transparent: true, opacity: 0.75, depthWrite: false });
+            // Outline materials render at a lower renderOrder than the body.
+            // The body is rendered on top with opacity:1 on hit/miss, which
+            // fully covers the outline center — only the fringe that extends
+            // past the body edges (0.2*K on each side) is visible.
+            mSusOutline     = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.3, transparent: true, opacity: 0.75, depthWrite: false });
+            mHitSusOutline  = new T.MeshLambertMaterial({ color: 0x22ff88, emissive: 0x22ff88, emissiveIntensity: 0.8, transparent: true, opacity: 0.45, depthWrite: false });
+            mMissSusOutline = new T.MeshLambertMaterial({ color: 0xff0066, emissive: 0xff0066, emissiveIntensity: 0.8, transparent: true, opacity: 0.45, depthWrite: false });
             mBeatM = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 });
             mBeatQ = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.07 });
 
@@ -4764,7 +4783,9 @@
             for (let s = 0; s < mHitBright.length; s++) {
                 if (mHitBright[s]) mHitBright[s].emissiveIntensity = 4.0 * g;
             }
-            if (mSusOutline)   mSusOutline.emissiveIntensity   = 0.3 * g;
+            if (mSusOutline)      mSusOutline.emissiveIntensity      = 0.3 * g;
+            if (mHitSusOutline)   mHitSusOutline.emissiveIntensity   = 0.7 * g;
+            if (mMissSusOutline)  mMissSusOutline.emissiveIntensity  = 0.7 * g;
             if (mTapChevron)   mTapChevron.emissiveIntensity   = 0.9 * g;
             if (mBarre)        mBarre.emissiveIntensity        = 0.9 * g;
             for (let si = 0; si < activePalette.length; si++) {
@@ -6025,9 +6046,15 @@
             // leave the now-older later-inserted entries un-pruned. Full
             // scan is O(n) but n is bounded (chord count in the song,
             // ~hundreds) so the per-frame cost is microseconds.
+            if (_ndHasProvider && _chordVerdictsLastNow !== null && now < _chordVerdictsLastNow - 0.25) {
+                // Backward seek — wipe all verdict latches so notes re-judge
+                // from scratch regardless of whether chords were present.
+                _chordVerdicts.clear();
+                _susVerdictLatch.clear();
+            }
             if (_ndHasProvider && _chordVerdicts.size > 0) {
                 if (_chordVerdictsLastNow !== null && now < _chordVerdictsLastNow - 0.25) {
-                    _chordVerdicts.clear();
+                    // already cleared above
                 } else {
                     const pruneBefore = ndVerdictT0 - 0.5; // safety margin
                     for (const k of _chordVerdicts.keys()) {
@@ -8728,6 +8755,72 @@
                     }
                 }
             }
+
+            // ── Sustain verdict latch ────────────────────────────────────
+            // note_detect's hitGlowDuration (~0.5 s) and the legacy mark
+            // TTL (500 ms) both expire before a long chart sustain ends.
+            // For any sustained note, latch the verdict from EITHER source
+            // (provider _ndState OR legacy _ndHitMarks / _ndMissMarks) and
+            // re-inject it so hit/miss color persists for the full hold.
+            // Works with both the modern provider path and the legacy event
+            // path — vibrato and other long-sustain notes benefit equally.
+            if (hasSus) {
+                const _sk = Math.round(n.t * 1e4) * 10 + n.s;
+                // Resolve current verdict: provider takes priority, then
+                // fall back to scanning the legacy mark arrays so a hit or
+                // miss event that arrived this frame can seed the latch.
+                let _lv_cur = _ndState;
+                let _lv_good = _ndGood;
+                if (!_lv_cur) {
+                    for (let _mi = 0; _mi < _ndHitMarks.length; _mi++) {
+                        const _mm = _ndHitMarks[_mi];
+                        if (_mm.s === n.s && _mm.f === n.f && Math.abs(_mm.noteTime - n.t) < _ND_TIME_EPS) {
+                            _lv_cur = 'hit'; _lv_good = true; break;
+                        }
+                    }
+                    if (!_lv_cur) {
+                        for (let _mi = 0; _mi < _ndMissMarks.length; _mi++) {
+                            const _mm = _ndMissMarks[_mi];
+                            if (_mm.s === n.s && _mm.f === n.f && Math.abs(_mm.noteTime - n.t) < _ND_TIME_EPS) {
+                                _lv_cur = 'miss'; _lv_good = false; break;
+                            }
+                        }
+                    }
+                }
+                if (_lv_cur) {
+                    // Fresh verdict (provider or legacy mark) — save to latch.
+                    _susVerdictLatch.set(_sk, _lv_good ? 'hit' : 'miss');
+                    // If the verdict came from a legacy mark (provider was
+                    // silent — _ndState was null before the scan), propagate
+                    // it to _ndState/_ndGood/_ndCs now so the sustain trail
+                    // picks up the same colour this frame instead of waiting
+                    // until the mark expires and the latch re-injects it.
+                    if (!_ndState) {
+                        if (_lv_good) {
+                            _ndState = 'active'; _ndGood = true;
+                            _ndCs = 'active'; _ndCsIsObj = false;
+                        } else {
+                            _ndState = 'miss';
+                            _ndCs = 'miss'; _ndCsIsObj = false;
+                        }
+                    }
+                } else if (dt < 0 && now < susEnd) {
+                    // No current verdict — reuse latch if available.
+                    // dt < 0 guards against coloring notes that haven't
+                    // crossed the hit line yet (approaching notes must never
+                    // inherit a latch from a previous play-through).
+                    const _lv = _susVerdictLatch.get(_sk);
+                    if (_lv === 'hit') {
+                        _ndState = 'active'; _ndGood = true;
+                        _ndCs = 'active'; _ndCsIsObj = false;
+                    } else if (_lv === 'miss') {
+                        _ndState = 'miss';
+                        _ndCs = 'miss'; _ndCsIsObj = false;
+                    }
+                }
+                if (now >= susEnd) _susVerdictLatch.delete(_sk);
+            }
+
             const _showHit = (_ndState === 'miss') ? false
                 : (_ndState ? _ndGood
                 : (hit || (n.f > 0 && inGhostWin)));
@@ -8949,19 +9042,34 @@
                             || n.tr
                             || hasTechniqueVibrato
                         );
+                        // Outline material for the sustain trail border — uses the
+                        // same materials as the gem border so hit/miss colours are
+                        // perceptually identical across gem outline, lateral faces,
+                        // and sustain trail rim.
+                        const _susOlMat = _ndState === 'miss' ? mMissOutline
+                            : _ndGood ? (mHitBright[s] ?? mHitSusOutline)
+                            : mSusOutline;
                         const emitSusStrip = (xCenter, segLen, zCenter) => {
                             for (let i = 0; i < offsets.length; i++) {
                                 const xOff = xCenter + offsets[i];
+                                // Outline renders first (lower renderOrder), body on top.
+                                // On hit/miss the body uses an opaque material (mGlow/mMissDark,
+                                // opacity:1) that fully covers the outline center — only the
+                                // fringe that extends past the body edges shows the verdict color.
+                                // On neutral the body is semi-transparent (mSus, opacity:0.35)
+                                // which lets the neutral white outline bleed slightly — same
+                                // look as before the hit/miss feature was added.
                                 const trOut = pSusOutline.get();
-                                trOut.renderOrder = 12; // below chord frame (17/18)
+                                trOut.material = _susOlMat;
+                                trOut.renderOrder = 12; // outline first — below body
                                 trOut.position.set(xOff, y, zCenter);
                                 trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
                                 const tr = pSus.get();
-                                // slopsmith#254 — a sustain currently being
-                                // held correctly glows bright (mGlow), else
-                                // the usual dim sustain material.
-                                tr.material = _ndGood ? mGlow[s] : mSus[s];
-                                tr.renderOrder = 13; // below chord frame (17/18)
+                                // Any verdict (hit or miss): opaque string-colour body
+                                // covers the outline center completely. Neutral: original
+                                // semi-transparent look (mSus), no verdict border applied.
+                                tr.material = _ndState ? mGlow[s] : mSus[s];
+                                tr.renderOrder = 13; // body on top — covers outline center
                                 tr.position.set(xOff, y, zCenter);
                                 tr.scale.set(tw, th, segLen);
                             }
@@ -8973,23 +9081,25 @@
                         } else {
                             for (let si = 0; si < offsets.length; si++) {
                                 const strandX = x + offsets[si];
+                                // Outline first (12), body on top (13) — same
+                                // cover-the-center logic as the box-trail path.
                                 const olMesh = pSusRibbonOl.get();
-                                olMesh.renderOrder = 12; // below chord frame (17/18)
+                                olMesh.renderOrder = 12; // outline first — below body
                                 olMesh.scale.set(1, 1, 1);
                                 olMesh.rotation.set(0, 0, 0);
                                 olMesh.position.set(0, 0, 0);
-                                olMesh.material = mSusOutline;
+                                olMesh.material = _susOlMat;
                                 slideRibbonUpdatePositions(
                                     olMesh.geometry, strandX,
                                     tw + 0.4 * K, th + 0.4 * K,
                                     y, sliceDur, susStart, now, n, slideSt,
                                 );
                                 const body = pSusRibbon.get();
-                                body.renderOrder = 13; // below chord frame (17/18)
+                                body.renderOrder = 13; // body on top — covers outline center
                                 body.scale.set(1, 1, 1);
                                 body.rotation.set(0, 0, 0);
                                 body.position.set(0, 0, 0);
-                                body.material = _ndGood ? mGlow[s] : mSus[s];
+                                body.material = _ndState ? mGlow[s] : mSus[s];
                                 slideRibbonUpdatePositions(
                                     body.geometry, strandX, tw, th, y,
                                     sliceDur, susStart, now, n, slideSt,
@@ -9586,6 +9696,7 @@
             // via scene.traverse if no event ever fired (never attached
             // to a mesh), so dispose explicitly.
             mHitOutline?.dispose?.(); mMissOutline?.dispose?.(); mMissCore?.dispose?.();
+            mHitSusOutline?.dispose?.(); mMissSusOutline?.dispose?.();
             mHitEdge?.dispose?.(); mHitEdge = null; mMissEdge?.dispose?.(); mMissEdge = null;
             mEdgeTransparent?.dispose?.(); mEdgeTransparent = null;
             for (const m of mHitBright) m?.dispose?.(); mHitBright = []; mHitBrightArrays = [];
@@ -9628,7 +9739,7 @@
             if (ren) { ren.dispose(); ren = null; }
             scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
             ambLight = dirLight = null;
-            mStr = []; mGlow = []; mSus = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = mMissCore = null; stringLines = []; stringLineGlows = [];
+            mStr = []; mGlow = []; mSus = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = mMissCore = null; mHitSusOutline = mMissSusOutline = null; stringLines = []; stringLineGlows = [];
             for (const m of _inlayMats) m?.dispose?.(); _inlayMats = []; _inlayLabels = [];
             // mTapChevron: dispose explicitly — if no tap marker ever
             // spawned a pooled mesh, the scene.traverse() pass above never
@@ -9649,6 +9760,7 @@
             projMeshArr = null;
             _probe = null;
             _drawNextByString = null; _drawRecentByString = null;
+            _susVerdictLatch.clear();
             _drawChordTemplates = null;
             _laneTargetColor = null;
             _renderScale = 1;
