@@ -509,25 +509,12 @@
     /** Post-hit chord-frame rim tints driven by the note-state provider
      *  (slopsmith#254). Applied only to the teal frame during the linger
      *  fade (chDt <= 0) when a scorer is attached.
-     *  Derived from CHORD_BOX_TEAL_HEX:
-     *    hit  → teal lerped 65 % toward white (bright teal).
-     *    miss → teal at 25 % brightness (dark teal).
-     *  Legacy green/red kept as unused fallback constants. */
-    const CHORD_BOX_HIT_HEX  = 0x40e060;  // legacy (unused)
-    const CHORD_BOX_MISS_HEX = 0xe04040;  // legacy (unused)
-    const CHORD_BOX_HIT_BRIGHT_HEX = (() => {
-        const c = CHORD_BOX_TEAL_HEX;
-        const r = Math.min(255, Math.round(((c >> 16) & 255) + (255 - ((c >> 16) & 255)) * 0.65));
-        const g = Math.min(255, Math.round(((c >>  8) & 255) + (255 - ((c >>  8) & 255)) * 0.65));
-        const b = Math.min(255, Math.round(( c        & 255) + (255 - ( c        & 255)) * 0.65));
-        return (r << 16) | (g << 8) | b;
-    })();
-    const CHORD_BOX_MISS_DARK_HEX = (() => {
-        const c = CHORD_BOX_TEAL_HEX;
-        return ((Math.round(((c >> 16) & 255) * 0.25) << 16) |
-                (Math.round(((c >>  8) & 255) * 0.25) <<  8) |
-                 Math.round(( c        & 255) * 0.25));
-    })();
+     *  Matches the gem hit/miss colours so chord frame and note body
+     *  give a consistent signal:
+     *    hit  → neon spring-green 0x22ff88 (same as mHitOutline / mHitBright).
+     *    miss → hot magenta-red 0xff0066 (same as mMissOutline / mMissEdge). */
+    const CHORD_BOX_HIT_BRIGHT_HEX  = 0x22ff88;
+    const CHORD_BOX_MISS_DARK_HEX   = 0xff0066;
 
     /** Fret-number label tints — gold on approaching/active notes, muted blue when idle. */
     const FRET_LABEL_GOLD_HEX = '#D8A636';
@@ -1848,6 +1835,7 @@
         // instances so outline and face fill always match exactly.
         let mHitBright = [], mHitBrightArrays = [];
         let mMissDark  = [], mMissDarkArrays  = [];
+        let mMissEdgeArrays = null; // [mMissEdge×4, mEdgeTransparent×2] — magenta-red face fill for miss
         let mEdgeTransparent = null;
         let pSusOutline = null, pNoteEdge = null;
         let projMeshArr = null;
@@ -3899,6 +3887,7 @@
             // Transparent placeholder for front (+Z, group 4) and back (-Z, group 5).
             // BoxGeometry group order: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z(front), 5=-Z(back)
             mEdgeTransparent = new T.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+            mMissEdgeArrays = [mMissEdge, mMissEdge, mMissEdge, mMissEdge, mEdgeTransparent, mEdgeTransparent];
 
             // Hit: fixed neon spring-green on every string — 0x22ff88 is cyan-shifted
             // enough to be readable even on the green string (0x30d040). The outline
@@ -8774,7 +8763,7 @@
                     for (let i = 0; i < _ndMissMarks.length; i++) {
                         const m = _ndMissMarks[i];
                         if (m.s === n.s && m.f === n.f && Math.abs(m.noteTime - n.t) < _ND_TIME_EPS) {
-                            _ndOutline = mMissDark[s] ?? mMissOutline; _ndFaceMat = mMissDarkArrays[s] ?? null; _ndMatchedMark = m; break;
+                            _ndOutline = mMissOutline; _ndFaceMat = mMissEdgeArrays; _ndMatchedMark = m; break;
                         }
                     }
                 }
@@ -8792,12 +8781,12 @@
                 const rimZ = n.ac ? ACCENT_RIM_Z_SCALE_MUL : 1;
 
                 // slopsmith#254 — apply outline + lateral face-fill overrides from provider verdict.
-                // hit/active → bright string outline (mGlow[s]) + string-colour lateral faces;
-                // miss → dark outline + dark lateral faces; front/back faces stay transparent.
+                // hit/active → green outline (mHitBright[s]) + green lateral faces;
+                // miss → magenta-red outline (mMissOutline) + dark lateral faces; front/back stay transparent.
                 if (_ndCs) {
                     if (_ndState === 'miss') {
-                        _ndOutline = mMissDark[s] ?? mMissOutline;
-                        _ndFaceMat = mMissDarkArrays[s] ?? null;
+                        _ndOutline = mMissOutline;
+                        _ndFaceMat = mMissEdgeArrays;
                     } else if (_ndGood) {
                         _ndOutline = mHitBright[s] ?? mGlow[s];
                         _ndFaceMat = mHitBrightArrays[s] ?? null;
