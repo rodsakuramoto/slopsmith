@@ -1468,6 +1468,7 @@ def convert_drum_track_to_drumtab(
     arrangement_name: str = "Drums",
     *,
     expand_repeats: bool = True,
+    out_unmapped: dict[int, dict] | None = None,
 ) -> dict:
     """Convert a GP drum/percussion track to a `drum_tab.json` dict.
 
@@ -1484,6 +1485,10 @@ def convert_drum_track_to_drumtab(
     number (42 closed / 46 open / 44 pedal) since GP stores those on distinct
     drum strings. Unknown percussion sounds (cowbell, tambourine etc.) are
     skipped — round-tripping them would require teaching `lib/drums.py` first.
+    Callers can pass an empty dict as ``out_unmapped`` to receive a per-MIDI
+    record of every skipped note (``{midi: {"count": int, "times": [...]}}``,
+    times capped at 100 samples per note) so they can surface a warning or
+    offer a manual mapping UI.
 
     Honours GP repeat brackets and D.S./D.C./Coda/Fine jumps when
     ``expand_repeats`` is true — same `_build_playback_schedule` machinery
@@ -1528,7 +1533,22 @@ def convert_drum_track_to_drumtab(
 
                     piece = drums_mod.midi_to_piece(midi_note)
                     if piece is None:
-                        continue  # Unmapped percussion sound; skip silently.
+                        # Unmapped percussion sound. Record it for the
+                        # optional out-parameter so the caller can surface
+                        # a "these notes were dropped" warning to the user
+                        # (with the option to map them by hand). The
+                        # default path is still to skip silently for
+                        # backward compatibility with callers that don't
+                        # opt in.
+                        if out_unmapped is not None:
+                            # NB: do NOT shadow the outer `entry` loop
+                            # variable from `for entry in schedule:`.
+                            unmapped_rec = out_unmapped.setdefault(
+                                int(midi_note), {"count": 0, "times": []})
+                            unmapped_rec["count"] += 1
+                            if len(unmapped_rec["times"]) < 100:
+                                unmapped_rec["times"].append(round(t, 3))
+                        continue
 
                     hit: dict = {"t": round(t, 3), "p": piece}
 
@@ -1572,6 +1592,13 @@ def convert_drum_track_to_drumtab(
                         pieces_seen[piece] = piece.replace("_", " ").title()
 
     hits.sort(key=lambda h: h["t"])
+
+    # Times for unmapped notes were collected in beat-iteration order;
+    # multi-voice measures can produce out-of-order beats, so sort each
+    # entry's `times` list chronologically before returning to the caller.
+    if out_unmapped is not None:
+        for _rec in out_unmapped.values():
+            _rec["times"].sort()
 
     return {
         "version": drums_mod.SCHEMA_VERSION,

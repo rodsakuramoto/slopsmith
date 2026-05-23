@@ -183,6 +183,34 @@ def test_unmapped_drum_note_skipped(tmp_path):
     assert hits[0]["p"] == "kick"
 
 
+def test_unmapped_drum_note_reported_via_out_unmapped(tmp_path):
+    """Opting in via out_unmapped records the dropped MIDI notes (count +
+    times) so a caller can surface a warning / mapping UI."""
+    mid = mido.MidiFile(type=1, ticks_per_beat=480)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("set_tempo", tempo=500000, time=0))
+    track.append(mido.Message("note_on",  channel=9, note=56, velocity=100, time=0))    # cowbell — drop
+    track.append(mido.Message("note_off", channel=9, note=56, velocity=0,   time=240))
+    track.append(mido.Message("note_on",  channel=9, note=36, velocity=100, time=0))    # kick — keep
+    track.append(mido.Message("note_off", channel=9, note=36, velocity=0,   time=240))
+    track.append(mido.Message("note_on",  channel=9, note=54, velocity=100, time=0))    # tambourine — drop
+    track.append(mido.Message("note_off", channel=9, note=54, velocity=0,   time=240))
+    track.append(mido.Message("note_on",  channel=9, note=56, velocity=100, time=0))    # cowbell again — drop
+    track.append(mido.Message("note_off", channel=9, note=56, velocity=0,   time=240))
+
+    unmapped: dict[int, dict] = {}
+    hits = convert_drum_track_from_midi(
+        _save(mid, tmp_path), 0, out_unmapped=unmapped)["hits"]
+    assert [h["p"] for h in hits] == ["kick"]
+    assert set(unmapped.keys()) == {56, 54}
+    assert unmapped[56]["count"] == 2
+    assert unmapped[54]["count"] == 1
+    # Each unmapped MIDI carries the times at which it fired (rounded 3 dp).
+    assert all(isinstance(t, float) for t in unmapped[56]["times"])
+    assert len(unmapped[56]["times"]) == 2
+
+
 def test_non_channel9_events_ignored(tmp_path):
     """A note_on on channel 0 with MIDI 36 is NOT a kick — the converter
     must scope to channel 9."""

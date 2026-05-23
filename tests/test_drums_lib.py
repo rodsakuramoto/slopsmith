@@ -85,6 +85,20 @@ def test_phaseshift8_preserves_legacy_lane_order():
     assert labels == ["HH", "Sn", "T1", "T2", "T3", "Cr", "Ri", "Ki"]
 
 
+def test_every_piece_is_routed_by_every_preset():
+    """Adding a new piece-id to PIECES without routing it in every preset
+    would let hits for that piece vanish from the highway under that
+    preset. This guards against that class of regression."""
+    all_pieces = set(drums.PIECES.keys())
+    for name, preset in drums.PRESETS.items():
+        routed = {pid for lane in preset for pid in lane["pieces"]}
+        missing = all_pieces - routed
+        assert not missing, (
+            f"preset {name!r} doesn't route: {sorted(missing)}. "
+            f"Add them to an existing lane (grouped presets) or to their "
+            f"own lane (e-kit presets).")
+
+
 # ── Wire helpers ─────────────────────────────────────────────────────────────
 
 def test_validate_drum_tab_accepts_minimal_payload():

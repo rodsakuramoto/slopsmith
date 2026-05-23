@@ -464,6 +464,8 @@ def convert_drum_track_from_midi(
     track_index: int,
     audio_offset: float = 0.0,
     name: str = "Drums",
+    *,
+    out_unmapped: dict[int, dict] | None = None,
 ) -> dict:
     """Convert a MIDI drum track to a `drum_tab.json` dict.
 
@@ -481,6 +483,13 @@ def convert_drum_track_from_midi(
       order differs from chronological order.
     - **Choke**: a cymbal note-off arriving within 120 ms of its note-on
       sets `k` to the actual on→off duration.
+
+    Callers can pass an empty dict as ``out_unmapped`` to receive a
+    per-MIDI record of every channel-9 note_on that didn't resolve to a
+    piece-id (``{midi: {"count": int, "times": [float, ...]}}``, times
+    capped at 100 samples per note). The default path skips this
+    capture entirely so MIDIs heavy with cowbell/tambourine/etc. take
+    no extra work.
     """
     offset = float(audio_offset)
     if not math.isfinite(offset):
@@ -510,10 +519,21 @@ def convert_drum_track_from_midi(
             midi_note = int(msg.note)
             piece = drums_mod.midi_to_piece(midi_note)
             if piece is None:
+                # Default path: drop silently. Only pay the tick->seconds
+                # cost on the opt-in capture path so MIDIs full of unmapped
+                # percussion don't take a perf hit when the caller didn't
+                # ask for unmapped reporting.
+                if out_unmapped is None:
+                    continue
+                t = tick_to_seconds(abs_tick) + offset
+                entry = out_unmapped.setdefault(
+                    midi_note, {"count": 0, "times": []})
+                entry["count"] += 1
+                if len(entry["times"]) < 100:
+                    entry["times"].append(round(t, 3))
                 continue
+            # Mapped note: compute t once for the raw entry.
             t = tick_to_seconds(abs_tick) + offset
-            # Keep full-precision seconds for flam-window comparisons; round
-            # only when serialising to the final wire hit below.
             raw.append({
                 "t": t,
                 "p": piece,

@@ -50,12 +50,20 @@ PIECES: dict[str, dict] = {
     "hh_closed":     {"midi": [42],            "category": "cymbal", "shape": "circle_filled",  "color": "#22d3ee"},
     "hh_open":       {"midi": [46],            "category": "cymbal", "shape": "circle_ring",    "color": "#06b6d4"},
     "hh_pedal":      {"midi": [44],            "category": "cymbal", "shape": "circle_small_x", "color": "#0891b2"},
+    # Stack — two cymbals stacked for a trashy/choked effect. GM has no
+    # standard for it; we reuse 30 (in GM's extended-percussion range,
+    # unused by real drum-kit MIDIs).
+    "stack":         {"midi": [30],            "category": "cymbal", "shape": "circle_jagged",  "color": "#94a3b8"},
     "crash_l":       {"midi": [49],            "category": "cymbal", "shape": "circle",         "color": "#84cc16"},
     "crash_r":       {"midi": [57],            "category": "cymbal", "shape": "circle",         "color": "#65a30d"},
     "splash":        {"midi": [55],            "category": "cymbal", "shape": "circle_small",   "color": "#a3e635"},
     "china":         {"midi": [52],            "category": "cymbal", "shape": "circle_jagged",  "color": "#4d7c0f"},
     "ride":          {"midi": [51, 59],        "category": "cymbal", "shape": "circle",         "color": "#3b82f6"},
     "ride_bell":     {"midi": [53],            "category": "cymbal", "shape": "circle_dot",     "color": "#1d4ed8"},
+    # Bell cymbal — a small mounted bell, distinct from the ride's bell.
+    # No GM standard; we reuse 80 ("Mute Triangle"), unused in real
+    # drum-kit MIDIs.
+    "bell":          {"midi": [80],            "category": "cymbal", "shape": "circle_dot",     "color": "#fde047"},
 }
 
 
@@ -111,27 +119,27 @@ def piece_category(piece: str) -> str:
 # on top of these.
 
 PRESET_RB4 = [
-    {"pieces": ["kick"],                                "label": "Ki"},
-    {"pieces": ["snare", "snare_xstick"],               "label": "Sn"},
-    {"pieces": ["hh_closed", "hh_open", "hh_pedal"],    "label": "HH"},
-    {"pieces": ["tom_hi", "tom_mid"],                   "label": "T"},
-    {"pieces": ["tom_low", "tom_floor"],                "label": "FT"},
-    {"pieces": ["crash_l", "crash_r", "splash", "china"], "label": "Cr"},
-    {"pieces": ["ride", "ride_bell"],                   "label": "Ri"},
+    {"pieces": ["kick"],                                        "label": "Ki"},
+    {"pieces": ["snare", "snare_xstick"],                       "label": "Sn"},
+    {"pieces": ["hh_closed", "hh_open", "hh_pedal"],            "label": "HH"},
+    {"pieces": ["tom_hi", "tom_mid"],                           "label": "T"},
+    {"pieces": ["tom_low", "tom_floor"],                        "label": "FT"},
+    {"pieces": ["crash_l", "crash_r", "splash", "china", "stack"], "label": "Cr"},
+    {"pieces": ["ride", "ride_bell", "bell"],                   "label": "Ri"},
 ]
 
 # 8-lane layout matching the legacy drums plugin v3 (HH / Sn / T1 / T2 / T3 /
 # Cr / Ri / Ki) so existing sloppaks keep their familiar lane order when the
 # rewrite ships.
 PRESET_PHASESHIFT8 = [
-    {"pieces": ["hh_closed", "hh_open", "hh_pedal"],    "label": "HH"},
-    {"pieces": ["snare", "snare_xstick"],               "label": "Sn"},
-    {"pieces": ["tom_hi"],                              "label": "T1"},
-    {"pieces": ["tom_mid"],                             "label": "T2"},
-    {"pieces": ["tom_low", "tom_floor"],                "label": "T3"},
-    {"pieces": ["crash_l", "crash_r", "splash", "china"], "label": "Cr"},
-    {"pieces": ["ride", "ride_bell"],                   "label": "Ri"},
-    {"pieces": ["kick"],                                "label": "Ki"},
+    {"pieces": ["hh_closed", "hh_open", "hh_pedal"],            "label": "HH"},
+    {"pieces": ["snare", "snare_xstick"],                       "label": "Sn"},
+    {"pieces": ["tom_hi"],                                      "label": "T1"},
+    {"pieces": ["tom_mid"],                                     "label": "T2"},
+    {"pieces": ["tom_low", "tom_floor"],                        "label": "T3"},
+    {"pieces": ["crash_l", "crash_r", "splash", "china", "stack"], "label": "Cr"},
+    {"pieces": ["ride", "ride_bell", "bell"],                   "label": "Ri"},
+    {"pieces": ["kick"],                                        "label": "Ki"},
 ]
 
 # One lane per piece-id — for users with a full e-kit who want every piece on
@@ -146,11 +154,13 @@ PRESET_EKIT_FULL = [
     {"pieces": ["tom_mid"],      "label": "T2"},
     {"pieces": ["tom_low"],      "label": "T3"},
     {"pieces": ["tom_floor"],    "label": "FT"},
+    {"pieces": ["stack"],        "label": "Stk"},
     {"pieces": ["crash_l"],      "label": "Cr-L"},
     {"pieces": ["splash"],       "label": "Sp"},
     {"pieces": ["china"],        "label": "Ch"},
     {"pieces": ["ride"],         "label": "Ri"},
     {"pieces": ["ride_bell"],    "label": "Ri-B"},
+    {"pieces": ["bell"],         "label": "Bl"},
     {"pieces": ["crash_r"],      "label": "Cr-R"},
     {"pieces": ["kick"],         "label": "Ki"},
 ]

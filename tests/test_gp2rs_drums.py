@@ -221,6 +221,34 @@ def test_unmapped_percussion_silently_skipped(monkeypatch):
     assert hits[0]["p"] == "kick"
 
 
+def test_unmapped_percussion_reported_via_out_unmapped(monkeypatch):
+    """Opting in via out_unmapped records the dropped MIDI notes (count +
+    times) so a caller can surface a warning / mapping UI."""
+    _setup(monkeypatch)
+    track = _fake_track(
+        string_midis=[56, 36, 54],
+        beats=[
+            (0.0, [_fake_note(string_idx=1)]),   # cowbell — drop
+            (1.0, [_fake_note(string_idx=2)]),   # kick — keep
+            (1.5, [_fake_note(string_idx=3)]),   # tambourine — drop
+            (2.0, [_fake_note(string_idx=1)]),   # cowbell again — drop
+        ],
+    )
+    song = SimpleNamespace(tracks=[track])
+    unmapped: dict[int, dict] = {}
+    hits = gp2rs.convert_drum_track_to_drumtab(
+        song, 0, out_unmapped=unmapped)["hits"]
+    # Only the kick survives.
+    assert [h["p"] for h in hits] == ["kick"]
+    # Both unmapped MIDIs are reported with correct counts.
+    assert set(unmapped.keys()) == {56, 54}
+    assert unmapped[56]["count"] == 2
+    assert unmapped[54]["count"] == 1
+    # Times are captured (rounded to 3 dp).
+    assert unmapped[56]["times"] == [0.0, 2.0]
+    assert unmapped[54]["times"] == [1.5]
+
+
 def test_zero_velocity_omitted_from_wire(monkeypatch):
     """Velocity outside 1-127 must be dropped from the hit so the wire format
     stays clean. A corrupt GP file shouldn't propagate `v: 0` downstream."""
