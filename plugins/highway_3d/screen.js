@@ -2044,17 +2044,6 @@
         let _ndOnHit = null, _ndOnMiss = null;
         let _ndOnBusHit = null, _ndOnBusMiss = null;
         let _ndLabels = [];
-        // slopsmith#254 — per-frame queue of confirmed-hit/active notes
-        // ({x, y, z, s, alpha, color} in world space; alpha is the
-        // provider's clamped 0..1 fade — drawNotedetectSizzle scales
-        // opacity/density by it; color is an optional override for the
-        // string-tinted half of the dot/arc colour mix). drawNote() fills
-        // it; after ren.render(), drawNotedetectSizzle() projects each
-        // through the camera and twinkles a few tiny dots on the note.
-        // Rebuilt every frame, so the sparkle follows the note and
-        // persists exactly as long as the provider keeps reporting
-        // hit/active for it.
-        let _ndSizzle = [];
         // Per-chord-occurrence verdict latch for the chord-frame rim
         // tint. Once a chord is observed all-hit/active during its linger
         // fade we latch 'green' here so subsequent frames can't undo it
@@ -6055,7 +6044,6 @@
             // Clear per-frame queues in-place (avoid reallocating the array object).
             _ndLabels.length = 0;
             let hwyLaneArpOuterDividers = false;
-            _ndSizzle.length = 0;
 
             // Prune expired notedetect marks once per frame instead of
             // once per drawNote call (issue #9 perf nit). drawNote then
@@ -8835,7 +8823,13 @@
             let _lingerDeadline;
             if (hasSus) {
                 const extraLinger = Math.max(0, linger - (n.sus || 0));
-                _lingerDeadline = Math.min(susEnd + extraLinger, _nextAnyT);
+                // _nextAnyT cap only applies to the post-sustain linger tail.
+                // For long sustains (extraLinger = 0) the deadline is exactly
+                // susEnd — notes on other strings must not cut the held sustain
+                // short, which would hide the gem and trail mid-play.
+                _lingerDeadline = extraLinger > 0
+                    ? Math.min(susEnd + extraLinger, _nextAnyT)
+                    : susEnd;
             } else {
                 const _gap = _nextAnyT - n.t;
                 _lingerDeadline = n.t + (_gap < linger ? _gap : linger);
@@ -8868,7 +8862,7 @@
 
             const sustained = dt < 0 && hasSus && now <= susEnd;
             const hitDist = Math.abs(dt);
-            const hit = hitDist < 0.15 || sustained;
+            const hit = hitDist < 0.15 || sustained || (_ndHasProvider && dt < 0);
             const hitFade = sustained ? 0.7 : (hitDist < 0.15 ? 1 - hitDist / 0.15 : 0);
             const hasTechniqueVibrato = noteHasVibrato(n);
             const techniqueYNow = sustained ? techniqueYOffsetWorld(n, now) : 0;
@@ -9652,96 +9646,6 @@
             ctx.restore();
         }
 
-        // slopsmith#254 — the "sparkle/sizzle": a few tiny bright dots that
-        // twinkle on each confirmed hit/active note, re-randomised every
-        // frame, contained to roughly the note's footprint (no halo / no
-        // shockwave / no long sparks). Drawn on the 2D overlay AFTER
-        // ren.render(), positioned by projecting the note's world point
-        // through the now-up-to-date camera so it sits exactly on the
-        // note and follows it. _ndSizzle is filled by drawNote(); rebuilt
-        // every frame, so the sparkle lives for exactly as long as the
-        // provider keeps reporting hit/active for that note (and stops
-        // the instant it goes away or a held sustain drops off-pitch).
-        function drawNotedetectSizzle(ctx, W, H) {
-            if (!_ndSizzle.length || !cam || !_probe) return;
-            ctx.save();
-            ctx.globalCompositeOperation = 'lighter';
-            ctx.lineCap = 'round';
-            for (const it of _ndSizzle) {
-                _probe.set(it.x, it.y, it.z);
-                _probe.project(cam);
-                if (_probe.z < -1 || _probe.z > 1) continue;
-                const cx = (_probe.x * 0.5 + 0.5) * W;
-                const cy = (-_probe.y * 0.5 + 0.5) * H;
-                // On-screen note size: project a point half a note-width to
-                // the side along the fretboard X axis (reliably non-parallel
-                // to the view direction, unlike a world-Y offset on a note
-                // that's rotated flat at the strike line), and take the 2D
-                // pixel distance. Floored so it always draws something.
-                _probe.set(it.x + NW * 0.5, it.y, it.z);
-                _probe.project(cam);
-                const ex = (_probe.x * 0.5 + 0.5) * W, ey = (-_probe.y * 0.5 + 0.5) * H;
-                const r = Math.max(8, Math.hypot(ex - cx, ey - cy));
-                if (r > Math.min(W, H) * 0.4) continue;                 // absurd projection — skip
-                // Provider-driven fade: scale opacity AND on-probability by
-                // the entry's alpha so a struck-note glow visibly fades out
-                // (more dots/arcs drop off as alpha decays), and prefer the
-                // provider's custom color (when given) for the string-color
-                // half of the mix. alpha defaults 1 (full intensity).
-                const itA = (typeof it.alpha === 'number') ? it.alpha : 1;
-                if (itA <= 0) continue;
-                const c = activePalette[it.s];
-                const colHex = (typeof it.color === 'string')
-                    ? it.color
-                    : ((typeof c === 'number')
-                        ? '#' + ('000000' + (c >>> 0).toString(16)).slice(-6)
-                        : '#ffffff');
-                const rx = r * 1.08, ry = r * 0.66;                     // note is a flat wide rect at the line
-                const skipBoost = 0.6 * (1 - itA);                      // extra "off" probability as alpha fades
-
-                // Crackling edge — short bright arc segments flicking around
-                // the note's perimeter, re-randomised each frame so the
-                // outline "sizzles". Soft glow on each so it pops; still
-                // contained right at the note's edge (≲1.4×).
-                const arcs = 8;
-                for (let i = 0; i < arcs; i++) {
-                    if (Math.random() < 0.2 + skipBoost) continue;
-                    const a0 = Math.random() * Math.PI * 2;
-                    const a1 = a0 + (0.3 + Math.random() * 0.85);
-                    const rr = 0.92 + Math.random() * 0.46;             // ≈0.92–1.38× the note edge
-                    const white = Math.random() < 0.5;
-                    ctx.globalAlpha = (0.55 + Math.random() * 0.45) * itA;
-                    ctx.strokeStyle = white ? '#ffffff' : colHex;
-                    ctx.shadowColor = white ? '#ffffff' : colHex;
-                    ctx.shadowBlur = Math.max(3, r * 0.22) * itA;
-                    ctx.lineWidth = Math.max(2, r * 0.2);
-                    ctx.beginPath();
-                    ctx.ellipse(cx, cy, rx * rr, ry * rr, 0, a0, a1);
-                    ctx.stroke();
-                }
-
-                // Sparkle — bright dots twinkling on/around the note.
-                const N = 16;
-                for (let i = 0; i < N; i++) {
-                    if (Math.random() < 0.28 + skipBoost) continue;     // twinkle — more off as alpha fades
-                    const ang = Math.random() * Math.PI * 2;
-                    const d = 0.12 + Math.random() * 1.05;              // 0.12–1.17× the edge
-                    const dx = cx + Math.cos(ang) * rx * d;
-                    const dy = cy + Math.sin(ang) * ry * d;
-                    const white = Math.random() < 0.5;
-                    ctx.globalAlpha = (0.6 + Math.random() * 0.4) * itA;
-                    ctx.fillStyle = white ? '#ffffff' : colHex;
-                    ctx.shadowColor = white ? '#ffffff' : colHex;
-                    ctx.shadowBlur = Math.max(2, r * 0.16) * itA;
-                    ctx.beginPath();
-                    ctx.arc(dx, dy, 1.6 + Math.random() * Math.max(3.5, r * 0.22), 0, Math.PI * 2);
-                    ctx.fill();
-                }
-                ctx.shadowBlur = 0;
-            }
-            ctx.restore();
-        }
-
         /* ── Camera smooth lerp ──────────────────────────────────────────── */
         function camUpdate(bundle) {
             const bpm = computeBPM(bundle.beats, bundle.currentTime);
@@ -9825,7 +9729,6 @@
             _ndHitMarks = [];
             _ndMissMarks = [];
             _ndLabels = [];
-            _ndSizzle = [];
             _chordVerdicts = new Map();
             _bgUnmountStyle();
             bgGroup = null; _bgLastT = 0;
