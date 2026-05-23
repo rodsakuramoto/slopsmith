@@ -2192,7 +2192,7 @@
         let gPMXLines = null, pMuteXLines = null; // PM X lines combined geometry (8 segs as quads)
         let gFHXLines = null, pFHXLines = null;   // FH X lines combined geometry
         let pNoteFretLabel, pConnectorLine, pDropLine, pTapChevron, pAccentHalo;
-        let pChordAccentHalo = null, gChordAccentHalo = null; // per-instance cloned mats so opacity differs per shell
+        let pHaloBar = null, gHaloBar = null; // gradient halo bar geometry — replaces per-shell pChordAccentHalo
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
         /** Horizontal gradient for chord box interior fill. */
@@ -3974,18 +3974,53 @@
             mAccentHaloNear = mkAccentHaloMats(ACCENT_HALO_OP_NEAR);
             mAccentHaloMid = mkAccentHaloMats(ACCENT_HALO_OP_MID);
             mAccentHaloFar = mkAccentHaloMats(ACCENT_HALO_OP_FAR);
-            // Chord/arpeggio frame accent bloom — per-instance cloned materials
-            // so near/far shells can have independent opacity values.
-            // Shared unit-box geometry — pooled halo meshes are scaled/rotated
-            // per draw, so one geometry serves the whole pool (same pattern as
-            // gNote / gSusRailBloom). Materials stay per-instance below so each
-            // accent shell can carry its own opacity.
-            gChordAccentHalo = new T.BoxGeometry(1, 1, 1);
-            pChordAccentHalo = pool(noteG, () => new T.Mesh(
-                gChordAccentHalo,
+            // Chord/arpeggio frame accent bloom — single gradient bar geometry.
+            // The 4 bloom shells (expand=1.00/1.10/1.25/1.45, op=0.90/0.65/0.38/0.18)
+            // are baked into vertex colours as their additive sum at each Y level,
+            // so one mesh per bar replaces 4 per-shell meshes (16→4 draw calls/chord).
+            // Normalised Y = ±(expand / EXPAND_MAX); EXPAND_MAX = 1.45.
+            // Values > 1.0 in the Float32Array buffer are intentional: WebGL passes
+            // them to the shader unchanged, and additive blending clips naturally.
+            if (!gHaloBar) {
+                // Y levels (normalised): ±(shell_expand / 1.45)
+                //   ±0.690 = shell 1 edge  ±0.759 = shell 2  ±0.862 = shell 3  ±1.0 = shell 4
+                // Brightness = additive sum of all shells covering that band:
+                //   |y| < 0.690 → all 4: 0.90+0.65+0.38+0.18 = 2.11
+                //   |y| < 0.759 → 3 shells: 0.65+0.38+0.18 = 1.21
+                //   |y| < 0.862 → 2 shells: 0.38+0.18 = 0.56
+                //   |y| ≤ 1.000 → shell 4 only: 0.18
+                // prettier-ignore
+                const YS = [-1.000, -0.862, -0.759, -0.690,  0.690, 0.759, 0.862, 1.000];
+                // prettier-ignore
+                const BS = [ 0.18,   0.56,   1.21,   2.11,   2.11,  1.21,  0.56,  0.18 ];
+                const N = YS.length;
+                const pos = new Float32Array(N * 2 * 3);
+                const col = new Float32Array(N * 2 * 3);
+                const idx = new Uint16Array((N - 1) * 6);
+                for (let i = 0; i < N; i++) {
+                    const y = YS[i], b = BS[i];
+                    const li = (i * 2 + 0) * 3, ri = (i * 2 + 1) * 3;
+                    pos[li]=-1; pos[li+1]=y; pos[li+2]=0;
+                    col[li]=b;  col[li+1]=b; col[li+2]=b;
+                    pos[ri]=+1; pos[ri+1]=y; pos[ri+2]=0;
+                    col[ri]=b;  col[ri+1]=b; col[ri+2]=b;
+                }
+                for (let i = 0; i < N - 1; i++) {
+                    const ii = i * 6, v = i * 2;
+                    idx[ii+0]=v+0; idx[ii+1]=v+1; idx[ii+2]=v+3;
+                    idx[ii+3]=v+0; idx[ii+4]=v+3; idx[ii+5]=v+2;
+                }
+                gHaloBar = new T.BufferGeometry();
+                gHaloBar.setAttribute('position', new T.BufferAttribute(pos, 3));
+                gHaloBar.setAttribute('color',    new T.BufferAttribute(col, 3));
+                gHaloBar.setIndex(new T.BufferAttribute(idx, 1));
+            }
+            pHaloBar = pool(noteG, () => new T.Mesh(
+                gHaloBar,
                 new T.MeshBasicMaterial({
-                    transparent: true, opacity: 0.8, depthWrite: false,
-                    blending: T.AdditiveBlending, side: T.DoubleSide, fog: true,
+                    vertexColors: true,
+                    transparent: true, opacity: 1.0, depthWrite: false,
+                    blending: T.AdditiveBlending, side: T.DoubleSide, fog: false,
                 }),
             ));
             // Notedetect feedback (issue #9): neon spring-green / magenta-red outline
@@ -6244,7 +6279,7 @@
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
             if (pGhostFretLbl) pGhostFretLbl.reset();
-            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pArpBracket.reset(); pChordAccentHalo.reset(); pPMXFill.reset(); pFHXFill.reset(); pMuteXLines.reset(); pFHXLines.reset();
+            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pArpBracket.reset(); pHaloBar.reset(); pPMXFill.reset(); pFHXFill.reset(); pMuteXLines.reset(); pFHXLines.reset();
             pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
             pFretColMarker.reset(); pSusRail.reset(); pSusRailBloom.reset(); pTechPlane.reset();
             // Clear per-frame queues in-place (avoid reallocating the array object).
@@ -7906,33 +7941,31 @@
                         // perpendicular axis so bloom never leaves the frame boundary:
                         //   horizontal bars (top/bottom) → expand Y only
                         //   vertical bars (left/right)   → expand X only
-                        if (chordAccent && pChordAccentHalo) {
+                        if (chordAccent && pHaloBar) {
+                            // Gradient halo: 1 mesh per bar (4 draw calls) instead of
+                            // 4 shells × 4 bars = 16. The gHaloBar geometry (built once)
+                            // bakes the additive shell sum into vertex colours. Scale Y by
+                            // (ft * EXPAND_MAX * 0.5) for horizontal bars; rotate ±90° and
+                            // scale Y by (ftSide * EXPAND_MAX * 0.5) for vertical bars.
                             const haloHex = isArpeggioFrame ? ARPEGGIO_RIM_BLUE_HEX : CHORD_BOX_TEAL_HEX;
-                            const bloomShells = [
-                                [1.00, 0.90],
-                                [1.10, 0.65],
-                                [1.25, 0.38],
-                                [1.45, 0.18],
-                            ];
-                            // ex, ey: expand multiplier per axis
-                            const drawHalo = (px, py, sx, sy, ex, ey, op) => {
-                                const b = pChordAccentHalo.get();
+                            const EXPAND_MAX = 1.45;
+                            const dynamicOp = fade * chordTailMul;
+                            const drawHaloBar = (px, py, scaleX, scaleY, rotZ) => {
+                                const b = pHaloBar.get();
                                 b.material.color.setHex(haloHex);
-                                b.material.opacity = fade * op * chordTailMul;
+                                b.material.opacity = dynamicOp;
                                 b.renderOrder = 19;
                                 b.position.set(px, py, z - 0.001 * K);
-                                b.scale.set(sx * ex, sy * ey, thickZ * 2.0);
-                                b.rotation.set(0, 0, 0);
+                                b.scale.set(scaleX, scaleY * EXPAND_MAX * 0.5, thickZ * 2.0);
+                                b.rotation.set(0, 0, rotZ);
                             };
-                            for (const [expand, op] of bloomShells) {
-                                // horizontal bars — expand Y only
-                                drawHalo(cx, yBot + ft * 0.5,                         width,  ft,    1.0, expand, op);
-                                if (withTopFrame)
-                                drawHalo(cx, yTop - ft * 0.5,                         width,  ft,    1.0, expand, op);
-                                // vertical bars — expand X only
-                                drawHalo(cx - width * 0.5 + ftSide * 0.5, sideCy, ftSide, sideH, expand, 1.0, op);
-                                drawHalo(cx + width * 0.5 - ftSide * 0.5, sideCy, ftSide, sideH, expand, 1.0, op);
-                            }
+                            // horizontal bars — gradient expands in Y (no rotation)
+                            drawHaloBar(cx, yBot + ft * 0.5,                          width  * 0.5, ft,     0);
+                            if (withTopFrame)
+                            drawHaloBar(cx, yTop - ft * 0.5,                          width  * 0.5, ft,     0);
+                            // vertical bars — gradient expands in X (rotate 90° so Y→X)
+                            drawHaloBar(cx - width * 0.5 + ftSide * 0.5, sideCy,  sideH  * 0.5, ftSide, Math.PI * 0.5);
+                            drawHaloBar(cx + width * 0.5 - ftSide * 0.5, sideCy,  sideH  * 0.5, ftSide, Math.PI * 0.5);
                         }
 
                         const chordName = chordTemplateLabel(bundle.chordTemplates?.[ch.id]);
@@ -9951,7 +9984,7 @@
             gSusRailBloom?.dispose?.(); mSusRailBloomBase?.dispose?.(); _bloomGaussTex?.dispose?.();
             gSusRailBloom = null; mSusRailBloomBase = null; _bloomGaussTex = null; pSusRailBloom = null;
             gTechPlane?.dispose?.(); gTechPlane = null; pTechPlane = null;
-            gChordAccentHalo?.dispose?.(); gChordAccentHalo = null;
+            gHaloBar?.dispose?.(); gHaloBar = null;
             for (const m of mStr) m?.dispose?.();
             for (const m of mGlow) m?.dispose?.();
             for (const m of mSus) m?.dispose?.();
@@ -10036,7 +10069,7 @@
             _renderScale = 1;
             mBeatM = mBeatQ = null;
             pNote = pNoteEdge = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
-            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pArpBracket = pNoteFretLabel = pConnectorLine = pDropLine = pTapChevron = pAccentHalo = pChordAccentHalo = pPMXFill = pFHXFill = pMuteXLines = pFHXLines = null;
+            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pArpBracket = pNoteFretLabel = pConnectorLine = pDropLine = pTapChevron = pAccentHalo = pHaloBar = pPMXFill = pFHXFill = pMuteXLines = pFHXLines = null;
             if (gPMXFill) { gPMXFill.dispose(); gPMXFill = null; }
             if (gFHXFill) { gFHXFill.dispose(); gFHXFill = null; }
             if (gPMXLines) { gPMXLines.dispose(); gPMXLines = null; }
