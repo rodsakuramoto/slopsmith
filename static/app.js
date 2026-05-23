@@ -206,8 +206,11 @@ function _persistLibSelection(el) {
     // `_loadPersistedLibSelection`.
     const artist = el.dataset.artist || '';
     const provider = el.dataset.libraryProvider || '';
+    // For synced provider entries (data-play + data-library-song both present),
+    // persist both f and s so _restoreLibSelection can match the card by either
+    // attribute after a post-sync re-render.
     const payload = isLocal
-        ? { f: el.dataset.play, a: artist, p: provider, s: '' }
+        ? { f: el.dataset.play, a: artist, p: provider, s: el.dataset.librarySong || '' }
         : { f: '', a: artist, p: provider, s: el.dataset.librarySong };
     try {
         localStorage.setItem(key, JSON.stringify(payload));
@@ -1201,7 +1204,10 @@ function _safeImageUrl(value) {
 const _librarySyncStates = new Map();
 
 function _librarySyncKey(providerId, songId) {
-    return `${providerId}\n${songId}`;
+    // JSON.stringify avoids delimiter collision: a newline in either value
+    // would make "${p}\n${s}" ambiguous, but JSON-serialised arrays are
+    // always distinct for distinct (providerId, songId) pairs.
+    return JSON.stringify([providerId, songId]);
 }
 
 function _librarySyncState(providerId, songId) {
@@ -1817,8 +1823,12 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
         const canSync = !localFilename && _providerSupports(providerId, 'song.sync');
         const isInteractive = !!localFilename || canSync;
         const providerAttr = `data-library-provider="${encodeURIComponent(providerId)}"`;
+        // For provider-backed entries, keep data-library-song alongside
+        // data-play once the song is synced so _restoreLibSelection can
+        // still match the persisted remote selection after a re-render.
+        const songAttr = !isLocalProvider ? ` data-library-song="${encodeURIComponent(songId)}"` : '';
         const entryAttrs = localFilename
-            ? `data-play="${encodeURIComponent(localFilename)}" ${providerAttr}`
+            ? `data-play="${encodeURIComponent(localFilename)}" ${providerAttr}${songAttr}`
             : `data-library-provider="${encodeURIComponent(providerId)}" data-library-song="${encodeURIComponent(songId)}"`;
         const ariaAction = localFilename ? 'Play' : 'Load and play';
         const ariaLabel = `${ariaAction} ${title || _libraryDisplayFilename(song, providerId)}${artist ? ' by ' + artist : ''}`;
@@ -2031,8 +2041,12 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
                 const canSyncRow = !localFilename && _providerSupports(providerId, 'song.sync');
                 const isInteractiveRow = !!localFilename || canSyncRow;
                 const providerAttr = `data-library-provider="${encodeURIComponent(providerId)}"`;
+                // Keep data-library-song alongside data-play for provider-backed
+                // entries once synced so _restoreLibSelection can still find the
+                // card after a post-sync re-render.
+                const rowSongAttr = !isLocalProvider ? ` data-library-song="${encodeURIComponent(songId)}"` : '';
                 const rowAttrs = localFilename
-                    ? `data-play="${encodeURIComponent(localFilename)}" ${providerAttr}`
+                    ? `data-play="${encodeURIComponent(localFilename)}" ${providerAttr}${rowSongAttr}`
                     : `data-library-provider="${encodeURIComponent(providerId)}" data-library-song="${encodeURIComponent(songId)}"`;
                 const ariaAction = localFilename ? 'Play' : 'Load and play';
                 const rowAria = _escAttr(`${ariaAction} ${title}${artist.name ? ' by ' + artist.name : ''}`);
