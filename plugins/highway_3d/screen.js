@@ -2189,6 +2189,8 @@
         let pChordBox, pChordFrameFill, pChordLbl, pBarreLine, pArpBracket, pPMXFill, pFHXFill;
         let gPMXFill = null; // shared geometry for PM X fill — disposed in teardown
         let gFHXFill = null; // shared geometry for FH X fill — disposed in teardown
+        let gPMXLines = null, pMuteXLines = null; // PM X lines combined geometry (8 segs as quads)
+        let gFHXLines = null, pFHXLines = null;   // FH X lines combined geometry
         let pNoteFretLabel, pConnectorLine, pDropLine, pTapChevron, pAccentHalo;
         let pChordAccentHalo = null, gChordAccentHalo = null; // per-instance cloned mats so opacity differs per shell
         let pSusRibbon = null, pSusRibbonOl = null;
@@ -4423,6 +4425,100 @@
                 }),
             ));
 
+            // PM X lines — 8 segments baked as thin quads in ±1 normalised space.
+            // Scale the pool mesh by (innerW*0.5, -innerH*0.5, ...) per chord;
+            // the Y-negated scale matches the XLINES convention (fya>0 = below centre).
+            if (!gPMXLines) {
+                const HT = 0.016; // normalised half-thickness ≈ lw/hH for a typical chord
+                // prettier-ignore
+                const XLINES = [
+                    [-1.000, -0.500, -0.494, -0.011],
+                    [-1.000,  0.500, -0.494, -0.011],
+                    [ 1.000, -0.500,  0.476, -0.011],
+                    [ 1.000,  0.500,  0.476, -0.011],
+                    [-0.480,  1.000, -0.012,  0.257],
+                    [ 0.500,  1.000, -0.012,  0.257],
+                    [ 0.480, -1.000,  0.000, -0.276],
+                    [-0.480, -1.000, -0.006, -0.276],
+                ];
+                const pos = new Float32Array(XLINES.length * 4 * 3);
+                const idx = new Uint16Array(XLINES.length * 6);
+                for (let i = 0; i < XLINES.length; i++) {
+                    const [xa, ya, xb, yb] = XLINES[i];
+                    const dx = xb - xa, dy = yb - ya;
+                    const il = 1 / Math.sqrt(dx * dx + dy * dy);
+                    const nx = -dy * il, ny = dx * il;
+                    const vi = i * 12, ii = i * 6, vb = i * 4;
+                    pos[vi+0]=xa+nx*HT; pos[vi+1]=ya+ny*HT; pos[vi+2]=0;
+                    pos[vi+3]=xb+nx*HT; pos[vi+4]=yb+ny*HT; pos[vi+5]=0;
+                    pos[vi+6]=xb-nx*HT; pos[vi+7]=yb-ny*HT; pos[vi+8]=0;
+                    pos[vi+9]=xa-nx*HT; pos[vi+10]=ya-ny*HT; pos[vi+11]=0;
+                    idx[ii+0]=vb;   idx[ii+1]=vb+1; idx[ii+2]=vb+2;
+                    idx[ii+3]=vb;   idx[ii+4]=vb+2; idx[ii+5]=vb+3;
+                }
+                gPMXLines = new T.BufferGeometry();
+                gPMXLines.setAttribute('position', new T.BufferAttribute(pos, 3));
+                gPMXLines.setIndex(new T.BufferAttribute(idx, 1));
+            }
+            pMuteXLines = pool(noteG, () => new T.Mesh(
+                gPMXLines,
+                new T.MeshBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 1.0,
+                    depthWrite: false,
+                    depthTest: false,
+                    fog: false,
+                    side: T.DoubleSide,
+                }),
+            ));
+
+            // FH X lines — same scheme, 8 segments from the FH_XLINES pattern
+            if (!gFHXLines) {
+                const HT = 0.022; // slightly wider — FH wings are shorter, need more visual weight
+                // prettier-ignore
+                const FH_XLINES = [
+                    [-0.50,  1.00, -0.28,  0.00],
+                    [-0.50, -1.00, -0.28,  0.00],
+                    [ 0.50,  1.00,  0.28,  0.00],
+                    [ 0.50, -1.00,  0.28,  0.00],
+                    [-0.15, -1.00,  0.00, -0.42],
+                    [ 0.15, -1.00,  0.00, -0.42],
+                    [ 0.15,  1.00,  0.00,  0.42],
+                    [-0.15,  1.00,  0.00,  0.42],
+                ];
+                const pos = new Float32Array(FH_XLINES.length * 4 * 3);
+                const idx = new Uint16Array(FH_XLINES.length * 6);
+                for (let i = 0; i < FH_XLINES.length; i++) {
+                    const [xa, ya, xb, yb] = FH_XLINES[i];
+                    const dx = xb - xa, dy = yb - ya;
+                    const il = 1 / Math.sqrt(dx * dx + dy * dy);
+                    const nx = -dy * il, ny = dx * il;
+                    const vi = i * 12, ii = i * 6, vb = i * 4;
+                    pos[vi+0]=xa+nx*HT; pos[vi+1]=ya+ny*HT; pos[vi+2]=0;
+                    pos[vi+3]=xb+nx*HT; pos[vi+4]=yb+ny*HT; pos[vi+5]=0;
+                    pos[vi+6]=xb-nx*HT; pos[vi+7]=yb-ny*HT; pos[vi+8]=0;
+                    pos[vi+9]=xa-nx*HT; pos[vi+10]=ya-ny*HT; pos[vi+11]=0;
+                    idx[ii+0]=vb;   idx[ii+1]=vb+1; idx[ii+2]=vb+2;
+                    idx[ii+3]=vb;   idx[ii+4]=vb+2; idx[ii+5]=vb+3;
+                }
+                gFHXLines = new T.BufferGeometry();
+                gFHXLines.setAttribute('position', new T.BufferAttribute(pos, 3));
+                gFHXLines.setIndex(new T.BufferAttribute(idx, 1));
+            }
+            pFHXLines = pool(noteG, () => new T.Mesh(
+                gFHXLines,
+                new T.MeshBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 1.0,
+                    depthWrite: false,
+                    depthTest: false,
+                    fog: false,
+                    side: T.DoubleSide,
+                }),
+            ));
+
             pChordLbl   = pool(lblG,  () => new T.Sprite(txtMat('', '#e8d080', true, 'chord').clone()));
             // Single shared barre material — all pool meshes reference it,
             // so _applyGlow() can mutate emissiveIntensity once and every
@@ -6148,7 +6244,7 @@
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
             if (pGhostFretLbl) pGhostFretLbl.reset();
-            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pArpBracket.reset(); pChordAccentHalo.reset(); pPMXFill.reset(); pFHXFill.reset();
+            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pArpBracket.reset(); pChordAccentHalo.reset(); pPMXFill.reset(); pFHXFill.reset(); pMuteXLines.reset(); pFHXLines.reset();
             pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
             pFretColMarker.reset(); pSusRail.reset(); pSusRailBloom.reset(); pTechPlane.reset();
             // Clear per-frame queues in-place (avoid reallocating the array object).
@@ -6648,7 +6744,9 @@
                 }
             }
             if (chords) {
-                for (const ch of chords) {
+                const _projLo = lowerBoundT(chords, now);
+                for (let _pci = _projLo; _pci < chords.length; _pci++) {
+                    const ch = chords[_pci];
                     if (!ch.notes || ch.t <= now) continue;
                     const dt = ch.t - now;
                     if (dt >= PROJ_WIN_MERGE) break;
@@ -6683,7 +6781,9 @@
                 }
             }
             if (chords) {
-                for (const ch of chords) {
+                const _acChordLo = lowerBoundT(chords, now - 30);
+                for (let _aci = _acChordLo; _aci < chords.length; _aci++) {
+                    const ch = chords[_aci];
                     if (!ch.notes) continue;
                     const dt = ch.t - now;
                     if (dt > AHEAD) break;
@@ -7065,7 +7165,28 @@
                 let prevChordSig = null;
                 let prevChordTime = -1;
 
-                for (let ci = 0; ci < chords.length; ci++) {
+                // Skip past chords that are too old to render. The per-chord filter
+                // (ch.t + _chFilterSus >= ndVerdictT0) passes the earliest chord when
+                // ch.t >= ndVerdictT0 - AHEAD (worst case: _chFilterSus = AHEAD for a
+                // chord with no explicit sustain). Binary search avoids iterating
+                // hundreds of past chords every frame in dense PM/FH sections.
+                const _chordsLoIdx = lowerBoundT(chords, ndVerdictT0 - AHEAD);
+                // Prime shape-run tracking from the chord immediately before the window
+                // so isRepeat and firstInShapeRun are correct on the first visible chord.
+                if (_chordsLoIdx > 0) {
+                    const _pc = chords[_chordsLoIdx - 1];
+                    if (_pc && _pc.notes) {
+                        const _ps = chordShapeSignature(_pc);
+                        if (_ps !== null) {
+                            runSigPrev = _ps;
+                            prevAnyChordTime = _pc.t;
+                            prevChordSig = _ps;
+                            prevChordTime = _pc.t;
+                        }
+                    }
+                }
+
+                for (let ci = _chordsLoIdx; ci < chords.length; ci++) {
                     const ch = chords[ci];
                     // Chords are time-sorted — everything beyond t1 is outside the
                     // visible window and contributes nothing (activeFrets needs t<now+2,
@@ -7936,88 +8057,44 @@
                         }
 
                         // ── Palm-mute strum indicator — X outline + dark fill ──────────
-                        // Eight lines forming a star/asterisk across the inner chord box,
-                        // with a semi-transparent dark fill covering the same 5 regions.
-                        // Geometry fractions: ±1 = inner-box edge, Y-up (Three.js).
+                        // Fill: pPMXFill (1 draw call). Lines: pMuteXLines (1 draw call, all
+                        // 8 segments baked as quads in ±1 normalised space). Both meshes are
+                        // scaled to (innerW*0.5, -innerH*0.5) per chord; visible from AHEAD.
                         if (isRepeat && chordNotes.some(cn => cn.pm)) {
-                            // Fill (dark, transparent) — renderOrder 10 = below lines
                             const pmf = pPMXFill.get();
-                            pmf.renderOrder = 10.5; // above pChordFrameFill (10), below X lines (11)
+                            pmf.renderOrder = 10.5;
                             pmf.rotation.set(0, 0, 0);
                             pmf.position.set(cx, cY, z - 0.0045 * K);
-                            pmf.scale.set(innerW * 0.5, -innerH * 0.5, 1); // Y negated: mirrors XLINES convention (ay = cY - fya*hH)
+                            pmf.scale.set(innerW * 0.5, -innerH * 0.5, 1);
                             pmf.material.opacity = edgeOp;
 
-                            const lw  = ft * 0.55;      // line visual thickness
-                            const hW  = innerW * 0.5;
-                            const hH  = innerH * 0.5;
-                            // [fx_a, fy_a, fx_b, fy_b] — junction points where pairs converge
-                            const XLINES = [
-                                [-1.000, -0.500, -0.494, -0.011], // LET → L
-                                [-1.000,  0.500, -0.494, -0.011], // LEB → L
-                                [ 1.000, -0.500,  0.476, -0.011], // RET → R
-                                [ 1.000,  0.500,  0.476, -0.011], // REB → R
-                                [-0.480,  1.000, -0.012,  0.257], // BLC → B
-                                [ 0.500,  1.000, -0.012,  0.257], // BRC → B
-                                [ 0.480, -1.000,  0.000, -0.276], // TRC → T
-                                [-0.480, -1.000, -0.006, -0.276], // TLC → T
-                            ];
-                            for (const [fxa, fya, fxb, fyb] of XLINES) {
-                                const ax = cx + fxa * hW,  ay = cY - fya * hH;
-                                const bx = cx + fxb * hW,  by = cY - fyb * hH;
-                                const mx = (ax + bx) * 0.5, my = (ay + by) * 0.5;
-                                const len = Math.hypot(bx - ax, by - ay);
-                                const ang = Math.atan2(by - ay, bx - ax);
-                                const seg = pChordBox.get();
-                                seg.renderOrder = 11;
-                                seg.material.color.setHex(baseRimHex);
-                                seg.position.set(mx, my, z - 0.005 * K);
-                                seg.scale.set(len, lw, thickZ * 0.5);
-                                seg.rotation.set(0, 0, ang);
-                                seg.material.opacity = edgeOp * 0.85;
-                            }
+                            const xlm = pMuteXLines.get();
+                            xlm.renderOrder = 11;
+                            xlm.material.color.setHex(baseRimHex);
+                            xlm.position.set(cx, cY, z - 0.005 * K);
+                            xlm.scale.set(innerW * 0.5, -innerH * 0.5, thickZ * 0.5);
+                            xlm.rotation.set(0, 0, 0);
+                            xlm.material.opacity = edgeOp * 0.85;
                         }
 
                         // ── Frethand-mute strum indicator — FH X outline + dark fill ───
-                        // 4 convergence nodes (L,R,T,B) + 8 terminals on top/bottom borders.
+                        // Fill: pFHXFill (1 draw call). Lines: pFHXLines (1 draw call).
                         // L/R wings stop at fx=±0.50 — no solid lateral fill blocks.
                         if (isRepeat && chordNotes.some(cn => cn.mt)) {
-                            // Fill (dark) — renderOrder 10.5 = above frame fill, below X lines
                             const fhf = pFHXFill.get();
                             fhf.renderOrder = 10.5;
                             fhf.rotation.set(0, 0, 0);
                             fhf.position.set(cx, cY, z - 0.0045 * K);
-                            fhf.scale.set(innerW * 0.5, -innerH * 0.5, 1); // Y negated: fy+ = up in geometry space
+                            fhf.scale.set(innerW * 0.5, -innerH * 0.5, 1);
                             fhf.material.opacity = edgeOp;
 
-                            const lw = ft * 0.55;
-                            const hW = innerW * 0.5;
-                            const hH = innerH * 0.5;
-                            // [fx_a, fy_a, fx_b, fy_b]
-                            const FH_XLINES = [
-                                [-0.50,  1.00, -0.28,  0.00], // LET → L
-                                [-0.50, -1.00, -0.28,  0.00], // LEB → L
-                                [ 0.50,  1.00,  0.28,  0.00], // RET → R
-                                [ 0.50, -1.00,  0.28,  0.00], // REB → R
-                                [-0.15, -1.00,  0.00, -0.42], // BLC → B
-                                [ 0.15, -1.00,  0.00, -0.42], // BRC → B
-                                [ 0.15,  1.00,  0.00,  0.42], // TRC → T
-                                [-0.15,  1.00,  0.00,  0.42], // TLC → T
-                            ];
-                            for (const [fxa, fya, fxb, fyb] of FH_XLINES) {
-                                const ax = cx + fxa * hW,  ay = cY - fya * hH;
-                                const bx = cx + fxb * hW,  by = cY - fyb * hH;
-                                const mx = (ax + bx) * 0.5, my = (ay + by) * 0.5;
-                                const len = Math.hypot(bx - ax, by - ay);
-                                const ang = Math.atan2(by - ay, bx - ax);
-                                const seg = pChordBox.get();
-                                seg.renderOrder = 11;
-                                seg.material.color.setHex(baseRimHex);
-                                seg.position.set(mx, my, z - 0.005 * K);
-                                seg.scale.set(len, lw, thickZ * 0.5);
-                                seg.rotation.set(0, 0, ang);
-                                seg.material.opacity = edgeOp * 0.85;
-                            }
+                            const xlf = pFHXLines.get();
+                            xlf.renderOrder = 11;
+                            xlf.material.color.setHex(baseRimHex);
+                            xlf.position.set(cx, cY, z - 0.005 * K);
+                            xlf.scale.set(innerW * 0.5, -innerH * 0.5, thickZ * 0.5);
+                            xlf.rotation.set(0, 0, 0);
+                            xlf.material.opacity = edgeOp * 0.85;
                         }
 
                     }
@@ -9960,9 +10037,11 @@
             _renderScale = 1;
             mBeatM = mBeatQ = null;
             pNote = pNoteEdge = pSus = pSusOutline = pSusRibbon = pSusRibbonOl = pLbl = pBeat = pSec = null;
-            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pArpBracket = pNoteFretLabel = pConnectorLine = pDropLine = pTapChevron = pAccentHalo = pChordAccentHalo = pPMXFill = pFHXFill = null;
+            pFretLbl = pLane = pLaneDivider = pGhostFretLbl = pChordBox = pChordFrameFill = pChordLbl = pBarreLine = pArpBracket = pNoteFretLabel = pConnectorLine = pDropLine = pTapChevron = pAccentHalo = pChordAccentHalo = pPMXFill = pFHXFill = pMuteXLines = pFHXLines = null;
             if (gPMXFill) { gPMXFill.dispose(); gPMXFill = null; }
             if (gFHXFill) { gFHXFill.dispose(); gFHXFill = null; }
+            if (gPMXLines) { gPMXLines.dispose(); gPMXLines = null; }
+            if (gFHXLines) { gFHXLines.dispose(); gFHXLines = null; }
             mLaneOdd = mLaneEven = mLaneDivider = mLaneDividerArp = gLanePlane = gGhostFretPlane = null;
             chordFrameGradTex = chordFrameGradTexArp = null;
             pFretColMarker = null;
