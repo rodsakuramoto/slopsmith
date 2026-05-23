@@ -7649,16 +7649,39 @@
                         // renderOrder 17/18 — above sustain trails (12/13) and rails (16), below note gems (50-700)
                         drawFrameBox(cx, yBot + ft * 0.5, width, ft, 17);
                         const withTopFrame = !isRepeat;
-                        if (withTopFrame) {
-                            drawFrameBox(cx, yTop - ft * 0.5, width, ft, 17);
-                        }
 
                         const ySideLo = yBot + ft;
                         const ySideHi = withTopFrame ? yTop - ft : yTop - ft * 0.15;
                         const sideH = Math.max(ySideHi - ySideLo, ft * 1.25);
                         const sideCy = ySideLo + sideH * 0.5;
-                        drawFrameBox(cx - width * 0.5 + ftSide * 0.5, sideCy, ftSide, sideH, 18);
-                        drawFrameBox(cx + width * 0.5 - ftSide * 0.5, sideCy, ftSide, sideH, 18);
+
+                        if (isRepeat) {
+                            drawFrameBox(cx - width * 0.5 + ftSide * 0.5, sideCy, ftSide, sideH, 18);
+                            drawFrameBox(cx + width * 0.5 - ftSide * 0.5, sideCy, ftSide, sideH, 18);
+                        } else {
+                            // Non-repeat: thick sides up to repeat-frame height, then taper to thin above.
+                            const ftThin = ftSide * 0.22;
+                            const threshY = yBot + fullChordBoxH * 0.5; // top of what a repeat frame would be
+
+                            // Lower thick segment (ySideLo → threshY)
+                            const loSideH = Math.max(Math.min(threshY, ySideHi) - ySideLo, 0);
+                            if (loSideH > 0) {
+                                const loCy = ySideLo + loSideH * 0.5;
+                                drawFrameBox(cx - width * 0.5 + ftSide * 0.5, loCy, ftSide, loSideH, 18);
+                                drawFrameBox(cx + width * 0.5 - ftSide * 0.5, loCy, ftSide, loSideH, 18);
+                            }
+
+                            // Upper thin segment (threshY → ySideHi)
+                            const hiSideH = Math.max(ySideHi - threshY, 0);
+                            if (hiSideH > 0) {
+                                const hiCy = threshY + hiSideH * 0.5;
+                                drawFrameBox(cx - width * 0.5 + ftThin * 0.5, hiCy, ftThin, hiSideH, 18);
+                                drawFrameBox(cx + width * 0.5 - ftThin * 0.5, hiCy, ftThin, hiSideH, 18);
+                            }
+
+                            // Top bar: thin
+                            drawFrameBox(cx, yTop - ftThin * 0.5, width, ftThin, 17);
+                        }
 
                         // Accent bloom on frame edges: 4 additive shells with
                         // Gaussian-style falloff. Each border expands only in its
