@@ -4154,14 +4154,14 @@
             });
             pSusRail = pool(noteG, () => {
                 const m = new T.Mesh(gSusRail, mSusRailBase.clone());
-                m.renderOrder = 6;
+                m.renderOrder = 16;
                 return m;
             });
 
             // Bloom glow for chord sustain rails — wider plane with a gaussian
             // falloff texture (bright centre → transparent edges in X direction)
             // and additive blending, so it brightens whatever is behind it.
-            // renderOrder 5 places it behind the core rail (6).
+            // renderOrder 14 places it behind the core rail (16).
             _bloomGaussTex = _makeGaussTex(T);
             gSusRailBloom = new T.PlaneGeometry(1, 1);
             gSusRailBloom.rotateX(-Math.PI / 2);
@@ -4175,7 +4175,7 @@
             });
             pSusRailBloom = pool(noteG, () => {
                 const m = new T.Mesh(gSusRailBloom, mSusRailBloomBase.clone());
-                m.renderOrder = 5;
+                m.renderOrder = 14;
                 return m;
             });
 
@@ -5142,7 +5142,7 @@
                 const pts = [new T.Vector3(boardStringStartX, sY(s), 0), new T.Vector3(stringEndX, sY(s), 0)];
                 const g = new T.BufferGeometry().setFromPoints(pts);
                 const line = new T.Line(g, new T.LineBasicMaterial({ color: activePalette[s], transparent: true, opacity: lineGlowOp }));
-                line.renderOrder = 7; // above sus rails (5/6), below chord fill (10)
+                line.renderOrder = 7; // below sus rails (14/16), below chord fill (10)
                 fretG.add(line);
                 stringLineGlows.push(line);
             }
@@ -5158,7 +5158,7 @@
                     transparent: true, opacity: _vibrancyIdleOp, roughness: 1,
                 });
                 const mesh = new T.Mesh(g, mat);
-                mesh.renderOrder = 7; // above sus rails (5/6), below chord fill (10)
+                mesh.renderOrder = 7; // below sus rails (14/16), below chord fill (10)
                 mesh.position.set(boardStringStartX + strSpan * 0.5, sY(s), 0);
                 fretG.add(mesh);
                 stringLines.push(mesh);
@@ -7057,9 +7057,8 @@
                     const _arpBoundsForNote = arGhostCid != null
                         ? arpHsBoundsForNote(n, bundle.handShapes, arpGhostHsInfer)
                         : null;
-                    const _noteForDraw = n;
                     drawNote(
-                        _noteForDraw,
+                        n,
                         now,
                         singleOpenX,
                         skipLabel,
