@@ -7514,7 +7514,7 @@
                         // standalone notes judged at their own times, so the
                         // scan's query at `ch.t` finds nothing for them and
                         // the frame keeps its lavender default.
-                        if (chDt <= 0 && _ndHasProvider) {
+                        if (chDt <= 0 && _ndHasProvider && !isArpeggioFrame) {
                             const latched = _chordVerdicts.get(verdictKey);
                             if (latched === 'green') {
                                 rimHex = CHORD_BOX_HIT_BRIGHT_HEX;
@@ -8000,21 +8000,22 @@
                                 const _fadeSus   = Math.min(1, _dtSusEnd / 0.25);
                                 const _op  = _fadeAhead * _fadeSus * 0.9;
                                 const _hex = chordHighwayLavenderArpVisual ? ARPEGGIO_RIM_BLUE_HEX : CHORD_BOX_TEAL_HEX;
-                                const _railW = 2.5 * K; // visual width of each rail strip
+                                const _railW = 1.875 * K; // visual width of each rail strip
                                 const _zMid  = _zNear - _railLen * 0.5; // centre in Z
-                                for (const _rx of [chordFrameXL, chordFrameXR]) {
+                                for (const [_rx, _inDir] of [[chordFrameXL, -1], [chordFrameXR, 1]]) {
+                                    const _rxIn = _rx + _inDir * _railW * 0.5;
                                     // Core rail
                                     const rl = pSusRail.get();
                                     rl.material.color.setHex(_hex);
                                     rl.material.opacity = _op;
-                                    rl.position.set(_rx, _yBot, _zMid);
+                                    rl.position.set(_rxIn, _yBot, _zMid);
                                     rl.scale.set(_railW, 1, _railLen);
                                     // Bloom glow — wider gaussian plane, additive blending
                                     const bl = pSusRailBloom.get();
                                     bl.material.color.setHex(_hex);
                                     bl.material.opacity = _op * 0.8;
-                                    bl.position.set(_rx, _yBot + 0.001, _zMid);
-                                    bl.scale.set(4 * K, 1, _railLen);
+                                    bl.position.set(_rxIn, _yBot + 0.001, _zMid);
+                                    bl.scale.set(3 * K, 1, _railLen);
                                 }
                             }
                         }
