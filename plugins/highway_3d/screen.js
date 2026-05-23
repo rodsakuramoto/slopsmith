@@ -1948,10 +1948,6 @@
         // Handshape start-times where ghost fret numbers show but [ ] brackets are suppressed
         // (synth-chord onset-match cases — not genuine arpeggios).
         let _arpSynthOnsetHsSet = new Set();
-        // WeakMap<note, synthSusDuration>: notes reclassified as "chord hold" (single fretted
-        // note at hs onset, open-string hits caused inferArpeggioFromNotePattern to fire
-        // incorrectly). These notes get a synthetic sustain = hsEnd - note.t, no brackets.
-        let _chordHoldSusMap = null;
         /** Per-frame: ``handShapeIsArpeggioForLaneRail`` baked once — lane slices were O(96 × hs × infer). */
         let _arpLaneRailHsScratch = [];
         let _arpRailBoundLoScratch = [];
@@ -2314,8 +2310,6 @@
         // Scratch object reused for chord-note drawNote calls so `{ ...cn, t: ch.t }`
         // doesn't allocate a new object per chord note per frame.
         const _scrChordNote = {};
-        // Scratch object for chord-hold sustain note override (single fretted note case).
-        const _scrHoldNote = {};
         // Scratch objects for the nextNoteByString prepass — chord notes need
         // a merged `{ ...cn, t: ch.t }` object, but spread allocates every frame.
         // One scratch object per string (max MAX_RENDER_STRINGS) is safe because:
@@ -5931,7 +5925,7 @@
          * recomputed it for every visible note (O(notecount × hs × notescan)).
          * Fill ``outFlags[i]`` with the boolean once per ``handShapes[i]``.
          */
-        function fillArpeggioGhostInferFlags(handShapes, chordTemplates, notesArr, outFlags, outSynthOnsetSet = null, outChordHoldSusMap = null) {
+        function fillArpeggioGhostInferFlags(handShapes, chordTemplates, notesArr, outFlags, outSynthOnsetSet = null) {
             for (let i = 0; i < handShapes.length; i++) {
                 let infer = false;
                 const hs = handShapes[i];
@@ -5951,12 +5945,16 @@
                             const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
                             const tw = { tLo: hsLo - 0.06, tHi: hsHi + 0.06 };
                             infer = inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw);
-                            // Chord hold sustain check: inferArpeggioFromNotePattern can fire
-                            // true when open-string notes coincidentally match the template's
-                            // open positions, but only a SINGLE fretted (f>0) string is actually
-                            // played at the handshape onset. Treat this as a "chord hold" —
-                            // the onset note gets a synthetic sustain = hsEnd-note.t, no brackets.
-                            if (infer && outChordHoldSusMap != null) {
+                            // Chord-hold gate: inferArpeggioFromNotePattern can fire true
+                            // when open-string notes coincidentally match the template's
+                            // open positions but only a SINGLE fretted (f>0) string is
+                            // actually played at the handshape onset. Treat that as a
+                            // chord hold (not an arpeggio) — clear the arp flag, no
+                            // brackets. The original implementation also intended to
+                            // record a synthetic sustain extending to hsEnd for the
+                            // onset note, but that read-side was never wired up; the
+                            // visual decay-before-handshape-end is benign.
+                            if (infer) {
                                 let _frettedCount = 0;
                                 let _onsetNote = null;
                                 const _fSeen = new Set();
@@ -5975,7 +5973,6 @@
                                 }
                                 if (_frettedCount <= 1 && _onsetNote !== null) {
                                     outFlags[i] = false;
-                                    outChordHoldSusMap.set(_onsetNote, Math.max(0, hsHi - _onsetNote.t));
                                     continue; // chord hold handled — skip onset-match and outFlags assignment
                                 }
                             }
@@ -6410,8 +6407,7 @@
                     || _arpGhostInferRefNotes !== notes
                     || _arpGhostInferRefTpl !== bundle.chordTemplates) {
                     _arpSynthOnsetHsSet.clear();
-                    _chordHoldSusMap = new WeakMap();
-                    fillArpeggioGhostInferFlags(hsForArpGhost, bundle.chordTemplates, notes, _arpGhostHsInferScratch, _arpSynthOnsetHsSet, _chordHoldSusMap);
+                    fillArpeggioGhostInferFlags(hsForArpGhost, bundle.chordTemplates, notes, _arpGhostHsInferScratch, _arpSynthOnsetHsSet);
                     _arpGhostInferRefHs = hsForArpGhost;
                     _arpGhostInferRefNotes = notes;
                     _arpGhostInferRefTpl = bundle.chordTemplates;
@@ -9316,7 +9312,12 @@
                     }
                 }
                 const outline = pNote.get();
-                outline.material = n.ac ? mAccentOutline[s] : _ndOutline;
+                // Verdict beats accent on the outline so hit/miss feedback isn't
+                // hidden by mAccentOutline. Mirrors the same miss-over-accent
+                // priority the accent halo guard above already applies.
+                const _ndVerdict = (_ndCs && (_ndState === 'miss' || _ndGood))
+                    || !!_ndMatchedMark;
+                outline.material = (n.ac && !_ndVerdict) ? mAccentOutline[s] : _ndOutline;
                 outline.renderOrder = _noteRO;
                 outline.position.set(x, y + techniqueYNow, noteZ);
                 outline.rotation.z = approachRot;
