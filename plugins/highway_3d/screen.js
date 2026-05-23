@@ -1919,6 +1919,13 @@
         let _renderScale = 1;
         let lyricsCanvas = null, lyricsCtx = null;
         let _diagChord            = null;
+        // Chord diagram render cache. Keys: static layout inputs joined as a
+        // string. Values: OffscreenCanvas (or <canvas>) rendered at opacity=1
+        // entranceT=1 — composited each frame via drawImage + globalAlpha.
+        // Cleared on canvas resize (bx/by depend on canvasW/H/lyricsBottom)
+        // and on teardown/destroy.
+        const _diagRenderCache = new Map();
+        const _DIAG_CACHE_MAX  = 20;
         let pSusRail = null, gSusRail = null, mSusRailBase = null;
         let pSusRailBloom = null, gSusRailBloom = null, mSusRailBloomBase = null, _bloomGaussTex = null;
         let pTechPlane = null, gTechPlane = null;
@@ -2053,6 +2060,7 @@
         // and drawNote.
         let textSize = 0.5;
         let _textSizeMul = 1.0;
+        let _textSizeMulApplied = -1;
         // Visual look dials (issue: pastel/washed-out feel + too-much-glow
         // complaint). vibrancy raises idle string/note opacity and de-whites
         // the hit-note body; glow scales every emissive contribution +
@@ -3060,7 +3068,7 @@
                     }
                     const o = mk(); parent.add(o); a.push(o); n++; return o;
                 },
-                reset() { for (let i = 0; i < a.length; i++) a[i].visible = false; n = 0; },
+                reset() { for (let i = 0; i < n; i++) a[i].visible = false; n = 0; },
             };
         }
 
@@ -3404,6 +3412,39 @@
                     }
                 }
             }
+            ctx.restore();
+        }
+
+        // Cached wrapper for drawChordDiagram. When entranceT === 1 (scale
+        // transform is identity) the diagram is rendered once to an
+        // OffscreenCanvas and reused every subsequent frame via drawImage +
+        // globalAlpha. During the 0.2 s entrance animation (entranceT < 1)
+        // the scale transform is non-trivial so we fall through to a fresh
+        // render — that window is ~12 frames at 60 fps, negligible.
+        function _drawDiagramCached(ctx, opts) {
+            const { opacity = 1, entranceT = 1.0, canvasW, canvasH } = opts;
+            if (opacity <= 0) return;
+            if (entranceT < 1.0) {
+                drawChordDiagram(ctx, opts);
+                return;
+            }
+            const { name, frets, nStr, inverted, sizeSlider, position, lyricsBottom = 0 } = opts;
+            const key = name + '|' + (frets || []).join(',') + '|' + nStr + '|' +
+                        (inverted ? 1 : 0) + '|' + sizeSlider + '|' + position + '|' +
+                        canvasW + '|' + canvasH + '|' + lyricsBottom;
+            let oc = _diagRenderCache.get(key);
+            if (!oc) {
+                try { oc = new OffscreenCanvas(canvasW, canvasH); }
+                catch (_) { oc = document.createElement('canvas'); oc.width = canvasW; oc.height = canvasH; }
+                drawChordDiagram(oc.getContext('2d'), { ...opts, opacity: 1, entranceT: 1 });
+                if (_diagRenderCache.size >= _DIAG_CACHE_MAX) {
+                    _diagRenderCache.delete(_diagRenderCache.keys().next().value);
+                }
+                _diagRenderCache.set(key, oc);
+            }
+            ctx.save();
+            ctx.globalAlpha = opacity;
+            ctx.drawImage(oc, 0, 0);
             ctx.restore();
         }
 
@@ -6091,10 +6132,14 @@
             // Rescale inlay labels to track the live text-size slider.
             // buildBoard() sets an initial scale using (0.5 + textSize) but
             // _textSizeMul is only authoritative from here onward.
-            for (let i = 0; i < _inlayLabels.length; i++) {
-                const f = INLAY_LABEL_FRETS[i];
-                const s = 5.5 * _textSizeMul * K * fretLabelScaleForFret(f);
-                _inlayLabels[i].scale.set(s, s, 1);
+            // Guard: only update when the multiplier actually changed.
+            if (_textSizeMul !== _textSizeMulApplied) {
+                _textSizeMulApplied = _textSizeMul;
+                for (let i = 0; i < _inlayLabels.length; i++) {
+                    const f = INLAY_LABEL_FRETS[i];
+                    const s = 5.5 * _textSizeMul * K * fretLabelScaleForFret(f);
+                    _inlayLabels[i].scale.set(s, s, 1);
+                }
             }
             _syncOpenStringPitchLabels(bundle);
 
@@ -9761,6 +9806,7 @@
             ren.setSize(w, h);
             wrap.style.height = h + 'px';
             if (lyricsCanvas) { lyricsCanvas.width = w; lyricsCanvas.height = h; }
+            _diagRenderCache.clear();
             cam.aspect = w / h;
             cam.updateProjectionMatrix();
             aspectScale = Math.max(1, REF_ASPECT / Math.max(cam.aspect, 0.5));
@@ -9798,7 +9844,7 @@
             _bgUnmountStyle();
             bgGroup = null; _bgLastT = 0;
             _diagChord = null; _diagPrev = null; _diagPrevOpacity = 0; _diagPrevStartOpacity = 0; _diagPrevStartT = null;
-            _diagEntranceT = 1.0; _diagLastKey = null;
+            _diagEntranceT = 1.0; _diagLastKey = null; _diagRenderCache.clear();
 
             if (wrap) { wrap.remove(); wrap = null; }
             _disposeOpenStringPitchSprites();
@@ -10100,7 +10146,7 @@
                     // Draw outgoing diagram first so the incoming diagram renders on top,
                     // making the entrance scale-in animation visible during crossfades.
                     if (_diagPrev && _diagPrevOpacity > 0) {
-                        drawChordDiagram(lyricsCtx, {
+                        _drawDiagramCached(lyricsCtx, {
                             name: _diagPrev.name, frets: _diagPrev.frets,
                             opacity: _diagPrevOpacity,
                             // Derive entranceT live from _diagPrev.t so a backward seek within
@@ -10116,7 +10162,7 @@
                         });
                     }
                     if (_diagChord) {
-                        drawChordDiagram(lyricsCtx, {
+                        _drawDiagramCached(lyricsCtx, {
                             name: _diagChord.name, frets: _diagChord.frets,
                             opacity: Math.max(0, 1 + (_diagChord.t - bundle.currentTime) / DIAG_LINGER_S),
                             entranceT: _diagEntranceT,
@@ -10162,7 +10208,7 @@
             },
 
             destroy() {
-                _destroyed = true; _isReady = false; _diagChord = null; _diagPrev = null; _diagLastKey = null;
+                _destroyed = true; _isReady = false; _diagChord = null; _diagPrev = null; _diagLastKey = null; _diagRenderCache.clear();
                 _lastHwW = 0; _lastHwH = 0;
                 _unsubscribeFocus(); teardown();
                 highwayCanvas = null;
