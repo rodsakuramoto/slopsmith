@@ -621,7 +621,8 @@ def parse_arrangement(xml_path: str) -> Arrangement:
         if container is not None:
             for c in container.findall("chord"):
                 t = _float(c, "time")
-                chord_notes = [_parse_note(cn) for cn in c.findall("chordNote")]
+                chord_note_elems = list(c.findall("chordNote"))
+                chord_notes = [_parse_note(cn) for cn in chord_note_elems]
                 cid = _int(c, "chordId")
                 # Chord-level technique flags — propagated to synthetic notes
                 # when there are no <chordNote> children (gallop/repeat strums).
@@ -640,13 +641,18 @@ def parse_arrangement(xml_path: str) -> Arrangement:
                             ))
                 elif chord_notes and (_ch_pm or _ch_mt or _ch_acc):
                     # Propagate chord-level flags to chordNote children that
-                    # don't set them explicitly (e.g. chordNote palmMute="").
-                    for cn in chord_notes:
-                        if _ch_pm and not cn.palm_mute:
+                    # don't set them explicitly. `_parse_note` flattens an
+                    # absent attribute and an explicit false literal (`""`,
+                    # `"0"`, `"false"`) to the same False, so peek at the raw
+                    # XML element via `cn_elem.get(...)` to distinguish them
+                    # — an authored `<chordNote palmMute="0">` under a
+                    # `<chord palmMute="1">` parent must keep palm_mute=False.
+                    for cn, cn_elem in zip(chord_notes, chord_note_elems):
+                        if _ch_pm and cn_elem.get("palmMute") is None:
                             cn.palm_mute = True
-                        if _ch_mt and not cn.mute:
+                        if _ch_mt and cn_elem.get("mute") is None:
                             cn.mute = True
-                        if _ch_acc and not cn.accent:
+                        if _ch_acc and cn_elem.get("accent") is None:
                             cn.accent = True
                 lv_chords.append(Chord(
                     time=t, chord_id=cid, notes=chord_notes,
