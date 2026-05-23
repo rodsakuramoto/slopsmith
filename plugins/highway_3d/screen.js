@@ -7383,8 +7383,10 @@
                     // the inference heuristic can false-positive on fast strummed
                     // chords, and brackets on non-arp chords confuse players.
                     // Note-stream arpeggios draw their own brackets in the notes[]
-                    // loop above.
-                    if (chordHighwayLavenderArpVisual && (!deferChordGems || _deferFallback)) {
+                    // loop above (for notes already in AHEAD). The chord loop covers
+                    // any strings whose notes haven't entered AHEAD yet — _nsBrackets
+                    // prevents duplicates for strings already handled by notes[].
+                    if (chordHighwayLavenderArpVisual) {
                         const _arpBracketDt = ch.t - now;
                         if (_arpBracketDt < AHEAD) {
                             const _arpEnd = (hsHintFrame.hs && !isNaN(hsEnd(hsHintFrame.hs)))
