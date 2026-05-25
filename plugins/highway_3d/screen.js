@@ -4173,10 +4173,11 @@
             // Unit plane (1×1 in XZ) laid flat; scaled to (railWidth, 1, railLen).
             // A horizontal plane seen from the camera looking down-forward is
             // face-on and has real apparent thickness — unlike T.Line (always 1px).
-            // depthTest:false so they never occlude gems; renderOrder 6 places
-            // them above lane dividers (2) but below chord fill (10), chord frame
-            // edges (11), sustain trails (12/13), board ghost projection (14), and
-            // arp brackets (18) — rail is floor decoration, must not cover them.
+            // depthTest:false so they never occlude gems; renderOrder 16 places
+            // them above lane dividers (2), chord fill (10), chord frame edges
+            // (11), and sustain trails (12/13), but below note gems (dynamic
+            // ≥50) and arp brackets (18). The bloom halo (14) sits between the
+            // sustain trails and the rail core. (Bumped from 6→16 in 69fcd0f.)
             gSusRail = new T.PlaneGeometry(1, 1);
             gSusRail.rotateX(-Math.PI / 2); // lay flat in XZ plane
             mSusRailBase = new T.MeshBasicMaterial({
@@ -5140,7 +5141,6 @@
 
             const board = boardSpanX();
             const bw = board.width + 4 * K;
-            const bl = TS * (AHEAD + BEHIND);
 
             // Fretboard plane — spans exactly from hit line (Z=0) to the note
             // spawn horizon (-AHEAD * TS), so the far edge aligns with AHEAD.
