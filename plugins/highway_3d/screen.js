@@ -2189,6 +2189,7 @@
         let gFHXLines = null, pFHXLines = null;   // FH X lines combined geometry
         let pNoteFretLabel, pConnectorLine, pDropLine, pTapChevron, pAccentHalo;
         let pHaloBar = null, gHaloBar = null; // gradient halo bar geometry — replaces per-shell pChordAccentHalo
+        let gArpBracket = null; // shared 1×1×1 box geometry for pArpBracket; built once, disposed in teardown
         let pSusRibbon = null, pSusRibbonOl = null;
         let pFretColMarker;
         /** Horizontal gradient for chord box interior fill. */
@@ -2311,6 +2312,12 @@
         // re-allocating a per-string Array every frame. Re-filled with -Infinity
         // at the top of each prepass run.
         const _scrRecentByString     = new Array(MAX_RENDER_STRINGS).fill(-Infinity);
+        // Scratch buffers for the ghost-preview gap prepass — refilled each
+        // frame to avoid the `new Array(nStr)` + `Object.create(null)` churn.
+        // The Map is cleared at the top of the prepass; live entries are
+        // consumed by drawNote() reads later in the same frame.
+        const _scrGhostLastT         = new Array(MAX_RENDER_STRINGS).fill(-Infinity);
+        const _scrGhostPrevBuf       = new Map();
         // Scratch object reused for chord-note drawNote calls so `{ ...cn, t: ch.t }`
         // doesn't allocate a new object per chord note per frame.
         const _scrChordNote = {};
@@ -4559,8 +4566,13 @@
             // recycled / future-allocated barre mesh picks up the change.
             mBarre = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.9 * glowMul, transparent: true, depthWrite: false });
             pBarreLine  = pool(noteG, () => new T.Mesh(new T.BoxGeometry(1, 1, 1), mBarre));
+            // Shared 1×1×1 box geometry — brackets can require many pooled
+            // meshes per frame, so per-mesh BoxGeometry allocation would
+            // duplicate buffers and create unnecessary GPU disposal work.
+            // Disposed once in teardown (alongside the other shared geos).
+            if (!gArpBracket) gArpBracket = new T.BoxGeometry(1, 1, 1);
             pArpBracket = pool(noteG, () => new T.Mesh(
-                new T.BoxGeometry(1, 1, 1),
+                gArpBracket,
                 new T.MeshBasicMaterial({
                     color: 0xffffff,
                     transparent: true,
@@ -6752,11 +6764,15 @@
             //
             // Two-pointer merge over time-sorted notes + chords so the
             // predecessor is correct even when notes and chords interleave.
-            // Plain object with numeric key avoids per-frame string allocation;
+            // Map with numeric key avoids per-frame string allocation;
             // key = Math.round(t*1e4)*10 + s (unique for notes > 0.1 ms apart).
-            const _ghostPrevBuf = Object.create(null);
+            // Buffer is hoisted (_scrGhostPrevBuf) and cleared at the top of
+            // the prepass; per-string predecessor tracker likewise (_scrGhostLastT).
+            _scrGhostPrevBuf.clear();
+            const _ghostPrevBuf = _scrGhostPrevBuf;
             {
-                const _gLastT = new Array(nStr).fill(-Infinity);
+                for (let _i = 0; _i < nStr; _i++) _scrGhostLastT[_i] = -Infinity;
+                const _gLastT = _scrGhostLastT;
                 let _gni = notes ? lowerBoundT(notes, now - 1) : 0;
                 let _gci = 0;
                 if (chords) while (_gci < chords.length && chords[_gci].t < now - 1) _gci++;
@@ -6768,14 +6784,14 @@
                     if (nt <= ct) {
                         const n = notes[_gni++];
                         if (validString(n.s)) {
-                            _ghostPrevBuf[Math.round(n.t * 1e4) * 10 + n.s] = _gLastT[n.s];
+                            _ghostPrevBuf.set(Math.round(n.t * 1e4) * 10 + n.s, _gLastT[n.s]);
                             _gLastT[n.s] = n.t;
                         }
                     } else {
                         const ch = chords[_gci++];
                         if (ch.notes) for (const cn of ch.notes) {
                             if (validString(cn.s)) {
-                                _ghostPrevBuf[Math.round(ch.t * 1e4) * 10 + cn.s] = _gLastT[cn.s];
+                                _ghostPrevBuf.set(Math.round(ch.t * 1e4) * 10 + cn.s, _gLastT[cn.s]);
                                 _gLastT[cn.s] = ch.t;
                             }
                         }
@@ -7126,7 +7142,7 @@
                         arGhostCid,
                         arGhostCid != null,
                         _arpBoundsForNote,
-                        _ghostPrevBuf[Math.round(n.t * 1e4) * 10 + n.s] ?? -Infinity,
+                        _ghostPrevBuf.get(Math.round(n.t * 1e4) * 10 + n.s) ?? -Infinity,
                     );
                     if (arGhostCid != null) {
                         const _arpBounds = _arpBoundsForNote;
@@ -7625,7 +7641,7 @@
                                 ch.id,
                                 chordSusTrailMatchArpFrame,
                                 null,
-                                _ghostPrevBuf[Math.round(ch.t * 1e4) * 10 + cn.s] ?? -Infinity,
+                                _ghostPrevBuf.get(Math.round(ch.t * 1e4) * 10 + cn.s) ?? -Infinity,
                             );
                             lastFretForString[cn.s] = cn.f;
                             // gate by THIS note's own sustain against the
@@ -10012,6 +10028,7 @@
             gSusRailBloom = null; mSusRailBloomBase = null; _bloomGaussTex = null; pSusRailBloom = null;
             gTechPlane?.dispose?.(); gTechPlane = null; pTechPlane = null;
             gHaloBar?.dispose?.(); gHaloBar = null;
+            gArpBracket?.dispose?.(); gArpBracket = null;
             for (const m of mStr) m?.dispose?.();
             for (const m of mGlow) m?.dispose?.();
             for (const m of mSus) m?.dispose?.();
