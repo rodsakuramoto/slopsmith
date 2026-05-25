@@ -295,7 +295,7 @@ def main() -> int:
         # The lib's _maybe_transcribe_lyrics handles the "lyrics already
         # present" gate, so PSARCs that shipped vocals XML/SNG won't get
         # overwritten by the auto-transcription.
-        from sloppak_convert import split_sloppak_stems  # noqa: WPS433
+        from sloppak_convert import split_sloppak_stems
         print("[*] Splitting stems + transcribing vocals")
         try:
             split_sloppak_stems(

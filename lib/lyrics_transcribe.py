@@ -267,26 +267,30 @@ def transcribe_vocals_local(
         except Exception:
             pass
 
-    asr_model = whisperx.load_model(model_size, resolved_device, compute_type=resolved_compute)
-    audio = whisperx.load_audio(str(vocals_path))
-
-    if progress_cb:
-        try:
-            progress_cb(0.30, "transcribing", "Transcribing vocals")
-        except Exception:
-            pass
-
-    result = asr_model.transcribe(audio, language=language)
-    detected_lang = result.get("language") or language or "en"
-
-    if progress_cb:
-        try:
-            progress_cb(0.60, "transcribing", f"Aligning words ({detected_lang})")
-        except Exception:
-            pass
-
-    align_model = align_metadata = None
+    # Wrap every model lifecycle call in a single try/finally so a failure in
+    # load_audio / transcribe / load_align_model still frees the ASR model —
+    # otherwise a bad stem in the middle of a batch run strands GPU memory and
+    # the next song's load_model OOMs.
+    asr_model = align_model = align_metadata = None
     try:
+        asr_model = whisperx.load_model(model_size, resolved_device, compute_type=resolved_compute)
+        audio = whisperx.load_audio(str(vocals_path))
+
+        if progress_cb:
+            try:
+                progress_cb(0.30, "transcribing", "Transcribing vocals")
+            except Exception:
+                pass
+
+        result = asr_model.transcribe(audio, language=language)
+        detected_lang = result.get("language") or language or "en"
+
+        if progress_cb:
+            try:
+                progress_cb(0.60, "transcribing", f"Aligning words ({detected_lang})")
+            except Exception:
+                pass
+
         align_model, align_metadata = whisperx.load_align_model(
             language_code=detected_lang, device=resolved_device
         )
@@ -315,6 +319,7 @@ def transcribe_vocals_remote(
     language: str | None = None,
     api_key: str | None = None,
     timeout: int = 300,
+    min_word_score: float = 0.35,
     progress_cb: ProgressCB = None,
 ) -> list[dict]:
     """POST the vocal stem to `{server_url}/align` and parse the response.
@@ -323,6 +328,12 @@ def transcribe_vocals_remote(
     server to respond with a JSON object carrying a `words` (or
     `segments`) field in WhisperX's native shape; `_whisperx_to_sloppak`
     consumes that directly.
+
+    `min_word_score` is applied to native `segments` responses the same
+    way the local path applies it, so the hallucination guard doesn't
+    weaken when routing to a remote server. Pre-flattened `{"words": [...]}`
+    responses are passed through unfiltered (the server is assumed to
+    have applied its own gating before flattening).
 
     Errors raise `RuntimeError` with a truncated server response, same
     idiom Demucs uses, so the caller can log+continue without bringing
@@ -368,7 +379,7 @@ def transcribe_vocals_remote(
     # Anything else is an error: surface enough of the response that
     # `_maybe_transcribe_lyrics` can log it and move on.
     if "segments" in data:
-        return _whisperx_to_sloppak(data, min_score=0.0)
+        return _whisperx_to_sloppak(data, min_score=min_word_score)
     if "words" in data:
         return [
             {

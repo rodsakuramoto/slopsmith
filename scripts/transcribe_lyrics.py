@@ -47,8 +47,6 @@ sys.path.insert(0, str(_ROOT / "lib"))
 
 from sloppak_convert import transcribe_existing_sloppak  # noqa: E402
 
-log = logging.getLogger("slopsmith.scripts.transcribe_lyrics")
-
 
 def _progress_printer(frac: float, stage: str, msg: str) -> None:
     sys.stdout.write(f"\r[{stage:>12}] {int(frac * 100):3d}%  {msg:<60}")

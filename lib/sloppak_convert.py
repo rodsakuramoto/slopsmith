@@ -544,25 +544,43 @@ def demucs_available() -> bool:
 def _load_converter_config() -> dict:
     """Read `${CONFIG_DIR}/config.json` and return the parsed dict.
 
-    Returns `{}` when the file is missing or malformed — same graceful
-    fallback the legacy `_get_demucs_server_url()` relied on. Shared by
-    `_get_demucs_server_url()` and `_get_whisperx_config()` so both
-    helpers see a consistent view of converter-wide settings."""
+    Returns `{}` when the file is missing, unreadable, or the JSON root
+    is not an object (e.g. a hand-edited list or scalar). Same graceful
+    fallback the legacy `_get_demucs_server_url()` relied on, but tightened
+    so callers can rely on the return being a dict — every downstream
+    accessor does `.get(...)` and would raise on a list/scalar root."""
     config_dir = Path(os.environ.get("CONFIG_DIR", "/config"))
     config_file = config_dir / "config.json"
     if not config_file.exists():
         return {}
     try:
-        return json.loads(config_file.read_text()) or {}
+        parsed = json.loads(config_file.read_text(encoding="utf-8"))
     except Exception as e:
         log.debug("failed to read converter config: %s", e)
         return {}
+    if not isinstance(parsed, dict):
+        log.debug("converter config root must be an object, got %s",
+                  type(parsed).__name__)
+        return {}
+    return parsed
 
 
 def _get_demucs_server_url() -> str | None:
     """Get the configured remote demucs server URL, if any."""
     url = _load_converter_config().get("demucs_server_url", "") or ""
+    if not isinstance(url, str):
+        return None
     return url.rstrip("/") or None
+
+
+def _coerce_float(value: object, default: float) -> float:
+    """Best-effort float coercion for config knobs. Hand-edited configs
+    often type numerics as strings; tolerate that. Anything that can't
+    parse falls through to the default rather than raising."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def _get_whisperx_config() -> dict:
@@ -583,20 +601,30 @@ def _get_whisperx_config() -> dict:
     When `server_url` is unset, callers fall through to
     `_get_demucs_server_url()` — Byron's reference demucs-server
     already hosts WhisperX at `/align`, so the same URL serves both
-    workloads for the common single-box deployment."""
+    workloads for the common single-box deployment.
+
+    Every field is type-coerced so a hand-edited config can't crash the
+    split. A `whisperx` key that isn't a dict (or a missing one) yields
+    full defaults."""
     cfg = _load_converter_config()
-    raw = cfg.get("whisperx") or {}
-    server_url = raw.get("server_url") or None
+    raw = cfg.get("whisperx")
+    if not isinstance(raw, dict):
+        raw = {}
+    server_url = raw.get("server_url")
     if isinstance(server_url, str):
         server_url = server_url.rstrip("/") or None
+    else:
+        server_url = None
+    api_key = raw.get("api_key") if isinstance(raw.get("api_key"), str) else None
+    language = raw.get("language") if isinstance(raw.get("language"), str) else None
     return {
         "enabled": bool(raw.get("enabled", False)),
         "model_size": str(raw.get("model_size") or "medium"),
         "server_url": server_url,
-        "api_key": raw.get("api_key") or None,
-        "language": raw.get("language") or None,
-        "min_word_score": float(raw.get("min_word_score", 0.35)),
-        "silence_rms_threshold": float(raw.get("silence_rms_threshold", 0.005)),
+        "api_key": api_key or None,
+        "language": language or None,
+        "min_word_score": _coerce_float(raw.get("min_word_score"), 0.35),
+        "silence_rms_threshold": _coerce_float(raw.get("silence_rms_threshold"), 0.005),
     }
 
 
@@ -844,20 +872,28 @@ def _maybe_transcribe_lyrics(
     Returns True when lyrics were written, False otherwise. All
     exceptions are caught and logged at WARNING — the caller treats
     transcription as best-effort."""
-    if not enabled:
+    # Helper: emit a "skip" progress update at the end of this step's
+    # reserved slice so callers' progress printers / UIs don't stall
+    # short of base_frac + span_frac when the transcription bails on
+    # any of the gates below.
+    def _skip(reason: str) -> bool:
+        _progress(progress_cb, base_frac + span_frac, "transcribing", reason)
         return False
+
+    if not enabled:
+        return False  # not reserving a progress slice when disabled
     if not any(s.get("id") == "vocals" for s in produced_stems):
         log.debug("_maybe_transcribe_lyrics: no vocals stem in produced output")
-        return False
+        return _skip("No vocals stem to transcribe")
     vocals_path = source_dir / "stems" / "vocals.ogg"
     if not vocals_path.exists():
         log.debug("_maybe_transcribe_lyrics: %s missing despite manifest entry", vocals_path)
-        return False
+        return _skip("Vocals stem missing")
     lyrics_path = source_dir / "lyrics.json"
     if lyrics_path.exists() and not force:
         log.info("_maybe_transcribe_lyrics: %s already has lyrics, skipping (use force=True to override)",
                  source_dir.name)
-        return False
+        return _skip("Lyrics already present")
 
     cfg = _get_whisperx_config()
 
@@ -870,12 +906,12 @@ def _maybe_transcribe_lyrics(
         )
     except ImportError as e:
         log.warning("_maybe_transcribe_lyrics: lyrics_transcribe import failed: %s", e)
-        return False
+        return _skip("Transcription deps missing")
 
     if not vocals_has_signal(vocals_path, threshold=cfg["silence_rms_threshold"]):
         log.info("_maybe_transcribe_lyrics: %s vocals below silence threshold — skipping (likely instrumental)",
                  source_dir.name)
-        return False
+        return _skip("Instrumental — vocals stem silent")
 
     # WhisperX server URL precedence: explicit `whisperx.server_url`
     # wins, else fall back to the demucs server (Byron's reference
@@ -896,13 +932,14 @@ def _maybe_transcribe_lyrics(
                 vocals_path, server_url,
                 language=cfg["language"],
                 api_key=cfg["api_key"],
+                min_word_score=cfg["min_word_score"],
                 progress_cb=_inner_cb,
             )
         else:
             if not whisperx_available():
                 log.warning("_maybe_transcribe_lyrics: whisperx not installed and no server configured — "
                             "skipping. Install whisperx or set whisperx.server_url / demucs_server_url.")
-                return False
+                return _skip("WhisperX unavailable")
             lyrics = transcribe_vocals_local(
                 vocals_path,
                 model_size=cfg["model_size"],
@@ -913,11 +950,11 @@ def _maybe_transcribe_lyrics(
     except Exception as e:
         log.warning("_maybe_transcribe_lyrics: transcription failed for %s: %s",
                     source_dir.name, e, exc_info=True)
-        return False
+        return _skip(f"Transcription failed: {e}")
 
     if not lyrics:
         log.info("_maybe_transcribe_lyrics: %s produced no lyrics after filtering", source_dir.name)
-        return False
+        return _skip("No lyrics after filtering")
 
     lyrics_path.write_text(json.dumps(lyrics, separators=(",", ":")), encoding="utf-8")
     _rewrite_lyrics_manifest(source_dir, "lyrics.json", "whisperx")
@@ -1011,6 +1048,12 @@ def _split_in_dir(
 
     full_ogg.unlink(missing_ok=True)
     _rewrite_stems_manifest(source_dir, produced)
+
+    # Final flush so the caller's progress printer / UI bar always reaches
+    # base_frac + span_frac for this stage, even when the transcription
+    # pass was disabled (in which case the helper consumed the full
+    # span_frac for the split itself).
+    _progress(progress_cb, base_frac + span_frac, "splitting", "Split complete")
 
 
 def split_sloppak_stems(
@@ -1163,13 +1206,22 @@ def _transcribe_existing_in_dir(
 
     # State 2: only a full mix exists. Delegate to the split path so
     # Demucs produces vocals.ogg and the same transcription gate fires
-    # at the end. Passing `force=True` is honored by _maybe_transcribe_lyrics
-    # via the existing lyrics.json gate; the split path itself doesn't
-    # forward force, but we already cleared the lyrics_path check above
-    # when force=True is set, and otherwise the existing-lyrics gate
-    # would have short-circuited us earlier.
+    # at the end. The transcribe gate inside `_split_in_dir` is keyed
+    # off `lyrics.json` existence, so under `force=True` we have to
+    # stash the existing file out of the way before the split runs.
+    # Restore it from the in-memory backup if transcription doesn't
+    # write a fresh one (Demucs success but Whisper failure / silence
+    # gate / config missing) — losing the user's only lyrics because
+    # we proactively deleted them and the new pass bailed is the worst
+    # possible failure mode here.
+    previous_lyrics = None
     if force and lyrics_path.exists():
+        previous_lyrics = lyrics_path.read_bytes()
         lyrics_path.unlink(missing_ok=True)
-    _split_in_dir(source_dir, model, progress_cb, base_frac, span_frac,
-                  transcribe_lyrics=True)
+    try:
+        _split_in_dir(source_dir, model, progress_cb, base_frac, span_frac,
+                      transcribe_lyrics=True)
+    finally:
+        if previous_lyrics is not None and not lyrics_path.exists():
+            lyrics_path.write_bytes(previous_lyrics)
     return lyrics_path.exists()

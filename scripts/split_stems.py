@@ -57,11 +57,17 @@ def main() -> int:
     ap.add_argument("--model", default="htdemucs_6s",
                     help="demucs model (default: htdemucs_6s = 6 stems inc. guitar + piano; "
                          "htdemucs = 4 stems without guitar)")
+    # `default=None` on both so neither flag's argparse-default leaks into the
+    # shared dest. The split_sloppak_stems contract treats `None` as "defer to
+    # config" and `True`/`False` as explicit override; argparse's per-action
+    # default of True for store_false would otherwise turn "no flag passed"
+    # into "force on", bypassing the config-driven path.
     grp = ap.add_mutually_exclusive_group()
     grp.add_argument("--auto-lyrics", dest="auto_lyrics", action="store_true",
                      default=None,
                      help="also run WhisperX on the vocals stem and write lyrics.json")
     grp.add_argument("--no-auto-lyrics", dest="auto_lyrics", action="store_false",
+                     default=None,
                      help="disable lyric transcription even if enabled in config")
     args = ap.parse_args()
 
