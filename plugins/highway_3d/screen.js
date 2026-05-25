@@ -207,7 +207,7 @@
     const CHORD_HWY_LINGER_S = 0.75;
     /** Linear fade at end of `CHORD_HWY_LINGER_S` (applies to chord UI and board ghost numbers). */
     const CHORD_HWY_FADE_S = 0.32;
-    const GHOST_HOLD_AFTER_ONSET = 0.75;
+    const GHOST_HOLD_AFTER_ONSET = CHORD_HWY_LINGER_S;
     const GHOST_FRET_LBL_FADE_S = CHORD_HWY_FADE_S;
     /** Purple lane rails: extend past last matched chord/note so Z reaches frame end. */
     const ARP_HWY_RAIL_END_TAIL_S = 0.38;
@@ -2326,6 +2326,13 @@
         // consumed by drawNote() reads later in the same frame.
         const _scrGhostLastT         = new Array(MAX_RENDER_STRINGS).fill(-Infinity);
         const _scrGhostPrevBuf       = new Map();
+        // Hoisted scratch for the arp-bracket dedupe within a single draw().
+        // Keys are `${chordId}:${occurrenceStart}` strings (cheap to build, low
+        // cardinality per frame); values are Sets of string-indices that have
+        // already drawn brackets in the AHEAD note-stream pass. Cleared at the
+        // top of every chord pass so the Set objects (and the outer Map) are
+        // reused across frames instead of reallocated.
+        const _scrNoteStreamBracketStrings = new Map();
         // Scratch object reused for chord-note drawNote calls so `{ ...cn, t: ch.t }`
         // doesn't allocate a new object per chord note per frame.
         const _scrChordNote = {};
@@ -7072,7 +7079,13 @@
             // Tracks which (chordId → Set<stringIndex>) pairs already had
             // brackets drawn by the note-stream loop, so the chord loop can
             // skip duplicate bracket draws for the same string.
-            const _noteStreamBracketStrings = new Map();
+            // Hoisted Map — clear (rather than reallocate) so the per-frame
+            // chord-bracket dedupe doesn't churn GC in dense arpeggio passages.
+            // (The inner Sets stored as values lose their Map reference on
+            // .clear() and get GC'd along with the keys; only the outer Map
+            // is reused.)
+            _scrNoteStreamBracketStrings.clear();
+            const _noteStreamBracketStrings = _scrNoteStreamBracketStrings;
             _scrLastFretForString.fill(undefined, 0, nStr);
             const lastFretForString = _scrLastFretForString;
             if (notes) {
@@ -7930,9 +7943,14 @@
                         // renderOrder 17/18 — above sustain trails (12/13) and rails (16), below note gems (50-700)
                         drawFrameBox(cx, yBot + ft * 0.5, width, ft, 17);
                         const withTopFrame = !isRepeat;
+                        // Non-repeat tapers the upper side bars + draws a thin top bar;
+                        // hoisted out so ySideHi can match the actual top-bar thickness
+                        // (using ft would leave a visible gap between the thin top bar
+                        // and the side bars meeting it).
+                        const ftThin = ftSide * 0.22;
 
                         const ySideLo = yBot + ft;
-                        const ySideHi = withTopFrame ? yTop - ft : yTop - ft * 0.15;
+                        const ySideHi = withTopFrame ? yTop - ftThin : yTop - ft * 0.15;
                         const sideH = Math.max(ySideHi - ySideLo, ft * 1.25);
                         const sideCy = ySideLo + sideH * 0.5;
 
@@ -7941,7 +7959,6 @@
                             drawFrameBox(cx + width * 0.5 - ftSide * 0.5, sideCy, ftSide, sideH, 18);
                         } else {
                             // Non-repeat: thick sides up to repeat-frame height, then taper to thin above.
-                            const ftThin = ftSide * 0.22;
                             const threshY = yBot + fullChordBoxH * 0.5; // top of what a repeat frame would be
 
                             // Lower thick segment (ySideLo → threshY)
@@ -7990,7 +8007,10 @@
                             // horizontal bars — gradient expands in Y (no rotation)
                             drawHaloBar(cx, yBot + ft * 0.5,                          width  * 0.5, ft,     0);
                             if (withTopFrame)
-                            drawHaloBar(cx, yTop - ft * 0.5,                          width  * 0.5, ft,     0);
+                            // Top bar is `ftThin` (see non-repeat draw block above) —
+                            // halo Y centre and scaleY follow the actual bar so the
+                            // bloom doesn't sit above the visible rim.
+                            drawHaloBar(cx, yTop - ftThin * 0.5,                       width  * 0.5, ftThin, 0);
                             // vertical bars — gradient expands in X (rotate 90° so Y→X)
                             drawHaloBar(cx - width * 0.5 + ftSide * 0.5, sideCy,  sideH  * 0.5, ftSide, Math.PI * 0.5);
                             drawHaloBar(cx + width * 0.5 - ftSide * 0.5, sideCy,  sideH  * 0.5, ftSide, Math.PI * 0.5);
