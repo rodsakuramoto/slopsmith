@@ -583,6 +583,30 @@ def _coerce_float(value: object, default: float) -> float:
         return default
 
 
+def _coerce_bool(value: object, default: bool) -> bool:
+    """Strict bool coercion for config flags. A hand-edited config that
+    contains `"enabled": "false"` would otherwise be `bool("false") ==
+    True`, silently turning on a feature the user thought they disabled.
+
+    Accepts:
+      - real booleans (True / False)
+      - case-insensitive strings "true"/"yes"/"on"/"1" → True
+      - case-insensitive strings "false"/"no"/"off"/"0" → False
+      - real numbers (0 → False, non-zero → True)
+    Anything else falls back to `default` instead of raising."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "yes", "on", "1"):
+            return True
+        if v in ("false", "no", "off", "0", ""):
+            return False
+    return default
+
+
 def _get_whisperx_config() -> dict:
     """Return the WhisperX sub-config from `${CONFIG_DIR}/config.json`.
 
@@ -618,7 +642,7 @@ def _get_whisperx_config() -> dict:
     api_key = raw.get("api_key") if isinstance(raw.get("api_key"), str) else None
     language = raw.get("language") if isinstance(raw.get("language"), str) else None
     return {
-        "enabled": bool(raw.get("enabled", False)),
+        "enabled": _coerce_bool(raw.get("enabled"), False),
         "model_size": str(raw.get("model_size") or "medium"),
         "server_url": server_url,
         "api_key": api_key or None,
