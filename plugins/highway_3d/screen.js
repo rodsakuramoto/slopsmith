@@ -1876,9 +1876,10 @@
         let gNote = null, gSus = null, gBeat = null, gTapChevron = null;
         let mStr = [], mGlow = [], mSus = [], mStrHitOutline = [], mAccentOutline = [], mAccentCore = [], mAccentHaloNear = [], mAccentHaloMid = [], mAccentHaloFar = [];
         let mWhiteOutline = null, mSusOutline = null;
-        // Dedicated sustain-trail outline materials for hit/miss feedback.
-        // Match mSusOutline's opacity (0.75) so they don't bleed through
-        // the semi-transparent body (mSus[s]) and tint its interior.
+        // Dedicated sustain-trail outline material for the hit verdict.
+        // Drawn at opacity 0.45 — lower than mSusOutline (0.75) so the
+        // bright green emissive doesn't tint the body interior, and the
+        // verdict shows mostly on the outline fringe past the body edges.
         // Only the hit-side rim ships; the verdict on miss is carried by
         // mMissOutline (the gem-border material) instead of a dedicated
         // sustain outline — matches the "outline-only verdict, body retains
@@ -6708,8 +6709,12 @@
             // ── Recent-past event per string (for _nextAnyT deadline) ─────
             // Once a note/chord passes `now` it leaves _drawNextByString,
             // resetting _nextAnyT and letting old gems linger too long.
-            // Scan up to 0.6 s back so drawNote can include these in the
-            // deadline calculation even after they've been played.
+            // Scan back at least CHORD_HWY_LINGER_S so the deadline logic
+            // can see every event that lands inside any active linger
+            // window (chord frame linger and gem linger both cap at
+            // CHORD_HWY_LINGER_S — a tighter scan would miss events in
+            // (now - CHORD_HWY_LINGER_S, now - 0.6) and let the frame
+            // linger past the next event).
             {
                 // Hoisted scratch — avoids `new Array(nStr).fill(...)` every frame.
                 const _recArr = _scrRecentByString;
@@ -6718,7 +6723,7 @@
                     let _ri = lowerBoundT(notes, now);
                     for (let i = _ri - 1; i >= 0; i--) {
                         const n = notes[i];
-                        if (n.t < now - 0.6) break;
+                        if (n.t < now - CHORD_HWY_LINGER_S) break;
                         if (validString(n.s) && n.t > _recArr[n.s]) _recArr[n.s] = n.t;
                     }
                 }
@@ -6742,7 +6747,7 @@
                     }
                     for (; _ci >= 0; _ci--) {
                         const ch = chords[_ci];
-                        if (ch.t < now - 0.6) break;
+                        if (ch.t < now - CHORD_HWY_LINGER_S) break;
                         if (!ch.notes) continue;
                         for (const cn of ch.notes) {
                             if (validString(cn.s) && ch.t > _recArr[cn.s]) _recArr[cn.s] = ch.t;
