@@ -9118,6 +9118,14 @@
             let _ndProbed = false;
             let _ndProbedState = null;
             if (_overLinger && (!hasSus || now > susEnd) && !arpGhostShouldRun) {
+                // Prune the sustain-verdict latch before any cull-path return.
+                // The matching delete inside the sustain-render block (line ~9262)
+                // only runs when the note isn't culled — without this prune, a
+                // sustained note that crosses susEnd on the same frame as
+                // _overLinger goes true would leak its latch entry until a
+                // teardown/seek clears the Map. !hasSus notes never wrote to
+                // the latch, so Map.delete is a harmless no-op there.
+                if (hasSus) _susVerdictLatch.delete(Math.round(n.t * 1e4) * 10 + n.s);
                 if (!_ndHasProvider || dt < -NOTEDETECT_GEM_VERDICT_WINDOW) return;
                 let _ndProbe = null;
                 try { _ndProbe = _ndGetNoteState(n, n.t); } catch (e) { _ndProbe = null; }
