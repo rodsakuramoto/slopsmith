@@ -67,7 +67,13 @@ def _process_one(path: Path, *, force: bool, model: str) -> int:
     if wrote:
         print(f"[ok] {path.name}: lyrics written")
         return 0
-    print(f"[--] {path.name}: skipped (already has lyrics, or no signal)")
+    # transcribe_existing_sloppak returns False for any non-success path:
+    # existing lyrics + no force, instrumental, missing whisperx, remote
+    # server failure, no tokens after filtering. The underlying reason is
+    # logged via slopsmith.lib.* (basicConfig wires those to stdout in
+    # main()), so keep this surface message generic and point users at
+    # the log lines for specifics.
+    print(f"[--] {path.name}: no lyrics written — see log above for reason")
     return 0
 
 

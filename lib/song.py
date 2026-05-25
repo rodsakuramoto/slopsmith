@@ -154,9 +154,11 @@ class Song:
     lyrics: list[dict] = field(default_factory=list)
     # Provenance of the lyrics, when present. One of "xml" | "sng" | "whisperx" |
     # "user" — surfaces in the highway WS payload so the UI can render a badge
-    # (e.g. "auto-transcribed — may be inaccurate" for whisperx). Empty string
-    # on legacy sloppaks / sources that don't track provenance; consumers
-    # default missing to "xml".
+    # (e.g. "auto-transcribed — may be inaccurate" for whisperx). The sloppak
+    # loader (lib/sloppak.py) defaults missing manifest keys to "xml" at load
+    # time so legacy sloppaks aren't mis-badged; the dataclass default of ""
+    # only persists for sources that build a Song without populating it (e.g.
+    # in-test stubs, the WS path before lyrics have been emitted).
     lyrics_source: str = ""
 
 
