@@ -526,8 +526,8 @@
      *  fade (chDt <= 0) when a scorer is attached.
      *  Matches the gem hit/miss colours so chord frame and note body
      *  give a consistent signal:
-     *    hit  → neon spring-green 0x22ff88 (same as mHitOutline / mHitBright).
-     *    miss → hot magenta-red 0xff0066 (same as mMissOutline / mMissEdge). */
+     *    hit  → neon spring-green 0x22ff88 (same as mHitBright).
+     *    miss → hot magenta-red 0xff0066 (same as mMissOutline). */
     const CHORD_BOX_HIT_BRIGHT_HEX  = 0x22ff88;
     const CHORD_BOX_MISS_DARK_HEX   = 0xff0066;
 
@@ -1879,7 +1879,11 @@
         // Dedicated sustain-trail outline materials for hit/miss feedback.
         // Match mSusOutline's opacity (0.75) so they don't bleed through
         // the semi-transparent body (mSus[s]) and tint its interior.
-        let mHitSusOutline = null, mMissSusOutline = null;
+        // Only the hit-side rim ships; the verdict on miss is carried by
+        // mMissOutline (the gem-border material) instead of a dedicated
+        // sustain outline — matches the "outline-only verdict, body retains
+        // string colour" doctrine for the rest of the rendering path.
+        let mHitSusOutline = null;
         // Shared materials for the legato technique meshes — one per geometry
         // type, reused across every pooled mesh instance to avoid per-mesh
         // material allocation in dense HO/PO/tap passages. Allocated in
@@ -1894,17 +1898,16 @@
         // Notedetect feedback outlines (issue #9). Created in initScene
         // alongside mWhiteOutline; swapped onto the note's outline mesh
         // when a recent notedetect:hit / :miss event matches the note's
-        // (s, f, t).
-        let mHitOutline = null, mMissOutline = null, mMissCore = null;
-        let mHitEdge = null, mMissEdge = null;
-        // Per-string verdict materials used for outline + lateral face fill.
-        // mHitBright[s]: boosted emissive of string colour (hit flash).
-        // mMissDark[s]:  darkened (~25%) string colour (miss).
-        // Built in initScene() after mGlow. Arrays share the same material
+        // (s, f, t). The miss gem border uses mMissOutline; the hit side
+        // uses per-string mHitBright[s] for the cyan-shifted flash.
+        let mMissOutline = null;
+        // Per-string hit verdict material used for outline + lateral face fill.
+        // Built in initScene() after mGlow. Array share the same material
         // instances so outline and face fill always match exactly.
         let mHitBright = [], mHitBrightArrays = [];
-        let mMissDark  = [], mMissDarkArrays  = [];
-        let mMissEdgeArrays = null; // [mMissEdge×4, mEdgeTransparent×2] — magenta-red face fill for miss
+        // Magenta-red face fill for miss — see initScene() for construction
+        // (uses mMissOutline ×4 + mEdgeTransparent ×2).
+        let mMissEdgeArrays = null;
         let mEdgeTransparent = null;
         let pSusOutline = null, pNoteEdge = null;
         let projMeshArr = null;
@@ -1925,7 +1928,12 @@
         // Cleared on canvas resize (bx/by depend on canvasW/H/lyricsBottom)
         // and on teardown/destroy.
         const _diagRenderCache = new Map();
-        const _DIAG_CACHE_MAX  = 20;
+        // Cap chosen to cover the ~5–6 active chord shapes per phrase while
+        // keeping the cached-OffscreenCanvas footprint bounded (~50 MB per
+        // panel at typical 1920×1080). A structural fix — caching a
+        // tightly-sized box surface instead of the full overlay canvas —
+        // is tracked as a follow-up.
+        const _DIAG_CACHE_MAX  = 6;
         let pSusRail = null, gSusRail = null, mSusRailBase = null;
         let pSusRailBloom = null, gSusRailBloom = null, mSusRailBloomBase = null, _bloomGaussTex = null;
         let pTechPlane = null, gTechPlane = null;
@@ -4028,20 +4036,16 @@
                     blending: T.AdditiveBlending, side: T.DoubleSide, fog: false,
                 }),
             ));
-            // Notedetect feedback (issue #9): neon spring-green / magenta-red outline
-            // tints. Hit = 0x22ff88 (hue ~150°, cyan-shifted green — distinct from the
-            // string green 0x30d040 at hue ~128°). Miss = 0xff0066 (hue ~345°, hot
-            // magenta-red — distinct from the string red 0xff2828 at hue ~0°).
-            // Note rendering swaps its outline.material between
-            // mWhiteOutline / mHitOutline / mMissOutline based on
-            // recent notedetect events.
-            mHitOutline = new T.MeshLambertMaterial({ color: 0x22ff88, emissive: 0x22ff88, emissiveIntensity: 1.2, transparent: true, opacity: 1.0, depthWrite: false });
+            // Notedetect feedback outline (issue #9): hot magenta-red (0xff0066, hue
+            // ~345°) — distinct from the string red 0xff2828 at hue ~0°. Note rendering
+            // swaps its outline.material between mWhiteOutline / per-string
+            // mHitBright[s] / mMissOutline based on recent notedetect events.
             mMissOutline = new T.MeshLambertMaterial({ color: 0xff0066, emissive: 0xff0066, emissiveIntensity: 1.2, transparent: true, opacity: 1.0, depthWrite: false });
-            // Face-fill materials for hit/miss feedback: semi-transparent mesh
-            // drawn over the gem's faces so all six sides receive the tint.
-            mHitEdge  = new T.MeshBasicMaterial({ color: 0x22ff88, transparent: true, opacity: 0.40, side: T.DoubleSide, depthWrite: false });
-            mMissEdge = new T.MeshBasicMaterial({ color: 0xff0066, transparent: true, opacity: 0.55, side: T.DoubleSide, depthWrite: false });
-            // Transparent placeholder for front (+Z, group 4) and back (-Z, group 5).
+            // Transparent placeholder for front (+Z, group 4) and back (-Z, group 5)
+            // of the lateral face-fill material array. Also the default material for
+            // the pNoteEdge pool: pool consumers reassign .material before render, so
+            // the placeholder is never displayed — using an explicitly-invisible
+            // material makes that intent obvious.
             // BoxGeometry group order: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z(front), 5=-Z(back)
             mEdgeTransparent = new T.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
             // mMissEdgeArrays: use mMissOutline (same Lambert+emissive material as the gem
@@ -4056,26 +4060,12 @@
                 transparent: true, opacity: 1.0, depthWrite: false,
             }));
             mHitBrightArrays = mHitBright.map(m => [m, m, m, m, mEdgeTransparent, mEdgeTransparent]);
-
-            // Miss: fixed dark charcoal body on every string — pairs with the magenta-red
-            // mMissOutline ring so the gem reads as "extinguished" + red-rimmed on any
-            // string, including the red string (0xff2828) which would otherwise blend.
-            mMissDark = activePalette.map(() => new T.MeshLambertMaterial({
-                color: 0x181818, emissive: 0x1a0010, emissiveIntensity: 0.6,
-                transparent: true, opacity: 1.0, depthWrite: false,
-            }));
-            mMissDarkArrays = mMissDark.map(m => [m, m, m, m, mEdgeTransparent, mEdgeTransparent]);
-            // Dark charcoal core for missed gems: magenta-red emissive tint pairs with
-            // mMissOutline (0xff0066) to produce an "extinguished with red rim" look
-            // that reads as a miss on every string, including the red and green ones.
-            mMissCore = new T.MeshLambertMaterial({ color: 0x181818, emissive: 0x440018, emissiveIntensity: 0.4, transparent: true, opacity: 1.0, depthWrite: false });
             // Outline materials render at a lower renderOrder than the body.
             // The body is rendered on top with opacity:1 on hit/miss, which
             // fully covers the outline center — only the fringe that extends
             // past the body edges (0.2*K on each side) is visible.
             mSusOutline     = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.3, transparent: true, opacity: 0.75, depthWrite: false });
             mHitSusOutline  = new T.MeshLambertMaterial({ color: 0x22ff88, emissive: 0x22ff88, emissiveIntensity: 0.8, transparent: true, opacity: 0.45, depthWrite: false });
-            mMissSusOutline = new T.MeshLambertMaterial({ color: 0xff0066, emissive: 0xff0066, emissiveIntensity: 0.8, transparent: true, opacity: 0.45, depthWrite: false });
             mBeatM = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 });
             mBeatQ = new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.07 });
 
@@ -4106,7 +4096,10 @@
 
             // ── Pools ──────────────────────────────────────────────────────
             pNote = pool(noteG, () => new T.Mesh(gNote, mStr[0]));
-            pNoteEdge = pool(noteG, () => new T.Mesh(gNote, mHitEdge));
+            // Pool default is the always-invisible mEdgeTransparent — every
+            // consumer reassigns .material before render (to a verdict edge
+            // material array), so the placeholder is never displayed.
+            pNoteEdge = pool(noteG, () => new T.Mesh(gNote, mEdgeTransparent));
             pAccentHalo = pool(noteG, () => new T.Mesh(gNote, mAccentHaloFar[0]));
             pSus = pool(noteG, () => new T.Mesh(gSus, mSus[0]));
             pSusOutline = pool(noteG, () => new T.Mesh(gSus, mSusOutline));
@@ -5025,15 +5018,12 @@
                 // alongside mGlow (accent fill boost).
             }
             if (mWhiteOutline) mWhiteOutline.emissiveIntensity = 0.6 * g;
-            if (mHitOutline)   mHitOutline.emissiveIntensity   = 1.2 * g;
             if (mMissOutline)  mMissOutline.emissiveIntensity  = 1.2 * g;
-            if (mMissCore)     mMissCore.emissiveIntensity     = 0.4 * g;
             for (let s = 0; s < mHitBright.length; s++) {
                 if (mHitBright[s]) mHitBright[s].emissiveIntensity = 4.0 * g;
             }
             if (mSusOutline)      mSusOutline.emissiveIntensity      = 0.3 * g;
             if (mHitSusOutline)   mHitSusOutline.emissiveIntensity   = 0.7 * g;
-            if (mMissSusOutline)  mMissSusOutline.emissiveIntensity  = 0.7 * g;
             if (mTapChevron)   mTapChevron.emissiveIntensity   = 0.9 * g;
             if (mBarre)        mBarre.emissiveIntensity        = 0.9 * g;
             for (let si = 0; si < activePalette.length; si++) {
@@ -9489,9 +9479,10 @@
                             for (let i = 0; i < offsets.length; i++) {
                                 const xOff = xCenter + offsets[i];
                                 // Outline renders first (lower renderOrder), body on top.
-                                // On hit/miss the body uses an opaque material (mGlow/mMissDark,
-                                // opacity:1) that fully covers the outline center — only the
-                                // fringe that extends past the body edges shows the verdict color.
+                                // On hit/miss the body uses mGlow[s] (opaque + emissive,
+                                // opacity:1) — the body retains string identity and the
+                                // outline-fringe extending past the body edges carries the
+                                // verdict colour (outline-only verdict doctrine).
                                 // On neutral the body is semi-transparent (mSus, opacity:0.35)
                                 // which lets the neutral white outline bleed slightly — same
                                 // look as before the hit/miss feature was added.
@@ -10042,12 +10033,10 @@
             // Notedetect outline materials (#9). May not be reachable
             // via scene.traverse if no event ever fired (never attached
             // to a mesh), so dispose explicitly.
-            mHitOutline?.dispose?.(); mMissOutline?.dispose?.(); mMissCore?.dispose?.();
-            mHitSusOutline?.dispose?.(); mMissSusOutline?.dispose?.();
-            mHitEdge?.dispose?.(); mHitEdge = null; mMissEdge?.dispose?.(); mMissEdge = null;
+            mMissOutline?.dispose?.();
+            mHitSusOutline?.dispose?.();
             mEdgeTransparent?.dispose?.(); mEdgeTransparent = null;
             for (const m of mHitBright) m?.dispose?.(); mHitBright = []; mHitBrightArrays = [];
-            for (const m of mMissDark)  m?.dispose?.(); mMissDark  = []; mMissDarkArrays  = [];
             for (const k in txtCache) {
                 const tm = txtCache[k];
                 tm.userData.h3dGhostFretMeshMat?.dispose?.();
@@ -10086,7 +10075,7 @@
             if (ren) { ren.dispose(); ren = null; }
             scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
             ambLight = dirLight = null;
-            mStr = []; mGlow = []; mSus = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; mWhiteOutline = mSusOutline = null; mHitOutline = mMissOutline = mMissCore = null; mHitSusOutline = mMissSusOutline = null; stringLines = []; stringLineGlows = [];
+            mStr = []; mGlow = []; mSus = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; mWhiteOutline = mSusOutline = null; mMissOutline = null; mHitSusOutline = null; stringLines = []; stringLineGlows = [];
             for (const m of _inlayMats) m?.dispose?.(); _inlayMats = []; _inlayLabels = [];
             // mTapChevron: dispose explicitly — if no tap marker ever
             // spawned a pooled mesh, the scene.traverse() pass above never
