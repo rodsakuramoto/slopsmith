@@ -2307,6 +2307,10 @@
         const _scrAccentFillBoost    = new Array(MAX_RENDER_STRINGS).fill(0);
         const _scrNextNoteByString   = new Array(MAX_RENDER_STRINGS).fill(null);
         const _scrLastFretForString  = new Array(MAX_RENDER_STRINGS).fill(undefined);
+        // Scratch buffer for the recent-past-event prepass (~0.6 s back) — avoids
+        // re-allocating a per-string Array every frame. Re-filled with -Infinity
+        // at the top of each prepass run.
+        const _scrRecentByString     = new Array(MAX_RENDER_STRINGS).fill(-Infinity);
         // Scratch object reused for chord-note drawNote calls so `{ ...cn, t: ch.t }`
         // doesn't allocate a new object per chord note per frame.
         const _scrChordNote = {};
@@ -6668,9 +6672,13 @@
                 }
             }
             if (chords) {
-                for (const ch of chords) {
-                    if (!ch.notes || ch.t <= now) continue;
+                // Time-sorted: lowerBoundT skips past historical chords in O(log N)
+                // instead of walking the entire prefix every frame.
+                const _ncLo = lowerBoundT(chords, now);
+                for (let _ci = _ncLo; _ci < chords.length; _ci++) {
+                    const ch = chords[_ci];
                     if (ch.t > now + 2) break;
+                    if (!ch.notes || ch.t <= now) continue;
                     for (const cn of ch.notes) {
                         if (!validString(cn.s)) continue;
                         if (!nextNoteByString[cn.s] || ch.t < nextNoteByString[cn.s].t) {
@@ -6694,7 +6702,9 @@
             // Scan up to 0.6 s back so drawNote can include these in the
             // deadline calculation even after they've been played.
             {
-                const _recArr = new Array(nStr).fill(-Infinity);
+                // Hoisted scratch — avoids `new Array(nStr).fill(...)` every frame.
+                const _recArr = _scrRecentByString;
+                for (let i = 0; i < nStr; i++) _recArr[i] = -Infinity;
                 if (notes) {
                     let _ri = lowerBoundT(notes, now);
                     for (let i = _ri - 1; i >= 0; i--) {
@@ -6704,9 +6714,25 @@
                     }
                 }
                 if (chords) {
-                    for (let _ci = chords.length - 1; _ci >= 0; _ci--) {
+                    // Time-sorted: start at the last chord ≤ now instead of
+                    // chords.length-1 (which walks past every future chord
+                    // when `now` is early in the song).
+                    //
+                    // lowerBoundT returns the first index with t >= now. If
+                    // chords share the same timestamp, walk forward through
+                    // the t===now run to the LAST one (so all duplicates at
+                    // `now` are included — the original `if (ch.t > now)
+                    // continue` scan-from-end included them all). When no
+                    // chord is exactly at `now`, start one slot back.
+                    const _ncHi = lowerBoundT(chords, now);
+                    let _ci = _ncHi;
+                    if (_ci < chords.length && chords[_ci].t === now) {
+                        while (_ci + 1 < chords.length && chords[_ci + 1].t === now) _ci++;
+                    } else {
+                        _ci -= 1;
+                    }
+                    for (; _ci >= 0; _ci--) {
                         const ch = chords[_ci];
-                        if (ch.t > now) continue;
                         if (ch.t < now - 0.6) break;
                         if (!ch.notes) continue;
                         for (const cn of ch.notes) {
