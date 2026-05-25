@@ -629,7 +629,6 @@ def parse_arrangement(xml_path: str) -> Arrangement:
                 _ch_pm  = _bool(c, "palmMute")
                 _ch_mt  = _bool(c, "mute")
                 _ch_acc = _bool(c, "accent")
-                _ch_hd_note = _bool(c, "hopo")
                 if not chord_notes and cid < len(chord_templates):
                     ct = chord_templates[cid]
                     for s in range(len(ct.frets)):
