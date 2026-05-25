@@ -83,7 +83,11 @@ fi
 mkdir -p "$BUILD_BASE"
 
 DOTNET_CHANNEL="10.0"
+# vgmstream tag and the immutable commit it MUST resolve to. A tag is a
+# movable Git ref upstream — pinning the expected SHA and verifying after
+# clone catches a re-tag without losing the shallow-clone optimisation.
 VGMSTREAM_REF="r2083"
+VGMSTREAM_COMMIT="57df2e179d929532094f4e4dd42ce5395514622b"
 VGMSTREAM_REPO="https://github.com/vgmstream/vgmstream.git"
 # Static ffmpeg binaries from BtbN/FFmpeg-Builds (GPL, 7.1 series).
 # To bump: pick a new autobuild-* tag from
@@ -283,9 +287,12 @@ ok "System packages installed."
 # Build-time dependencies for compiling vgmstream-cli from source (step 5).
 # Purged after the build in step 5c to keep the rootfs lean.
 info "Installing vgmstream build dependencies (temporary) …"
+# `git` intentionally absent — vgmstream + Rocksmith2014.NET are cloned
+# host-side and the build itself uses cmake only, so the container never
+# invokes git. Adding it back would pull in libcurl/libexpat unnecessarily.
 r "apt-get update -qq && apt-get install -y --no-install-recommends \
     build-essential cmake pkg-config yasm \
-    libmpg123-dev libvorbis-dev libspeex-dev libopus-dev git \
+    libmpg123-dev libvorbis-dev libspeex-dev libopus-dev \
     && apt-get clean && rm -rf /var/lib/apt/lists/*"
 ok "Build dependencies installed."
 
@@ -371,6 +378,12 @@ info "Building vgmstream-cli from source (${VGMSTREAM_REF}) …"
 # hiding anything placed at ${ROOTFS}/tmp/ by the host.
 rm -rf "${ROOTFS}/root/vgmstream"
 git clone --depth 1 --branch "${VGMSTREAM_REF}" "${VGMSTREAM_REPO}" "${ROOTFS}/root/vgmstream"
+# Verify the tag still points at the pinned commit — a re-tag upstream
+# would otherwise silently change what we ship.
+_vgmstream_head=$(git -C "${ROOTFS}/root/vgmstream" rev-parse HEAD)
+if [[ "${_vgmstream_head}" != "${VGMSTREAM_COMMIT}" ]]; then
+  die "vgmstream tag ${VGMSTREAM_REF} resolves to ${_vgmstream_head}, expected ${VGMSTREAM_COMMIT}. Tag may have moved upstream — verify and update VGMSTREAM_COMMIT."
+fi
 
 r "cmake -S /root/vgmstream -B /root/vgmstream/build \
         -DCMAKE_BUILD_TYPE=Release \
@@ -403,9 +416,34 @@ cp "${BUILD_BASE}/ffmpeg-extract/bin/ffmpeg"  "${ROOTFS}/usr/local/bin/ffmpeg"
 cp "${BUILD_BASE}/ffmpeg-extract/bin/ffprobe" "${ROOTFS}/usr/local/bin/ffprobe"
 chmod +x "${ROOTFS}/usr/local/bin/ffmpeg" "${ROOTFS}/usr/local/bin/ffprobe"
 
-# GPL compliance — keep the license text in the rootfs.
+# GPL compliance — ship the license text AND a written offer pointing
+# at where the corresponding source can be obtained, so redistributing
+# the resulting CT template doesn't strand recipients without access to
+# the source for the GPL-licensed binary. LICENSE.txt alone covers the
+# license terms; the SOURCE file satisfies the "corresponding source"
+# availability requirement of GPLv3 §6 / GPLv2 §3.
 mkdir -p "${ROOTFS}/usr/share/doc/ffmpeg"
 cp "${BUILD_BASE}/ffmpeg-extract/LICENSE.txt" "${ROOTFS}/usr/share/doc/ffmpeg/LICENSE.txt"
+cat > "${ROOTFS}/usr/share/doc/ffmpeg/SOURCE" <<EOF
+This ffmpeg/ffprobe binary is a static GPL build from the BtbN/FFmpeg-Builds
+project (https://github.com/BtbN/FFmpeg-Builds). The exact build artefact
+shipped here is:
+
+  Release:  ${FFMPEG_RELEASE}
+  Tarball:  ${FFMPEG_TARBALL}
+  SHA-256:  ${FFMPEG_SHA256}
+
+Corresponding source code (per GPL):
+  - Build recipe + scripts: https://github.com/BtbN/FFmpeg-Builds/tree/${FFMPEG_RELEASE}
+  - Upstream FFmpeg source: https://github.com/FFmpeg/FFmpeg (the FFmpeg
+    commit baked into this build is identified by the n7.1.x version tag
+    in the tarball filename, e.g. n7.1.4-5-ged860ef7d9 → upstream commit
+    ed860ef7d9).
+
+If either URL becomes unavailable, the maintainer of this CT template will
+make the corresponding source available on request for at least three years,
+per GPLv2 §3(b) / GPLv3 §6(b).
+EOF
 
 rm -rf "${BUILD_BASE}/ffmpeg-extract" "${BUILD_BASE}/ffmpeg.tar.xz"
 ok "Static ffmpeg installed."
@@ -416,7 +454,7 @@ ok "Static ffmpeg installed."
 info "Removing build-time dependencies …"
 r "apt-get purge -y --auto-remove \
     build-essential cmake pkg-config yasm \
-    libmpg123-dev libvorbis-dev libspeex-dev libopus-dev git \
+    libmpg123-dev libvorbis-dev libspeex-dev libopus-dev \
     && apt-get clean && rm -rf /var/lib/apt/lists/*"
 ok "Build dependencies removed."
 
