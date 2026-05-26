@@ -352,11 +352,17 @@
     const closeSummary = () => {
       root.classList.add('hidden');
       document.removeEventListener('keydown', onKey);
+      // Clear the module-level reference so teardownActiveSession() knows
+      // there is no stale keydown listener left to clean up.
+      _summaryCleanup = null;
     };
     const onKey = (e) => {
       if (e.key === 'Escape') { closeSummary(); renderHub(); }
     };
     document.addEventListener('keydown', onKey);
+    // Register the cleanup so teardownActiveSession() can remove the listener
+    // if the user navigates away while the summary is visible.
+    _summaryCleanup = closeSummary;
     // Move focus into the modal for keyboard/screen-reader users.
     if (closeBtn) setTimeout(() => closeBtn.focus(), 0);
 
@@ -535,6 +541,16 @@
   // ── Lifecycle ─────────────────────────────────────────────────────────
   let active   = null;     // { spec, modifiers, resolvedTitle, startedAt, lastOpts }
   let starting = false;    // true while start() is in-flight (before active is set)
+  // Monotonically incrementing generation counter. Incremented by
+  // teardownActiveSession() so any in-flight _startInner() can detect that it
+  // has been superseded and bail after each await without mounting the stage
+  // or calling spec.start() for a screen the user has already left.
+  let _startGeneration = 0;
+  // When runSummary() opens the post-run modal it registers a document-level
+  // keydown listener. This variable holds the cleanup function so that
+  // teardownActiveSession() can remove the listener even when active is null
+  // (i.e. the run is over and the user navigates away while the summary is open).
+  let _summaryCleanup = null;
 
   async function start(gameId, opts) {
     // Guard against concurrent start() calls: `active` is set only after the
@@ -543,14 +559,15 @@
     // a double-tap on a tile). `starting` flips synchronously on entry.
     if (active || starting) { console.warn('[minigames] a game is already active or starting; ignoring start(%s)', gameId); return; }
     starting = true;
+    const myGeneration = ++_startGeneration;
     try {
-      return await _startInner(gameId, opts);
+      return await _startInner(gameId, opts, myGeneration);
     } finally {
       starting = false;
     }
   }
 
-  async function _startInner(gameId, opts) {
+  async function _startInner(gameId, opts, myGeneration) {
     const spec = registered.get(gameId);
     if (!spec) { console.warn('[minigames] no such minigame:', gameId); return; }
 
@@ -558,6 +575,8 @@
     // used in both the stage header and the run summary — even when modifiers
     // are supplied directly (e.g. Play Again with cached opts).
     const reg = await getServerRegistry().catch(() => ({ minigames: [] }));
+    // Bail if teardownActiveSession() fired while we were awaiting.
+    if (myGeneration !== _startGeneration) { return; }
     const manifestSpec = (reg.minigames || []).find(m => m.plugin_id === gameId) || {};
     const resolvedTitle = manifestSpec.title || spec.title || gameId;
 
@@ -579,6 +598,8 @@
       } catch (e) {
         return; // cancelled
       }
+      // Bail if teardownActiveSession() fired while we were in the picker.
+      if (myGeneration !== _startGeneration) { return; }
     }
 
     // Show the stage chrome.
@@ -777,8 +798,10 @@
       // Thumbnails are served via the minigame plugin's own asset route
       // (the Slopsmith plugin loader only serves manifest-declared files,
       // so each minigame that ships extra assets must expose /assets/).
+      // Thumbnails are served by the minigame plugin's own /assets/ route;
+      // not every plugin ships one, so fall back to the placeholder on 404.
       const art = thumbnail
-        ? `<div class="card-art"><img src="/api/plugins/${encodeURIComponent(spec.id)}/assets/${encodeURIComponent(thumbnail)}" alt="${escapeHtml(title)}"></div>`
+        ? `<div class="card-art"><img src="/api/plugins/${encodeURIComponent(spec.id)}/assets/${encodeURIComponent(thumbnail)}" alt="${escapeHtml(title)}" onerror="this.parentElement.innerHTML='<span class=\\'placeholder\\'>🎮</span>'"></div>`
         : `<div class="card-art"><span class="placeholder">🎮</span></div>`;
       tile.innerHTML = `
         ${art}
@@ -855,10 +878,16 @@
   // microphone streams, timers, and stage DOM are cleaned up without submitting
   // a zero-score run.
   async function teardownActiveSession(reason) {
-    if (!active && !starting) return;
+    if (!active && !starting && !_summaryCleanup) return;
+    // Increment the generation so any in-flight _startInner() bails at its
+    // next await point without mounting the stage or calling spec.start().
+    _startGeneration++;
     const spec = active && active.spec;
     active   = null;
     starting = false;
+    // Dismiss the summary modal and remove its document-level keydown listener
+    // if the user navigated away while the post-run summary was open.
+    if (_summaryCleanup) { try { _summaryCleanup(); } catch (e) {} }
     try { if (spec && typeof spec.stop === 'function') await spec.stop(); } catch (e) { console.error('[minigames] teardown spec.stop failed:', e); }
     _timers.forEach(t => { clearTimeout(t); clearInterval(t); });
     _timers.clear();
@@ -876,7 +905,9 @@
       const id = e && e.detail && e.detail.id;
       if (id === SCREEN_ID) {
         renderHub();
-      } else if (active || starting) {
+      } else if (active || starting || _summaryCleanup) {
+        // Teardown covers: active run, in-flight startup, and post-run summary
+        // left open while the user navigated away.
         teardownActiveSession('screen-changed').catch((err) => {
           console.error('[minigames] teardown failed:', err);
         });

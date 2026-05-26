@@ -28,6 +28,10 @@ from pydantic import BaseModel, Field
 
 
 _lock = threading.Lock()
+# Separate lock for the registry cache so _list_minigame_plugins() can be
+# called safely from within a _lock-held section (e.g. submit_run) without
+# deadlocking.
+_registry_lock = threading.Lock()
 _state = {
     "db_path": None,
     "profile_path": None,
@@ -85,7 +89,16 @@ def _get_conn():
     # practice as MetadataDB in server.py). busy_timeout is set via the
     # connect() timeout= arg above (5 s), which maps to PRAGMA busy_timeout
     # in Python's sqlite3 module when the connection opens.
-    conn.execute("PRAGMA journal_mode=WAL")
+    # PRAGMA returns the *active* journal mode; WAL can silently fall back
+    # (e.g. on a read-only filesystem) so log a warning when that happens.
+    row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    actual_mode = row[0] if row else "unknown"
+    if actual_mode.lower() != "wal":
+        _state["log"].warning(
+            "WAL mode not available for runs.db (active mode: %s); "
+            "concurrent access may see increased lock contention",
+            actual_mode,
+        )
     return conn
 
 
@@ -208,11 +221,23 @@ def _list_minigame_plugins(force_refresh: bool = False) -> list:
     Results are cached for _REGISTRY_TTL_S seconds to avoid rescanning the
     filesystem on every run submission and /registry request. Pass
     force_refresh=True to bypass the cache (e.g. after a hot-reload).
+
+    Thread-safety: cache reads/writes are serialised under _registry_lock.
+    The filesystem walk itself runs outside the lock (I/O can be slow) and
+    the result is committed atomically at the end.  Using a dedicated lock
+    (not _lock) means this can safely be called from within a _lock-held
+    section such as submit_run without deadlocking.
     """
     now = time.monotonic()
-    if not force_refresh and (now - _registry_cache["ts"]) < _REGISTRY_TTL_S:
-        return list(_registry_cache["data"])
+    # Fast path: read under lock, return cached data if still fresh.
+    with _registry_lock:
+        if not force_refresh and (now - _registry_cache["ts"]) < _REGISTRY_TTL_S:
+            return list(_registry_cache["data"])
 
+    # Slow path: scan the filesystem outside the lock (I/O can be slow).
+    # Concurrent callers that also miss the cache will each do their own scan;
+    # for a small plugin count this is harmless, and it avoids holding the lock
+    # during disk I/O.  The winner is whoever commits last — always consistent.
     resolver = _state["plugins_dir_resolver"]
     if not resolver:
         return []
@@ -255,8 +280,12 @@ def _list_minigame_plugins(force_refresh: bool = False) -> list:
         if plugin_id not in seen_ids:
             seen_ids.add(plugin_id)
             out.append(entry)
-    _registry_cache["ts"]   = time.monotonic()
-    _registry_cache["data"] = out
+
+    # Commit: write the fresh data under lock so ts and data are always updated
+    # atomically and no reader sees a new ts with old data.
+    with _registry_lock:
+        _registry_cache["ts"]   = time.monotonic()
+        _registry_cache["data"] = out
     return list(out)
 
 
@@ -318,6 +347,12 @@ def setup(app, context):
         return out
 
     _state["plugins_dir_resolver"] = _resolve_plugin_dirs
+    # Invalidate the registry cache so that if setup() is called again (e.g.
+    # on a plugin hot-reload with a different resolver) the next /registry or
+    # run-submission call triggers a fresh scan rather than serving stale data.
+    with _registry_lock:
+        _registry_cache["ts"]   = 0.0
+        _registry_cache["data"] = []
     _init_db()
 
     log = _state["log"]

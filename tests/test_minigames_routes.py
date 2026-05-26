@@ -322,7 +322,12 @@ def test_registry_returns_minigame_plugin(tmp_path, monkeypatch):
 
     monkeypatch.setenv("SLOPSMITH_PLUGINS_DIR", str(plugins_dir))
 
-    # Load a fresh module instance so the resolver closure captures the env var.
+    # Load a fresh module instance and call setup() so that _resolve_plugin_dirs
+    # (defined as a closure inside setup()) picks up the monkeypatched env var.
+    # os.environ.get() is called at resolver-invocation time, so the reload is
+    # not strictly necessary for the env var itself — but it ensures module-level
+    # state (_registry_cache, _state) is clean and that setup() re-defines the
+    # resolver closure in the new env context.
     routes_path = (
         Path(__file__).parent.parent / "plugins" / "minigames" / "routes.py"
     )
@@ -382,8 +387,13 @@ def test_registry_deduplicates_by_plugin_id(tmp_path, monkeypatch):
     try:
         r = client.get("/api/plugins/minigames/registry")
         assert r.status_code == 200
-        ids = [g["plugin_id"] for g in r.json()["minigames"]]
+        games = r.json()["minigames"]
+        ids = [g["plugin_id"] for g in games]
         assert ids.count("dupe-game") == 1
+        # First-wins: resolver sorts children alphabetically so "dir-a" < "dir-b";
+        # the surviving entry should carry the "dir-a" name.
+        survivor = next(g for g in games if g["plugin_id"] == "dupe-game")
+        assert survivor["name"] == "dir-a"
     finally:
         client.close()
         sys.modules.pop("minigames_routes_dedup_test", None)
