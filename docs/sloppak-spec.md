@@ -85,6 +85,7 @@ Full set of currently-recognized top-level keys:
 | `vocal_pitch` | string | no | Path to per-syllable pitch JSON (`{"version": 1, "notes": [{t, d, midi}, ...]}`). Consumed by [slopsmith-plugin-lyrics-karaoke](https://github.com/byrongamatos/slopsmith-plugin-lyrics-karaoke) to render karaoke note bars. See §2.4 |
 | `pitch_extraction` | object | no | Structured metadata when pitch was extracted by an automated engine (currently `crepe` via the demucs server's `/pitch` endpoint). Same shape as `stem_separation` / `lyric_transcription`. Omitted for hand-edited pitch tracks |
 | `cover` | string | no | Path to cover image |
+| `preview` | string | no | Path to a short preview audio clip (OGG) at the sloppak root. Populated by `lib/sloppak_convert.py` when the source PSARC carries a preview WEM (PSARCs ship two WEMs — full song + a short browser-preview clip — the smaller one is decoded to `preview.ogg`). Single-WEM PSARCs have no preview key. Consumed by [`slopsmith-plugin-song-preview`](https://github.com/byrongamatos/slopsmith-plugin-song-preview) for hover-to-listen previews in the library |
 
 Unknown keys are **silently ignored** by the loader. This is deliberate — it's the extensibility hook (see §5).
 

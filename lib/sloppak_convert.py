@@ -431,6 +431,20 @@ def convert_psarc_to_sloppak(
 
         stems_manifest = [{"id": "full", "file": "stems/full.ogg", "default": "on"}]
 
+        # PSARC WEMs are named by Wwise GUID (e.g. audio/windows/168949672.wem),
+        # so we can't pick the preview clip by filename; `find_wem_files`
+        # returns largest-first, and the preview is always the smaller clip —
+        # so the last entry is the preview when a PSARC carries one.
+        # Single-WEM PSARCs have no preview. Best-effort: a failed preview
+        # decode must not abort the overall convert.
+        preview_rel = None
+        if len(wems) >= 2:
+            try:
+                _wem_to_ogg(wems[-1], work_dir / "preview.ogg")
+                preview_rel = "preview.ogg"
+            except Exception as e:
+                log.debug("preview WEM conversion failed: %s", e, exc_info=True)
+
         lyrics, lyrics_source = _parse_lyrics_with_source(tmp_extract)
         lyrics_rel = None
         if lyrics:
@@ -458,6 +472,8 @@ def convert_psarc_to_sloppak(
             manifest["lyrics"] = lyrics_rel
             if lyrics_source:
                 manifest["lyrics_source"] = lyrics_source
+        if preview_rel:
+            manifest["preview"] = preview_rel
         (work_dir / "manifest.yaml").write_text(
             yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True),
             encoding="utf-8",
