@@ -3032,10 +3032,15 @@ function createHighway() {
             _filteredHandShapes = null;
             _phrasesHaveHandShapes = false;
             _resetChordRenderState();
-            const arrParam = arrangement !== undefined ? `?arrangement=${arrangement}` : '';
+            const wsParams = new URLSearchParams();
+            if (arrangement !== undefined) wsParams.set('arrangement', arrangement);
+            if (typeof window._getArrangementNamingMode === 'function') {
+                wsParams.set('naming_mode', window._getArrangementNamingMode());
+            }
+            const qs = wsParams.toString();
             // filename might already be encoded from data-play attribute
             const decoded = decodeURIComponent(filename);
-            const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/highway/${decoded}${arrParam}`;
+            const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/highway/${decoded}${qs ? '?' + qs : ''}`;
             console.log('reconnect:', wsUrl);
             this.connect(wsUrl, _connectOpts);
         },
