@@ -3034,9 +3034,10 @@ function createHighway() {
             _resetChordRenderState();
             const wsParams = new URLSearchParams();
             if (arrangement !== undefined) wsParams.set('arrangement', arrangement);
-            if (typeof window._getArrangementNamingMode === 'function') {
-                wsParams.set('naming_mode', window._getArrangementNamingMode());
-            }
+            const namingMode = typeof window._getArrangementNamingMode === 'function'
+                ? window._getArrangementNamingMode()
+                : (localStorage.getItem('arrangementNamingMode') || 'smart');
+            wsParams.set('naming_mode', namingMode);
             const qs = wsParams.toString();
             // filename might already be encoded from data-play attribute
             const decoded = decodeURIComponent(filename);
