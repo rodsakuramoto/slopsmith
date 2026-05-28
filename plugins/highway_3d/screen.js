@@ -8728,7 +8728,7 @@
                         // ── Frethand-mute strum indicator — FH X outline + dark fill ───
                         // Fill: pFHXFill (1 draw call). Lines: pFHXLines (1 draw call).
                         // L/R wings stop at fx=±0.50 — no solid lateral fill blocks.
-                        if (isRepeat && chordNotes.some(cn => cn.mt)) {
+                        if (isRepeat && chordNotes.some(cn => cn.mt || cn.fhm)) {
                             const fhf = pFHXFill.get();
                             fhf.renderOrder = 10.5;
                             fhf.rotation.set(0, 0, 0);
@@ -10236,11 +10236,13 @@
                     }
                 }
                 // Tremolo label ('~~~') removed — trail shape already conveys it visually.
-                if (n.pm || n.mt) {
+                if (n.pm || n.mt || n.fhm) {
                     // Muted notes: on-body X overlay — PlaneGeometry mesh so it
                     // rotates with the gem (approachRot) instead of billboarding.
                     // Palm mute = black X / white border; fret-hand mute = inverse.
-                    const fretHandMute = !!n.mt;
+                    // `mt` (string mute) and `fhm` (fret-hand mute) both render the
+                    // fret-hand X; only a palm-mute-only note gets the inverse.
+                    const fretHandMute = !!(n.mt || n.fhm);
                     const muteSprite = fretHandMute
                         ? fretHandMuteXSpriteMat()
                         : palmMuteXSpriteMat();
@@ -10280,7 +10282,7 @@
                     // Fade in over 0.35s at the far end; stay at full opacity until
                     // the note hits (dt = 0).  No pre-hit fade-out — removing it
                     // eliminates the "label disappears before the note arrives" artifact.
-                    const alpha = dt > 0 ? Math.min(1.0, (AHEAD - dt) / 0.35) : 0;
+                    const alpha = dt >= 0 ? Math.min(1.0, (AHEAD - dt) / 0.35) : 0;
 
                     const fretLabel  = pNoteFretLabel.get();
                     const cachedMat  = txtMat(n.f, FRET_LABEL_GOLD_HEX, false, 'noteFret');
