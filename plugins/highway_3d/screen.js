@@ -4579,7 +4579,7 @@
             });
             pSusRail = pool(noteG, () => {
                 const m = new T.Mesh(gSusRail, mSusRailBase.clone());
-                m.renderOrder = 11;
+                m.renderOrder = 16;
                 return m;
             });
 
@@ -4600,7 +4600,7 @@
             });
             pSusRailBloom = pool(noteG, () => {
                 const m = new T.Mesh(gSusRailBloom, mSusRailBloomBase.clone());
-                m.renderOrder = 10;
+                m.renderOrder = 14;
                 return m;
             });
 
@@ -8001,9 +8001,12 @@
                     // cover the arpeggio shape; otherwise explicit/synth hand
                     // shapes can produce an empty lavender frame with no notes
                     // inside (e.g. template-marked `-arp` chord rows).
-                    const deferChordGems = (ch.h3dSynth && chordShapeCoveredByStandaloneNotes(ch, chShape, notes))
+                    // Lazy wrapper so the note-stream scan is skipped when
+                    // neither branch needs it (short-circuit evaluation).
+                    const noteStreamCoversArpShape = () => chordShapeCoveredByStandaloneNotes(ch, chShape, notes);
+                    const deferChordGems = (ch.h3dSynth && noteStreamCoversArpShape())
                         || inferredArpPattern
-                        || (hsHintFrame.explicit && hsHintFrame.covered && chordShapeCoveredByStandaloneNotes(ch, chShape, notes));
+                        || (hsHintFrame.explicit && hsHintFrame.covered && noteStreamCoversArpShape());
                     /**
                      * Lavender chord frame + purple highway rails: authored
                      * arpeggio metadata only. RS ``highDensity`` marks gallops /
@@ -8752,7 +8755,7 @@
                     // segment from its own onset to the next chord's onset (or the
                     // handshape end, whichever is shorter), chaining together to
                     // cover the full handshape duration visually.
-                    if (chShape.size > 1 && chordOpenBoxW != null && chDt < AHEAD) {
+                    if (chShape.size > 1 && chordOpenBoxW != null && !isRepeat && chDt < AHEAD) {
                         // Cap handshape-derived sustain at the gap to the next chord.
                         // Each chord (including repeats) only extends to the next
                         // chord's onset, so the rail never lingers past the anchor
