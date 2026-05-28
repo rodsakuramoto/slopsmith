@@ -6343,17 +6343,24 @@
         // Cached per chord: result depends on (ch, shape, notesArr) and an
         // optional timeWin which itself is a function of the chord's matching
         // <handShape>. Both inputs are chart-static, so the cache invalidates
-        // on (notesArr, hss) ref change. shape comes from mergeChordShape(ch)
-        // which is also chart-static, so it doesn't enter the invalidation
-        // key directly. The cache deliberately stores boolean results; a
-        // sentinel distinguishes "not computed" from "false".
+        // on (notesArr, hss) ref change — `hss` is threaded in purely as the
+        // invalidation key for the chord-loop caller, which passes a stable
+        // `ch` (reused across frames) and a timeWin that is null until
+        // bundle.handShapes arrives over the WS; without the hss check the
+        // null-timeWin result would stick once handShapes loaded late. shape
+        // comes from mergeChordShape(ch) which is also chart-static, so it
+        // doesn't enter the invalidation key directly. The cache deliberately
+        // stores boolean results; a sentinel distinguishes "not computed"
+        // from "false".
         let _arpInferCache = new WeakMap();
         let _arpInferCacheNotesRef = null;
-        function inferArpeggioFromNotePattern(ch, shape, notesArr, timeWin) {
+        let _arpInferCacheHssRef = null;
+        function inferArpeggioFromNotePattern(ch, shape, notesArr, timeWin, hss = null) {
             if (!notesArr || notesArr.length === 0 || shape.size < 2) return false;
-            if (_arpInferCacheNotesRef !== notesArr) {
+            if (_arpInferCacheNotesRef !== notesArr || _arpInferCacheHssRef !== hss) {
                 _arpInferCache = new WeakMap();
                 _arpInferCacheNotesRef = notesArr;
+                _arpInferCacheHssRef = hss;
             }
             const cached = _arpInferCache.get(ch);
             if (cached !== undefined) return cached;
@@ -6458,7 +6465,7 @@
                 const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
                 const tw = { tLo: hsLo - 0.06, tHi: hsHi + 0.06 };
                 if (handShapeChartSpanSec(hs) < ARP_INFER_MIN_HAND_SHAPE_SPAN_S) continue;
-                if (inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw)) return cid;
+                if (inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw, handShapes)) return cid;
             }
             return null;
         }
@@ -6488,7 +6495,7 @@
                             const fakeCh = { t: hsLo, id: cid, notes: synthNotes };
                             const shape = mergeChordShape(fakeCh, synthNotes, chordTemplates);
                             const tw = { tLo: hsLo - 0.06, tHi: hsHi + 0.06 };
-                            infer = inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw);
+                            infer = inferArpeggioFromNotePattern(fakeCh, shape, notesArr, tw, handShapes);
                             // Chord-hold gate: inferArpeggioFromNotePattern can fire true
                             // when open-string notes coincidentally match the template's
                             // open positions but only a SINGLE fretted (f>0) string is
@@ -7996,7 +8003,7 @@
                     const inferredArpPattern = (!hsHintFrame.hs
                         || handShapeChartSpanSec(hsHintFrame.hs) >= ARP_INFER_MIN_HAND_SHAPE_SPAN_S)
                         && inferArpeggioFromNotePattern(
-                            ch, chShape, notes, hsTimeWinFrame);
+                            ch, chShape, notes, hsTimeWinFrame, bundle.handShapes);
                     // Only suppress the chord gems when standalone notes really
                     // cover the arpeggio shape; otherwise explicit/synth hand
                     // shapes can produce an empty lavender frame with no notes
