@@ -4579,7 +4579,7 @@
             });
             pSusRail = pool(noteG, () => {
                 const m = new T.Mesh(gSusRail, mSusRailBase.clone());
-                m.renderOrder = 16;
+                m.renderOrder = 11;
                 return m;
             });
 
@@ -4600,7 +4600,7 @@
             });
             pSusRailBloom = pool(noteG, () => {
                 const m = new T.Mesh(gSusRailBloom, mSusRailBloomBase.clone());
-                m.renderOrder = 14;
+                m.renderOrder = 10;
                 return m;
             });
 

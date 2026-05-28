@@ -35,13 +35,13 @@ test('sustain rails pick arpeggio color for arpeggio frames, teal otherwise', ()
 });
 
 test('sustain-rail pool meshes keep renderOrder 16 so note gems (20/21) stay on top', () => {
-    // renderOrder 16 sits above the chord frame (12/13) but below note
-    // outline/core (20/21). Bumping it past the notes would let the rails
+    // renderOrder 11 sits above the chord frame edges but below note
+    // outline/core. Bumping it past the notes would let the rails
     // occlude flying gems.
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
     assert.match(
         src,
-        /pSusRail\s*=\s*pool\([^)]*,\s*\(\)\s*=>\s*\{[\s\S]*?m\.renderOrder\s*=\s*16\s*;[\s\S]*?\}\s*\)/,
-        'pSusRail pool must seed meshes with renderOrder = 16',
+        /pSusRail\s*=\s*pool\([^)]*,\s*\(\)\s*=>\s*\{[\s\S]*?m\.renderOrder\s*=\s*11\s*;[\s\S]*?\}\s*\)/,
+        'pSusRail pool must seed meshes with renderOrder = 11',
     );
 });
