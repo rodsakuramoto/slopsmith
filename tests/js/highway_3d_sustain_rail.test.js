@@ -14,14 +14,15 @@ const path = require('node:path');
 
 const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
-test('sustain rails are gated on multi-note, non-repeat chords within AHEAD', () => {
-    // Repeat frames in a chord sequence must not each draw their own rails,
-    // and single notes have no chord frame to anchor a rail to.
+test('sustain rails are gated on multi-note chords with a known box width within AHEAD', () => {
+    // Each chord in a sequence (including repeats) draws a rail from its onset
+    // to the next chord's onset, chaining together to cover the full handshape
+    // duration visually. Single notes have no chord frame to anchor a rail to.
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
     assert.match(
         src,
-        /if\s*\(\s*chShape\.size\s*>\s*1\s*&&\s*chordOpenBoxW\s*!=\s*null\s*&&\s*!isRepeat\s*&&\s*chDt\s*<\s*AHEAD\s*\)/,
-        'sustain-rail block must stay gated on chShape.size > 1, chordOpenBoxW, !isRepeat and chDt < AHEAD',
+        /if\s*\(\s*chShape\.size\s*>\s*1\s*&&\s*chordOpenBoxW\s*!=\s*null\s*&&\s*chDt\s*<\s*AHEAD\s*\)/,
+        'sustain-rail block must stay gated on chShape.size > 1, chordOpenBoxW and chDt < AHEAD',
     );
 });
 

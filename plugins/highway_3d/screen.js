@@ -8755,7 +8755,7 @@
                     // segment from its own onset to the next chord's onset (or the
                     // handshape end, whichever is shorter), chaining together to
                     // cover the full handshape duration visually.
-                    if (chShape.size > 1 && chordOpenBoxW != null && !isRepeat && chDt < AHEAD) {
+                    if (chShape.size > 1 && chordOpenBoxW != null && chDt < AHEAD) {
                         // Cap handshape-derived sustain at the gap to the next chord.
                         // Each chord (including repeats) only extends to the next
                         // chord's onset, so the rail never lingers past the anchor
