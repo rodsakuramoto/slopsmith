@@ -4473,16 +4473,43 @@ def _get_or_extract(filename, psarc_path):
 @app.get("/api/sloppak/{filename:path}/file/{rel_path:path}")
 def serve_sloppak_file(filename: str, rel_path: str):
     """Serve a file from inside a sloppak (stems, cover, etc.)."""
+    dlc = _get_dlc_dir()
+    if not dlc:
+        return JSONResponse({"error": "not configured"}, 404)
+    # `filename` is an attacker-controlled `:path` param. Contain it under
+    # DLC_DIR before it reaches the resolver, which does a bare
+    # `dlc_root / filename`. Without this, `../../../etc` escapes the root
+    # and the rel_path guard below validates `target` against the already-
+    # escaped `src`, which trivially passes — yielding arbitrary file reads
+    # (e.g. /api/sloppak/../../../../etc/file/passwd). Mirrors the guard
+    # `get_song_art` applies to the same filename param.
+    resolved = _resolve_dlc_path(dlc, filename)
+    if resolved is None:
+        return JSONResponse({"error": "forbidden"}, 403)
+    # Confine the endpoint to actual sloppak bundles. Without this, a
+    # contained-but-non-sloppak `filename` (e.g. `.` → DLC_DIR itself, or
+    # any plain subdirectory) would make `resolve_source_dir` hand back a
+    # directory and turn this into a read-any-file-under-DLC_DIR endpoint.
+    # Mirrors get_song_art's `is_sloppak` dispatch.
+    if not sloppak_mod.is_sloppak(resolved):
+        return JSONResponse({"error": "not found"}, 404)
+    # Canonicalise the cache key against the resolved path so equivalent
+    # URL forms of the same sloppak (e.g. `A/../B/x.sloppak` vs
+    # `B/x.sloppak`) converge on one `_source_cache` entry instead of
+    # fragmenting / re-unpacking — mirrors get_song_info's keying.
+    try:
+        filename = resolved.relative_to(dlc.resolve()).as_posix()
+    except ValueError:
+        # safe_join already proved containment, so this is unreachable in
+        # practice; fail closed rather than fall back to the raw param.
+        return JSONResponse({"error": "forbidden"}, 403)
     src = sloppak_mod.get_cached_source_dir(filename)
     if src is None:
-        dlc = _get_dlc_dir()
-        if not dlc:
-            return JSONResponse({"error": "not configured"}, 404)
         try:
             src = sloppak_mod.resolve_source_dir(filename, dlc, SLOPPAK_CACHE_DIR)
         except Exception:
             return JSONResponse({"error": "not found"}, 404)
-    # Prevent path traversal.
+    # Prevent path traversal within the sloppak.
     target = (src / rel_path).resolve()
     try:
         target.relative_to(src.resolve())
