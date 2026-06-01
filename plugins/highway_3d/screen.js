@@ -2073,6 +2073,12 @@
         // pass. bgState is the active style's per-panel state object.
         let bgGroup = null, bgStage = null, bgState = null;
         let bgStyleId = 'particles', bgIntensity = 0.5, bgReactive = true;
+        // Per-render opt-out for plugins borrowing the highway as a viz: when the
+        // mount bundle sets bgReactive === false, suppress the audio-reactive
+        // background for THIS instance only (no shared h3d_bg_* write). Captured
+        // from the bundle in init(); applied in _bgLoadSettings() so it survives
+        // later setting reloads. See init() for the rationale.
+        let _bgReactiveOptOut = false;
         // Active palette for this panel (issue #10). Materials and per-
         // frame color reads inside createFactory all consult this rather
         // than the module-level S_COL, so a palette swap re-tints the
@@ -5311,6 +5317,11 @@
             bgStyleId = _bgReadSetting(panelKey, 'style');
             bgIntensity = _bgReadSetting(panelKey, 'intensity');
             bgReactive = _bgReadSetting(panelKey, 'reactive');
+            // Per-render opt-out (captured from the mount bundle in init): force
+            // the reactive background off for THIS instance, overriding the shared
+            // setting without writing it back. Re-applied here so it sticks across
+            // setting reloads.
+            if (_bgReactiveOptOut) bgReactive = false;
             const newPaletteId = _bgReadSetting(panelKey, 'palette');
             const newPalette = PALETTES[newPaletteId] || PALETTES.default;
             if (newPalette !== activePalette) {
@@ -10837,6 +10848,17 @@
                 _invertedCached = !!(bundle && bundle.inverted);
                 _leftyCached = !!(bundle && bundle.lefty);
                 _renderScale = (bundle && bundle.renderScale) || 1;
+                // Per-render background opt-out. A plugin borrowing the highway as
+                // a visualization can set bundle.bgReactive === false to suppress
+                // the audio-reactive background for THIS instance only — without
+                // writing the shared h3d_bg_* settings (which would also change the
+                // host's own highway). Motivation: the reactive bg taps the core
+                // <audio> element, and when another consumer already holds it the
+                // setup throws + the cleanup AudioContext.close() is an audible
+                // click — which a borrower that never taps <audio> (e.g. a
+                // contained-playback practice plugin) inherits for no benefit.
+                // Default behavior is unchanged when the field is absent.
+                _bgReactiveOptOut = !!(bundle && bundle.bgReactive === false);
 
                 if (_ssActive()) {
                     window.slopsmithSplitscreen.onFocusChange(_onFocusChange);
