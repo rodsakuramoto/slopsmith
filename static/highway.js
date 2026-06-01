@@ -118,6 +118,21 @@ function createHighway() {
     let _visibleOverride = null;
     let _lastVisible = null;
     let animFrame = null;
+    // Paused-render throttle (slopsmith#654). The rAF loop runs
+    // unconditionally and only gates on visibility + ready, never on
+    // playback — so an expensive renderer (3D Highway's Three.js WebGL
+    // scene) does a full render every frame even while paused. That is
+    // pure waste, and the dominant cost on high-refresh / ANGLE setups
+    // (Chromium on Windows paces rAF to the fastest attached monitor,
+    // so the loop can run at 144 Hz even on a 60 Hz panel). While the
+    // audio clock is stalled, cap draws to one per
+    // _PAUSED_FRAME_INTERVAL_MS. Note position is clock-derived
+    // (n.t - currentTime), so this changes smoothness only — never
+    // audio/visual sync. A low non-zero rate (not a hard skip) keeps
+    // resize / seek-scrub / renderer-swap repaints correct without
+    // having to hook each of those paths.
+    const _PAUSED_FRAME_INTERVAL_MS = 100;
+    let _lastPausedDrawAt = 0;
     let _connectOpts = {};
     let _resizeContainer = null;
     let _resizeHandler = null;
@@ -192,7 +207,37 @@ function createHighway() {
     // note so the gem itself can light up / a held sustain can glow,
     // instead of relying on a separate overlay ring. null = no provider.
     let _noteStateProvider = null;
-    let _renderScale = parseFloat(localStorage.getItem('renderScale') || '1');  // 1 = full, 0.5 = half res
+    // 1 = full, 0.5 = half res. Sanitize on load the same way setRenderScale
+    // clamps: a corrupt/out-of-range localStorage value (NaN, 0, >1) would
+    // otherwise flow into _effectiveRenderScale() and zero the canvas.
+    let _renderScale = (function () {
+        const v = parseFloat(localStorage.getItem('renderScale') || '1');
+        return Number.isFinite(v) ? Math.max(0.25, Math.min(1, v)) : 1;
+    })();
+    // Load-adaptive render scale (slopsmith#654). _renderScale is the
+    // user's manual ceiling; _autoScale is an automatic multiplier the
+    // draw loop lowers when the active renderer's per-frame cost blows
+    // the budget (a heavy 3D Highway WebGL scene on a weak GPU, or on
+    // high-refresh + ANGLE where Chromium runs the loop at the fastest
+    // monitor's rate) and raises again once headroom returns. The scale
+    // actually applied to the canvas backing store + bundle.renderScale
+    // is _renderScale * _autoScale, floored at _AUTO_SCALE_MIN — so an
+    // auto change flows through the exact same plumbing as a manual
+    // setRenderScale. Adapting resolution (not frame rate) keeps motion
+    // at the display's native refresh, avoiding judder, and never
+    // affects sync (note position is clock-derived).
+    let _autoScale = 1;
+    let _drawMsEMA = 0;              // smoothed cost of _renderer.draw()
+    let _frameMsEMA = 0;            // smoothed frame interval (for the HUD)
+    let _lastFramePerf = 0;
+    let _lastAutoAdjustAt = 0;
+    let _perfHud = null;
+    let _hudOn = false;       // cached highwayPerfHud flag (re-read ~2x/sec, not per-frame)
+    let _hudFlagAt = 0;
+    const _DRAW_BUDGET_HI_MS = 12;  // sustained draw cost above this -> scale down
+    const _DRAW_BUDGET_LO_MS = 7;   // sustained draw cost below this -> scale back up
+    const _AUTO_SCALE_MIN = 0.25;   // floor for the effective scale
+    const _AUTO_ADJUST_COOLDOWN_MS = 600;
     let _inverted = localStorage.getItem('invertHighway') === 'true';
     let _lefty = localStorage.getItem('lefty') === '1';
     let _lastChordOnFretLine = null;  // chord object currently shown on fret line
@@ -604,7 +649,7 @@ function createHighway() {
             // Display flags
             inverted: _inverted,
             lefty: _lefty,
-            renderScale: _renderScale,
+            renderScale: _effectiveRenderScale(),
             lyricsVisible: showLyrics,
 
             // 2D-style helpers (renderers that don't need these can ignore).
@@ -1021,6 +1066,87 @@ function createHighway() {
         }
     }
 
+    // Scale actually applied to the canvas + bundle.renderScale: the
+    // user's manual ceiling times the load-adaptive factor, floored so a
+    // pathological GPU can't drive it to zero. (#654)
+    function _effectiveRenderScale() {
+        // Sanitize each factor independently so one corrupt value doesn't
+        // silently force full-res (which would ignore a valid manual ceiling)
+        // or propagate NaN into canvas sizing.
+        const user = Number.isFinite(_renderScale) ? _renderScale : 1;
+        const auto = Number.isFinite(_autoScale) ? _autoScale : 1;
+        return Math.max(_AUTO_SCALE_MIN, Math.min(1, user * auto));
+    }
+
+    // Called once per drawn frame during active playback with the measured
+    // cost of _renderer.draw(). Smooths the cost (EMA) and, on a cooldown,
+    // nudges _autoScale down when the renderer blows the per-frame budget
+    // and back up when it has headroom. A change re-applies via api.resize()
+    // — the same path manual setRenderScale uses. (#654)
+    function _adaptRenderScale(drawMs) {
+        _drawMsEMA = _drawMsEMA === 0 ? drawMs : _drawMsEMA * 0.9 + drawMs * 0.1;
+        const nowP = performance.now();
+        if (nowP - _lastAutoAdjustAt < _AUTO_ADJUST_COOLDOWN_MS) return;
+        // Commit to one evaluation per cooldown regardless of outcome —
+        // otherwise, once the cooldown elapses, the deadband branch below
+        // would re-run this comparison every frame on the hot path.
+        _lastAutoAdjustAt = nowP;
+        const eff = _effectiveRenderScale();
+        let next = _autoScale;
+        if (_drawMsEMA > _DRAW_BUDGET_HI_MS && eff > _AUTO_SCALE_MIN) {
+            next = _autoScale * 0.85;
+        } else if (_drawMsEMA < _DRAW_BUDGET_LO_MS && eff < 1) {
+            next = _autoScale * 1.1;
+        }
+        // Clamp so _renderScale * _autoScale stays within [_AUTO_SCALE_MIN, 1].
+        const lo = _renderScale > 0 ? _AUTO_SCALE_MIN / _renderScale : 1;
+        next = Math.max(lo, Math.min(1, next));
+        if (Math.abs(next - _autoScale) < 0.01) return;
+        _autoScale = next;
+        try { api.resize(); } catch (e) { /* resize is best-effort */ }
+    }
+
+    // Optional on-screen perf readout (#654), gated on
+    // localStorage.highwayPerfHud === '1'. Lets a reporter confirm the
+    // adaptive cap is holding without opening devtools. No-op (and tears
+    // down any existing HUD) when the flag is off.
+    function _updatePerfHud() {
+        if (typeof document === 'undefined' || !document.body) return;
+        const nowP = performance.now();
+        // Re-read the debug-only flag at most ~2x/sec, not every frame:
+        // localStorage access is synchronous and this is on the rAF hot path.
+        if (nowP - _hudFlagAt > 500) {
+            _hudFlagAt = nowP;
+            try { _hudOn = localStorage.getItem('highwayPerfHud') === '1'; } catch (_) { _hudOn = false; }
+        }
+        if (!_hudOn) {
+            if (_perfHud) { _perfHud.remove(); _perfHud = null; }
+            return;
+        }
+        if (_lastFramePerf) {
+            const d = nowP - _lastFramePerf;
+            _frameMsEMA = _frameMsEMA === 0 ? d : _frameMsEMA * 0.9 + d * 0.1;
+        }
+        _lastFramePerf = nowP;
+        if (!_perfHud) {
+            _perfHud = document.createElement('div');
+            // Class, not a fixed id: multiple createHighway() instances
+            // (splitscreen) would otherwise mint duplicate #ids — invalid
+            // HTML. We hold the element by reference (_perfHud), not lookup.
+            _perfHud.className = 'highway-perf-hud';
+            _perfHud.style.cssText = 'position:fixed;top:8px;right:8px;z-index:2147483647;' +
+                'font:11px/1.4 monospace;background:rgba(0,0,0,.7);color:#0f0;' +
+                'padding:4px 6px;border-radius:4px;pointer-events:none;white-space:pre;';
+            document.body.appendChild(_perfHud);
+        }
+        const fps = _frameMsEMA > 0 ? 1000 / _frameMsEMA : 0;
+        _perfHud.textContent =
+            'fps ' + fps.toFixed(0) +
+            '  draw ' + _drawMsEMA.toFixed(1) + 'ms' +
+            '  scale ' + _effectiveRenderScale().toFixed(2) +
+            ' (user ' + _renderScale.toFixed(2) + ' / auto ' + _autoScale.toFixed(2) + ')';
+    }
+
     function draw() {
         animFrame = requestAnimationFrame(draw);
         if (!canvas || !_renderer) return;
@@ -1031,6 +1157,10 @@ function createHighway() {
         // straddles a song change would otherwise leave 3D Highway's
         // overlay visible across the not-ready frames).
         _emitVisibilityIfChanged();
+        // Don't let the debug HUD strand on screen while we're not actively
+        // rendering (hidden, or WS not ready). It re-creates next frame once
+        // rendering resumes and the flag is still on. (#654)
+        if (_perfHud && (!_lastVisible || !ready)) { _perfHud.remove(); _perfHud = null; }
         if (!_lastVisible) return;
         // Match pre-refactor behaviour: skip draw until WS ready fires.
         // This gates out the brief "arrays cleared, WS reconnecting"
@@ -1041,14 +1171,37 @@ function createHighway() {
         // scope here. Default 2D renderer also checks `ready` in its
         // draw body (defence in depth).
         if (!ready) return;
+        // Playback-aware throttle (#654). Reuse getTime()'s pause
+        // signal: once an anchor exists, chartTime not advancing for
+        // > _CHART_MAX_INTERP_MS means audio is paused/stalled (the
+        // 60 Hz tick in app.js keeps calling setTime() with the same t
+        // while paused). While paused, draw at most once per
+        // _PAUSED_FRAME_INTERVAL_MS so a heavy WebGL renderer stops
+        // pinning the GPU re-rendering a static frame. Active playback
+        // (clock advancing) is never throttled.
+        let _paused = false;
+        if (!Number.isNaN(_chartAnchorPerfNow)) {
+            const _nowP = performance.now();
+            if (_nowP - _chartLastAdvanceAt > _CHART_MAX_INTERP_MS) {
+                _paused = true;
+                if (_nowP - _lastPausedDrawAt < _PAUSED_FRAME_INTERVAL_MS) return;
+                _lastPausedDrawAt = _nowP;
+            }
+        }
         // Skip bundle allocation when the default renderer is active —
         // it reads closure state directly and ignores the bundle.
         // _makeBundle at 60fps was a steady GC churn for the common
         // case where no custom renderer is installed.
         const bundle = _renderer === _defaultRenderer ? undefined : _makeBundle();
         try {
+            const _drawStart = performance.now();
             _renderer.draw(bundle);
             _rendererDrawFailures = 0;
+            // Adaptive render-scale (#654): only adapt during active
+            // playback — paused frames are throttled above, so their
+            // timing isn't representative of the playback workload.
+            if (!_paused) _adaptRenderScale(performance.now() - _drawStart);
+            _updatePerfHud();
         } catch (e) {
             _rendererDrawFailures += 1;
             console.error('renderer draw:', e);
@@ -2456,8 +2609,8 @@ function createHighway() {
             }
             canvas.style.width = w + 'px';
             canvas.style.height = h + 'px';
-            canvas.width = Math.round(w * _renderScale);
-            canvas.height = Math.round(h * _renderScale);
+            canvas.width = Math.round(w * _effectiveRenderScale());
+            canvas.height = Math.round(h * _effectiveRenderScale());
             // Notify the active renderer so WebGL / offscreen buffers
             // can recreate their framebuffers. Setting canvas.width
             // above already invalidates both 2D and WebGL state — any
@@ -2477,12 +2630,29 @@ function createHighway() {
         },
 
         setRenderScale(scale) {
-            _renderScale = Math.max(0.25, Math.min(1, scale));
+            const v = Number(scale);
+            // Reject non-finite input (undefined / NaN / non-numeric) so a
+            // bad caller can't poison _renderScale and blank the canvas;
+            // keep the current scale in that case. Mirrors the load guard.
+            if (!Number.isFinite(v)) return;
+            _renderScale = Math.max(0.25, Math.min(1, v));
             localStorage.setItem('renderScale', _renderScale);
             this.resize();
         },
 
         getRenderScale() { return _renderScale; },
+        // Scale actually applied = manual ceiling * load-adaptive factor (#654).
+        getEffectiveRenderScale() { return _effectiveRenderScale(); },
+        // Live perf numbers a reporter or the HUD can read to confirm the
+        // adaptive cap is holding.
+        getPerfStats() {
+            return {
+                drawMs: _drawMsEMA,
+                autoScale: _autoScale,
+                renderScale: _renderScale,
+                effectiveScale: _effectiveRenderScale(),
+            };
+        },
 
         getInverted() { return _inverted; },
         setInverted(v) { _inverted = v; localStorage.setItem('invertHighway', v); },
@@ -3242,6 +3412,23 @@ function createHighway() {
 
         stop() {
             if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+            // Tear down the perf HUD explicitly: the rAF loop (which otherwise
+            // removes it when the flag flips off) is about to stop, so leaving
+            // it would strand the overlay in the DOM until a page reload.
+            if (_perfHud) { _perfHud.remove(); _perfHud = null; }
+            // Reset per-session adaptive-scale + HUD accumulators so a quick
+            // stop→init can't inherit stale performance.now() anchors (which
+            // would skip the next paused session's first draw or defer a
+            // HUD-flag re-read), and so the next song re-adapts from the
+            // user's manual scale rather than the last session's auto level. (#654)
+            _autoScale = 1;
+            _drawMsEMA = 0;
+            _lastAutoAdjustAt = 0;
+            _lastPausedDrawAt = 0;
+            _frameMsEMA = 0;
+            _lastFramePerf = 0;
+            _hudOn = false;
+            _hudFlagAt = 0;
             if (ws) { ws.close(); ws = null; }
             songOffset = 0.0;  // reset per-song offset so next song starts clean
             if (_resizeHandler) {
