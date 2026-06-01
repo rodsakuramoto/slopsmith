@@ -67,6 +67,16 @@ The frontend exposes the current source list through `window.slopsmith.capabilit
 
 Capability declarations may include a short `description`. The bundled Capability Inspector shows that text on expanded domain owner cards; when it is omitted, the inspector falls back to a compact generated owner summary.
 
+## Audio Graph/Session Domains
+
+The audio graph/session slice promotes four player-audio domains into the runtime graph: `audio-mix`, `audio-input`, `audio-monitoring`, and `stems`. The browser module at [static/capabilities/audio-session.js](../static/capabilities/audio-session.js) owns the active session boundary, contributes diagnostics under `slopsmith.audio_session.diagnostics.v1`, and records compatibility bridge hits for legacy audio surfaces.
+
+`audio-mix`, `audio-input`, and `audio-monitoring` are core-owned provider-coordinator domains. They expose bounded inspect/register/start/stop style commands, redaction-safe diagnostics, and bridge accounting for legacy fader, analyser, input, and monitoring handshakes.
+
+`stems` is different: `core.audio.session` is a coordinator, not the semantic owner of stem playback. The Stems plugin, or another active stem provider, remains the provider/owner of actual stem state, mute/restore mechanics, and per-song availability. The session coordinator records the active provider via `registerStemOwner(...)`, brokers claim/override/orphan diagnostics, and returns `no-owner` when no stem provider is available.
+
+New bundled audio code should use the session host or native capability dispatch instead of adding new globals, private stem-state reads, direct analyser ownership, or plugin-specific handshakes. Existing legacy paths remain supported through named compatibility bridges until their migration notes and removal gates are satisfied.
+
 ## Capability Roles
 
 Use capability declarations for provider/requester/observer relationships:
@@ -94,7 +104,7 @@ Core domains include review metadata in diagnostics:
 - `active`: wired to current Slopsmith behavior and expected to work as an integration point.
 - `diagnostic`: support/inspection-only runtime surfaces.
 
-PR1 includes only the delivered domains listed in [capability-roadmap.md](capability-roadmap.md): `pipeline`, `diagnostics`, and `library`. Playback, backend routes, plugin-owned Stems/NAM coordination, app UI, settings, visualization, audio, note-detection, and hardware-facing domains are documented in the roadmap and safety matrix, but are intentionally not registered in the runtime graph until a host workflow/provider exists. Reviewers and testers should focus behavioral validation on the small PR1 set.
+PR1 includes only the delivered domains listed in [capability-roadmap.md](capability-roadmap.md): `pipeline`, `diagnostics`, and `library`. The follow-up audio graph/session slice promotes `audio-mix`, `audio-input`, `audio-monitoring`, and a coordinated `stems` surface. Playback, backend routes, app UI, settings, visualization, note-detection, and other hardware-facing domains remain documented in the roadmap and safety matrix until their own host workflow/provider slice exists.
 
 Capability metadata is versioned by the `capability-pipelines.v1` standard. Invalid roles, commands, operations, requests, observes, emits, events, owner kinds, compatibility modes, ownership policies, safety classes, or version fields are excluded from the capability graph and surfaced through `capability_validation_warnings`; legacy plugin fields continue to load through their existing app paths. Plugins that declare a future `capability-pipelines` version are reported through `capability_unsupported_versions` and their runtime handlers are marked incompatible.
 
@@ -146,7 +156,7 @@ Dispatch results use explicit outcomes: `handled`, `transformed`, `denied`, `fai
 
 ## Deferred Core Adapters
 
-Playback, UI placement, settings contributions, visualization, audio mixer/monitoring, and note-detection are real Slopsmith surfaces, but they are not PR1 capability contracts. Plugins should keep using the current documented APIs for those areas until the corresponding domain PR ships the host workflow, command/event contract, compatibility shims, diagnostics fields, and tests.
+Playback, UI placement, settings contributions, visualization, and note-detection are real Slopsmith surfaces, but they are not PR1 capability contracts. Audio mixer/session domains are active as of the audio graph/session slice; plugins should keep using current documented APIs for non-audio areas until the corresponding domain PR ships the host workflow, command/event contract, compatibility shims, diagnostics fields, and tests.
 
 The library provider workflow is the PR1 core adapter and is implemented natively as the `library` capability module. Provider refresh, selection, and sync run through `library` owner commands; backend provider registration remains the way providers enter the library registry, and the browser module turns that registry into provider participants. The app event bus continues to dispatch local `window.slopsmith` events for legacy listeners, but PR1 does not mirror playback, navigation, note, visualization, route, or highway events into capability domains.
 

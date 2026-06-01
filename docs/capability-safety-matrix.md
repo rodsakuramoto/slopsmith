@@ -9,6 +9,10 @@ Core domains also have a review scope. **Active contract** domains are wired to 
 | pipeline | diagnostic | diagnostic-only | resolve, inspect, validate, participant.set-enabled | none | Graph inspection, validation, and participant lifecycle diagnostics. |
 | diagnostics | diagnostic | diagnostic-only | snapshot | none | Redaction-safe snapshot/export surface for support bundles and the Capability Inspector. |
 | library | provider-coordinator | safe | list-providers, refresh-providers, select-provider, get-current, sync-song, inspect | query-page, query-artists, query-stats, tuning-names, get-art, sync-song | Library source selection and provider-owned song sync; provider ids are public UI labels, while provider internals stay backend-owned. |
+| audio-mix | provider-coordinator | safe | inspect, register-participant, unregister-participant | fader.get-value, fader.set-value, analyser.get-summary, route.get-current | Song route/fader/analyser summaries and bridge accounting; no raw audio data is exposed. |
+| audio-input | provider-coordinator | sensitive | inspect, register-source, unregister-source, select-source | source.enumerate, source.describe, source.open, source.close | Source/device identity is redacted or pseudonymized per diagnostics snapshot. |
+| audio-monitoring | provider-coordinator | sensitive | inspect, start, stop | monitoring.start, monitoring.stop, monitoring.status | Permission denied, unavailable, degraded, failed, and stopped states are distinct. |
+| stems | coordinator plus plugin provider | safe | inspect, mute, restore | stem.get-state, stem.apply-automation, stem.restore-automation | Core coordinates claims/overrides; the active Stems provider owns actual stem state/playback. |
 
 Privileged commands are roadmap-only until they have: a visible user confirmation path, diagnostics redaction rules, failure recovery, and tests that prove disabled or incompatible participants cannot execute handlers.
 
@@ -18,14 +22,11 @@ These domains are expected future capability contracts, not current runtime grap
 
 | Domain | Expected Ownership Policy | Expected Safety Class | Candidate Commands | Review Gate |
 |--------|---------------------------|-----------------------|--------------------|-------------|
-| stems | exclusive-owner | safe | mute, restore, inspect | Needs a focused plugin-owned Stems/NAM coordination PR with claim, dispatch, release, and override diagnostics. |
 | playback | exclusive-owner | safe | play, pause, stop, seek, snapshot, audio-element, loop-set, loop-clear, loop-get | Needs focused transport command/event tests and legacy shim accounting. |
 | ui.navigation | exclusive-owner | safe | register-contribution, mount, unmount, set-visible, reorder-by-policy, navigate, inspect | Needs a UI host PR with contribution placement and route/screen semantics. |
 | ui.plugin-screens | exclusive-owner | safe | register-contribution, mount, unmount, set-visible, reorder-by-policy, inspect | Needs a screen host PR with mount/unmount and visibility policy. |
 | settings | exclusive-owner | sensitive | register-contribution, mount, unmount, set-visible, reorder-by-policy, inspect | Needs redaction rules and a migration story for settings metadata. |
 | visualization | multi-provider | safe | register-provider, get-current, set-renderer | Needs provider ordering/selection rules and legacy highway shim attribution. |
-| audio-mix | multi-provider | safe | register-participant, inspect | Needs plugin fader ownership and bounded diagnostics payloads. |
-| audio-monitoring | multi-provider | sensitive | start, stop, inspect | Needs device consent, lifecycle controls, and redacted diagnostics. |
 | note-detection | multi-provider | sensitive | register, inspect | Needs performance-data redaction and provider lifecycle tests. |
 | backend.routes | multi-provider | privileged | register, inspect | Needs a concrete backend route/provider workflow, privilege review, and route diagnostics. |
 | ui.player-controls | exclusive-owner | safe | register-contribution, mount, unmount, set-visible, reorder-by-policy, inspect | Needs a first-party player-control host. |
@@ -34,7 +35,6 @@ These domains are expected future capability contracts, not current runtime grap
 | plugins | exclusive-owner | privileged | enable, disable, install-missing, update, inspect | Needs explicit user confirmation for writes/install/update. |
 | jobs | multi-provider | privileged | register, inspect, cancel | Needs scheduling limits, cancellation semantics, and user-visible failures. |
 | midi-control | multi-provider | sensitive | register, inspect | Needs device consent and redacted diagnostics. |
-| audio-input | multi-provider | sensitive | register, inspect | Needs device permission, lifecycle controls, and redacted diagnostics. |
 | tempo-clock | multi-provider | safe | register, inspect | Needs a concrete provider and consumer workflow. |
 
 Planned domains should also stay out of the runtime graph until Slopsmith ships the corresponding user-facing workflows.

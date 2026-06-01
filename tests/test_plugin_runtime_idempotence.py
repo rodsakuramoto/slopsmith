@@ -87,7 +87,9 @@ def test_capability_runtime_overrides_do_not_mask_claims():
     assert "if (entry.type !== 'manual') return false;" in source
     assert "type: 'manual'" in source
     assert "_remember(userOverrides" not in set_enabled
-    assert "'audio-monitoring'" in reserved
+    assert "'audio-monitoring'" not in reserved
+    assert "'audio-mix'" not in reserved
+    assert "'audio-input'" not in reserved
     assert "'backend.routes'" in reserved
     assert "'backend.routes':" not in source
 

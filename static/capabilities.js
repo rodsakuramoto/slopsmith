@@ -61,7 +61,7 @@
     if (window.slopsmith.capabilities && window.slopsmith.capabilities.version === 1) return;
 
     const VALID_ROLES = new Set([
-        'owner', 'provider', 'observer', 'requester', 'transformer', 'handler',
+        'owner', 'coordinator', 'provider', 'observer', 'requester', 'transformer', 'handler',
         'validator', 'short-circuiter', 'contributor',
     ]);
     const VALID_MODES = new Set(['active', 'optional', 'legacy-shim', 'disabled']);
@@ -83,8 +83,6 @@
         'ui.plugin-screens',
         'settings',
         'visualization',
-        'audio-mix',
-        'audio-monitoring',
         'note-detection',
         'backend.routes',
         'ui.player-controls',
@@ -93,7 +91,6 @@
         'plugins',
         'jobs',
         'midi-control',
-        'audio-input',
         'tempo-clock',
     ]);
     const RUNTIME_DOMAIN_DEFAULTS = Object.freeze({
@@ -109,8 +106,12 @@
     });
     const CORE_DOMAIN_REVIEW = Object.freeze({
         diagnostics: Object.freeze({ lifecycle: 'diagnostic', label: 'Snapshot surface', tone: 'info', summary: 'Read-only diagnostics snapshot/export facade for support bundles and the Capability Inspector.' }),
+        'audio-input': Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Sensitive input-source identity, availability, and redacted diagnostics for monitoring and later note detection.' }),
+        'audio-mix': Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Core-coordinated song route, fader, participant, and analyser inspection surface.' }),
+        'audio-monitoring': Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Core-coordinated monitoring lifecycle, availability, consent, and bridge diagnostics.' }),
         library: Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Current local and plugin-provided library source selection and sync surface.' }),
         pipeline: Object.freeze({ lifecycle: 'diagnostic', label: 'Graph controls', tone: 'info', summary: 'Capability graph operations: resolve, inspect, validate, and enable or disable participants.' }),
+        stems: Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Core-coordinated stem automation, restore, manual override, and compatibility bridge surface backed by the active Stems provider.' }),
     });
     const EXPECTED_COMPATIBILITY_SHIMS = Object.freeze({});
 
@@ -419,12 +420,13 @@
 
     function _participantPriority(participant) {
         if (participant.roles.includes('owner')) return 0;
-        if (participant.roles.includes('provider')) return 1;
-        if (participant.roles.includes('validator')) return 2;
-        if (participant.roles.includes('transformer')) return 3;
-        if (participant.roles.includes('handler')) return 4;
-        if (participant.roles.includes('short-circuiter')) return 5;
-        return 6;
+        if (participant.roles.includes('coordinator')) return 1;
+        if (participant.roles.includes('provider')) return 2;
+        if (participant.roles.includes('validator')) return 3;
+        if (participant.roles.includes('transformer')) return 4;
+        if (participant.roles.includes('handler')) return 5;
+        if (participant.roles.includes('short-circuiter')) return 6;
+        return 7;
     }
 
     function _resolvePipeline(name) {
@@ -1265,8 +1267,9 @@
         }
         const participants = _pipelineParticipants(pipeline).filter(participant => participant.mode !== 'disabled' && !participant.incompatible);
         const owners = participants.filter(participant => participant.roles.includes('owner'));
-        if (!owners.length) {
-            const reason = `No owner registered for ${capability}`;
+        const coordinators = participants.filter(participant => participant.roles.includes('coordinator'));
+        if (!owners.length && !coordinators.length) {
+            const reason = `No owner or coordinator registered for ${capability}`;
             _remember(missingProviders, { capability, command: commandName, requester: source.source || source.requester || 'dispatch', reason });
             _recordDecision({ commandId: `dispatch-${++commandSeq}`, capability, command: commandName, requester: source.source || source.requester || 'dispatch', participant: 'core', outcome: 'no-owner', reason });
             _emitEvent(capability, 'conflict:missing-provider', { command: commandName, reason });

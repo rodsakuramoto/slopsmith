@@ -16,6 +16,47 @@ function createHighway() {
     // The 'ready' handler awaits this so _juceMode is settled before
     // _onReady / song:ready fire, without blocking note/chord processing.
     let _juceRoutingPromise = Promise.resolve();
+
+    function _audioSession() {
+        return window.slopsmith && window.slopsmith.audioSession;
+    }
+
+    function _reportAudioSessionStart(info) {
+        const session = _audioSession();
+        if (!session || typeof session.startSession !== 'function') return;
+        try {
+            session.startSession({
+                sessionId: `main:${info && (info.filename || info.title || 'song')}`,
+                playerId: 'main',
+                songKey: info && (info.filename || info.audio_url || info.title),
+                songFormat: info && (info.format || 'unknown'),
+            });
+        } catch (_) { /* audio-session diagnostics are best-effort */ }
+    }
+
+    function _reportAudioRoute(routeKind, availability, reason) {
+        const session = _audioSession();
+        if (!session || typeof session.setRoute !== 'function') return;
+        try {
+            session.setRoute({ routeId: 'song-output', routeKind, availability: availability || 'available', selectedByUser: true, fallbackReason: reason || '' });
+        } catch (_) { /* audio-session diagnostics are best-effort */ }
+    }
+
+    function _reportAudioMonitoring(monitoringId, state, reason) {
+        const session = _audioSession();
+        if (!session || typeof session.startMonitoring !== 'function') return;
+        try {
+            session.startMonitoring({ monitoringId, participantId: 'core.juce-route', state, failureReason: reason || '' });
+        } catch (_) { /* audio-session diagnostics are best-effort */ }
+    }
+
+    function _reportAudioBridge(bridgeId, domain, legacySurface, outcome, reason) {
+        const session = _audioSession();
+        if (!session || typeof session.recordBridgeHit !== 'function') return;
+        try {
+            session.recordBridgeHit({ bridgeId, domain, legacySurface, participantId: 'core.highway', outcome: outcome || 'handled', reason: reason || '' });
+        } catch (_) { /* audio-session diagnostics are best-effort */ }
+    }
     // Two notions of "now" — kept deliberately separate:
     //   chartTime — audio-aligned clock. What getTime() exposes to plugins
     //               (scoring, note detection, etc.) and what setTime() receives.
@@ -2559,6 +2600,7 @@ function createHighway() {
                             break;
                         case 'song_info':
                             songInfo = msg;
+                            _reportAudioSessionStart(msg);
                             {
                                 const parsedOffset = Number(msg.offset);
                                 songOffset = Number.isFinite(parsedOffset) ? parsedOffset : 0.0;
@@ -2628,6 +2670,7 @@ function createHighway() {
                                 // no URL to give us — surface it instead of leaving the
                                 // user with a cryptic "Empty src attribute" from audio.play().
                                 if (!msg.audio_url && msg.audio_error) {
+                                    _reportAudioRoute('unknown', 'unavailable', msg.audio_error);
                                     const banner = document.createElement('div');
                                     banner.id = 'audio-error-banner';
                                     banner.className = 'fixed top-4 left-1/2 -translate-x-1/2 z-[300] bg-red-900/95 border border-red-700 text-red-100 rounded-lg px-4 py-3 max-w-2xl shadow-xl';
@@ -2688,12 +2731,18 @@ function createHighway() {
                                                     // synchronous throw from the barrier call.
                                                     if (typeof window.slopsmithAudioBarrier === 'function') {
                                                         let barrierTimer;
+                                                        let barrierTimedOut = false;
                                                         try {
                                                             await Promise.race([
                                                                 Promise.resolve().then(() => window.slopsmithAudioBarrier()),
-                                                                new Promise((r) => { barrierTimer = setTimeout(r, 3000); }),
+                                                                new Promise((r) => { barrierTimer = setTimeout(() => { barrierTimedOut = true; r(); }, 3000); }),
                                                             ]);
-                                                        } catch (_) { /* barrier is best-effort */ }
+                                                            _reportAudioMonitoring('juce-audio-barrier', barrierTimedOut ? 'unavailable' : 'active', barrierTimedOut ? 'Audio barrier timed out before native route setup' : '');
+                                                            _reportAudioBridge('audio-monitoring.audio-barrier', 'audio-monitoring', 'window.slopsmithAudioBarrier', barrierTimedOut ? 'degraded' : 'handled', barrierTimedOut ? 'Audio barrier timed out before native route setup' : '');
+                                                        } catch (_) {
+                                                            _reportAudioMonitoring('juce-audio-barrier', 'failed', 'Audio barrier failed before native route setup');
+                                                            _reportAudioBridge('audio-monitoring.audio-barrier', 'audio-monitoring', 'window.slopsmithAudioBarrier', 'failed', 'Audio barrier failed before native route setup');
+                                                        }
                                                         // Promise.race doesn't cancel the loser — clear the timer
                                                         // when the barrier wins so rapid song switches don't leak.
                                                         clearTimeout(barrierTimer);
@@ -2713,6 +2762,7 @@ function createHighway() {
                                                         if (gen !== _wsGen) return; // stale
                                                         window._juceMode = true;
                                                         window._juceAudioUrl = audioUrl;
+                                                        _reportAudioRoute('juce', 'available');
                                                         // Re-apply the active Song fader whenever a new backing
                                                         // track is loaded so song-to-song switches keep the same
                                                         // user-selected level instead of the engine default.
@@ -2751,12 +2801,14 @@ function createHighway() {
                                                     if (gen !== _wsGen) return; // stale
                                                     window._juceMode = false;
                                                     window._juceAudioUrl = null;
+                                                    _reportAudioRoute('html5', 'degraded', err && err.message ? err.message : String(err));
                                                 }
                                                 // HTML5 fallback (isAudioRunning false, or JUCE error)
                                                 if (gen !== _wsGen) return; // stale
                                                 window._juceMode = false;
                                                 window._juceAudioUrl = null;
                                                 audio.src = audioUrl;
+                                                _reportAudioRoute('html5', pathLabel === '<missing>' ? 'available' : 'degraded', pathLabel === '<missing>' ? '' : 'JUCE fallback');
                                                 if (typeof window.slopsmith?.audio?.applySongVolume === 'function') {
                                                     void window.slopsmith.audio.applySongVolume();
                                                 }
@@ -2783,6 +2835,7 @@ function createHighway() {
                                             window._juceMode = false;
                                             window._juceAudioUrl = null;
                                             audio.src = msg.audio_url;
+                                            _reportAudioRoute(isAudioUrl ? 'html5' : 'stems', 'available');
                                             if (typeof window.slopsmith?.audio?.applySongVolume === 'function') {
                                                 void window.slopsmith.audio.applySongVolume();
                                             }

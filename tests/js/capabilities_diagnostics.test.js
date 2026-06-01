@@ -73,9 +73,9 @@ test('diagnostics exclude deferred and documentation-only future core domains', 
     const pipelines = api.snapshotDiagnostics().pipelines;
     const futureDomains = [
         'playback', 'ui.navigation', 'ui.plugin-screens', 'settings', 'visualization',
-        'audio-mix', 'audio-monitoring', 'note-detection', 'backend.routes', 'ui.player-controls',
+        'note-detection', 'backend.routes', 'ui.player-controls',
         'ui.player-panels', 'ui.player-overlays', 'plugins', 'jobs', 'midi-control',
-        'audio-input', 'tempo-clock',
+        'tempo-clock',
     ];
 
     for (const domain of futureDomains) {

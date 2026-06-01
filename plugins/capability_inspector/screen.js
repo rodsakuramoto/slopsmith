@@ -13,7 +13,6 @@
         'plugins',
         'jobs',
         'midi-control',
-        'audio-input',
         'tempo-clock',
     ]);
     const DOMAIN_GROUPS = Object.freeze([
@@ -27,7 +26,7 @@
             id: 'player-audio',
             label: 'Player and Audio Runtime',
             summary: 'Playback, renderer, mixer, monitoring, and note-detection surfaces.',
-            domains: Object.freeze(['playback', 'visualization', 'audio-mix', 'audio-monitoring', 'note-detection']),
+            domains: Object.freeze(['playback', 'visualization', 'audio-mix', 'audio-input', 'audio-monitoring', 'stems', 'note-detection']),
         }),
         Object.freeze({
             id: 'plugin-defined',
@@ -48,6 +47,7 @@
         visualization: 'monitor',
         'audio-mix': 'sliders',
         'audio-monitoring': 'headphones',
+        stems: 'sliders',
         'note-detection': 'activity',
         diagnostics: 'fileSearch',
         pipeline: 'activity',
@@ -61,7 +61,7 @@
         plugins: 'puzzle',
         jobs: 'history',
         'midi-control': 'sliders',
-        'audio-input': 'headphones',
+        'audio-input': 'plug',
         'tempo-clock': 'history',
     });
     const ICON_PATHS = Object.freeze({
@@ -1459,6 +1459,60 @@
             </div>`;
     }
 
+    function audioSessionSnapshot() {
+        const api = window.slopsmith && window.slopsmith.audioSession;
+        if (!api || typeof api.snapshot !== 'function') return null;
+        try { return api.snapshot(); }
+        catch (_) { return null; }
+    }
+
+    function audioDomainSupportPanel(audioData) {
+        if (!audioData || !audioData.domains) return '';
+        const mix = audioData.domains['audio-mix'] || {};
+        const route = mix.route || (audioData.session && audioData.session.route) || {};
+        const input = audioData.domains['audio-input'] || {};
+        const monitoring = audioData.domains['audio-monitoring'] || {};
+        const stems = audioData.domains['stems'] || {};
+        const participants = Array.isArray(mix.participants) ? mix.participants : [];
+        const sources = Array.isArray(input.sources) ? input.sources : [];
+        const monitoringSessions = Array.isArray(monitoring.sessions) ? monitoring.sessions : [];
+        const bridges = [
+            ...(Array.isArray(mix.bridges) ? mix.bridges : []),
+            ...(Array.isArray(input.bridges) ? input.bridges : []),
+            ...(Array.isArray(monitoring.bridges) ? monitoring.bridges : []),
+            ...(Array.isArray(stems.bridges) ? stems.bridges : []),
+        ];
+        const bridgeHits = bridges.reduce((sum, bridge) => sum + Number(bridge.hitCount || 0), 0);
+        const claims = Array.isArray(stems.claims) ? stems.claims : [];
+        const owner = stems.owner || null;
+        return `<section class="mb-4 rounded-lg border border-gray-800 bg-dark-900/40 p-4" data-audio-session-support>
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <h3 class="text-sm font-semibold text-white">Audio session</h3>
+                    <p class="mt-1 text-xs text-gray-500">Route, mix participants, stem owner, claims, and bridge hits from the active session host.</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    ${pill(`route: ${route.routeKind || 'unknown'}`, route.availability === 'available' ? 'clean' : 'warning')}
+                    ${pill(`${participants.length} mix participant${participants.length === 1 ? '' : 's'}`, participants.length ? 'info' : 'muted')}
+                    ${pill(`${input.totalSources || sources.length} input source${(input.totalSources || sources.length) === 1 ? '' : 's'}`, sources.length ? 'info' : 'muted')}
+                    ${pill(`${monitoring.totalSessions || monitoringSessions.length} monitor${(monitoring.totalSessions || monitoringSessions.length) === 1 ? '' : 's'}`, monitoringSessions.length ? 'info' : 'muted')}
+                    ${pill(owner ? `stems: ${owner.ownerId}` : 'stems: no owner', owner ? 'clean' : 'muted')}
+                    ${pill(`${claims.length} claim${claims.length === 1 ? '' : 's'}`, claims.length ? 'used' : 'muted')}
+                    ${pill(`${bridgeHits} bridge hit${bridgeHits === 1 ? '' : 's'}`, bridges.length ? 'used' : 'muted')}
+                </div>
+            </div>
+            <div class="mt-3 grid gap-2 text-xs text-gray-400 md:grid-cols-2">
+                <div data-audio-session-route>Route: ${text(route.routeKind || 'unknown')} (${text(route.availability || 'unknown')})</div>
+                <div data-audio-session-input>Input: ${sources.map(s => text(s.sourceId || s.kind)).join(', ') || 'none'}</div>
+                <div data-audio-session-monitoring>Monitoring: ${monitoringSessions.map(s => `${text(s.monitoringId)}:${text(s.state)}`).join(', ') || 'none'}</div>
+                <div data-audio-session-stems>Stem owner: ${text(owner && owner.ownerId ? owner.ownerId : 'none')}</div>
+                <div data-audio-session-participants>Participants: ${participants.map(p => text(p.label || p.participantId)).join(', ') || 'none'}</div>
+                <div data-audio-session-claims>Claims: ${claims.map(c => `${text(c.claimId)}:${text(c.state)}`).join(', ') || 'none'}</div>
+                <div data-audio-session-bridges>Bridges: ${bridges.map(b => `${text(b.bridgeId)}:${text(b.outcome || 'handled')}${b.reason ? ` (${text(b.reason)})` : ''}`).join(', ') || 'none'}</div>
+            </div>
+        </section>`;
+    }
+
     function syncFilterOptions(filter, pipelines) {
         if (!filter) return '';
         const names = sortPipelines(pipelines).map(pipeline => pipeline && pipeline.name).filter(Boolean);
@@ -1509,7 +1563,8 @@
         const compatibilityShims = Array.isArray(data.compatibilityShims) ? data.compatibilityShims : [];
         if (summary) summary.innerHTML = summaryDashboard(data, pipelines, compatibilityShims);
         destroyActiveGraphs();
-        content.innerHTML = (selected
+        const audioPanel = audioDomainSupportPanel(audioSessionSnapshot());
+        content.innerHTML = audioPanel + (selected
             ? visible.map(pipeline => domainGraphView(pipeline, shimsByCapability.get(pipeline.name) || [], expectedShimsByCapability.get(pipeline.name) || [])).join('')
             : groupedPipelines(visible).map(entry => pipelineGroupSection(entry, shimsByCapability, expectedShimsByCapability, { defaultExpanded: false })).join(''))
             || '<div class="text-gray-500 text-sm">No capability domains registered.</div>';

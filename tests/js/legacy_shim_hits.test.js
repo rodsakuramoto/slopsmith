@@ -1,12 +1,34 @@
-// Source-level guards for PR1 runtime compatibility-shim hit accounting.
-// Broader app/player/audio domains are reserved for follow-up PRs, so this
-// file checks plugin attribution helpers and that library now uses the native
-// capability module instead of legacy shim accounting.
-
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadAudioSession } = require('./audio_session_test_harness');
+
+test('active audio domains expose expected legacy shim metadata', () => {
+    const window = loadAudioSession();
+    const shims = window.slopsmith.capabilities.snapshotDiagnostics().compatibilityShims;
+    for (const shimId of ['audio-mix.fader-registry', 'audio-mix.song-volume', 'audio-mix.analyser', 'audio-input.legacy-source', 'audio-monitoring.audio-barrier', 'stems.master-volume', 'stems.private-state']) {
+        assert.equal(shims.some(shim => shim.shimId === shimId && shim.status === 'active'), true, shimId);
+    }
+});
+
+test('legacy bridge hit counts are attributed to canonical audio domains', () => {
+    const window = loadAudioSession();
+    const audioSession = window.slopsmith.audioSession;
+    audioSession.recordBridgeHit({ domain: 'audio-mix', bridgeId: 'audio-mix.analyser', legacySurface: 'HTMLAudioElement analyser tap', participantId: 'highway_3d' });
+    audioSession.recordBridgeHit({ domain: 'audio-input', bridgeId: 'audio-input.legacy-source', legacySurface: 'navigator.mediaDevices.getUserMedia', participantId: 'note_detect' });
+    audioSession.recordBridgeHit({ domain: 'audio-monitoring', bridgeId: 'audio-monitoring.audio-barrier', legacySurface: 'window.slopsmithAudioBarrier', participantId: 'note_detect' });
+
+    const shims = window.slopsmith.capabilities.snapshotDiagnostics().compatibilityShims;
+    assert.equal(shims.find(shim => shim.shimId === 'audio-mix.analyser').hitCount, 1);
+    assert.equal(shims.find(shim => shim.shimId === 'audio-input.legacy-source').capability, 'audio-input');
+    assert.equal(shims.find(shim => shim.shimId === 'audio-monitoring.audio-barrier').hitCount, 1);
+});
+
+// Source-level guards for PR1 runtime compatibility-shim hit accounting.
+// Broader app/player/audio domains are reserved for follow-up PRs, so this
+// file checks plugin attribution helpers and that library now uses the native
+// capability module instead of legacy shim accounting.
 
 const ROOT = path.join(__dirname, '..', '..');
 const APP_JS = path.join(ROOT, 'static', 'app.js');

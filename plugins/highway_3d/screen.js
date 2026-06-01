@@ -817,6 +817,26 @@
     // so the frequency buffer must hold at least 128 bins regardless of
     // the source analyser's fftSize.
     const BG_FREQ_BINS = 128;
+    const _bgBridgeKeys = new Map();
+    function _bgRecordAudioBridge(bridgeId, legacySurface, outcome = 'handled', reason = '', status = 'used') {
+        const key = `${outcome}:${status}:${reason}`;
+        if (_bgBridgeKeys.get(bridgeId) === key) return;
+        _bgBridgeKeys.set(bridgeId, key);
+        const session = window.slopsmith && window.slopsmith.audioSession;
+        if (!session || typeof session.recordBridgeHit !== 'function') return;
+        try {
+            session.recordBridgeHit({
+                domain: 'audio-mix',
+                bridgeId,
+                legacySurface,
+                participantId: 'highway_3d',
+                outcome,
+                status,
+                reason,
+            });
+        } catch (_) { /* diagnostics are best-effort */ }
+    }
+
     function _bgGetAnalyser() {
         // Prefer the stems plugin's side-chain analyser when a sloppak is
         // loaded. As of slopsmith-plugin-stems 0.5.0 (sample-locked playback)
@@ -844,6 +864,7 @@
                     freq: new Uint8Array(Math.max(BG_FREQ_BINS, stemsAnalyser.frequencyBinCount)),
                     source: 'stems',
                 };
+                _bgRecordAudioBridge('audio-mix.analyser', 'window.slopsmith.stems.getAnalyser', 'handled', '', 'stems');
             }
             return _bgAudio;
         }
@@ -882,6 +903,7 @@
             source.connect(analyser);
             analyser.connect(ctx.destination);
             _bgAudio = { ctx, analyser, freq: new Uint8Array(Math.max(BG_FREQ_BINS, analyser.frequencyBinCount)), source: 'core' };
+            _bgRecordAudioBridge('audio-mix.analyser', 'HTMLAudioElement analyser tap', 'handled', '', 'core');
             // Remember the core analyser so a later stems-then-back-to-core
             // transition can re-use it instead of re-tapping #audio (which
             // would throw InvalidStateError on the one-shot per element).
@@ -907,6 +929,7 @@
             }
             console.warn('[3D-Hwy] failed to set up audio analyser:', e);
             const permanent = !!(e && e.name === 'InvalidStateError');
+            _bgRecordAudioBridge('audio-mix.analyser', 'HTMLAudioElement analyser tap', 'failed', e && e.message ? e.message : String(e), permanent ? 'permanent-failure' : 'transient-failure');
             _bgAudio = { failed: true, permanent };
             _bgAudioFailedAt = performance.now();
             return null;
@@ -11150,6 +11173,11 @@
     //                        _canRun3D() in app.js still gates Auto from
     //                        picking us on machines without WebGL2.
     window.slopsmithViz_highway_3d.contextType = 'webgl2';
+    window.slopsmithViz_highway_3d.__test = {
+        getAnalyserForBridgeTest: _bgGetAnalyser,
+        readBandsForBridgeTest: _bgReadBands,
+        resetAnalyserBridgeForTest() { _bgBridgeKeys.clear(); _bgAudio = null; _bgAudioCore = null; _bgAudioFailedAt = 0; },
+    };
     // Canonical guitar arrangement names (server.py: _ALLOWED_ARRANGEMENT_NAMES)
     // are Lead / Rhythm / Bass / Combo. `guitar` is included as a safety
     // net for sources that use a generic name (older imports, third-party

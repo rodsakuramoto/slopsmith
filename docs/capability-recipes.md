@@ -122,10 +122,93 @@ A route-only wrapper that uses the library capability without registering a brow
 }
 ```
 
+## Audio Mix Fader Provider
+
+Existing plugins can keep using `window.slopsmith.audio.registerFader(spec)` while migrating. The compatibility bridge records the fader as an `audio-mix` participant. New bundled code should prefer a native participant declaration plus the audio-session helper once available in its integration point.
+
+```json
+{
+  "id": "delay_fx",
+  "name": "Delay FX",
+  "standards": ["capability-pipelines.v1"],
+  "capabilities": {
+    "audio-mix": {
+      "roles": ["provider"],
+      "operations": ["fader.get-value", "fader.set-value"],
+      "events": ["fader-changed"],
+      "mode": "active",
+      "compatibility": "shim-allowed",
+      "ownership": "multi-provider",
+      "safety": "safe",
+      "version": 1
+    }
+  }
+}
+```
+
+## Audio Input And Monitoring Requester
+
+Plugins that need live instrument input should declare requester/observer intent and let the host expose redaction-safe source identity. Diagnostics must not contain raw device labels, stable hardware ids, or audio buffers.
+
+```json
+{
+  "id": "note_detect",
+  "name": "Note Detect",
+  "standards": ["capability-pipelines.v1"],
+  "capabilities": {
+    "audio-input": {
+      "roles": ["requester", "observer"],
+      "requests": ["inspect", "select-source"],
+      "observes": ["source-registered", "source-selected"],
+      "mode": "active",
+      "compatibility": "shim-allowed",
+      "ownership": "requester-only",
+      "safety": "sensitive",
+      "version": 1
+    },
+    "audio-monitoring": {
+      "roles": ["requester", "observer"],
+      "requests": ["start", "stop", "inspect"],
+      "observes": ["monitoring-started", "monitoring-unavailable", "monitoring-stopped"],
+      "mode": "active",
+      "compatibility": "shim-allowed",
+      "ownership": "requester-only",
+      "safety": "sensitive",
+      "version": 1
+    }
+  }
+}
+```
+
+## Stems Provider Behind Audio Session Coordination
+
+The Stems plugin remains the provider/owner of actual stem playback state. `core.audio.session` coordinates dispatch, claims, overrides, orphan detection, and diagnostics, but it does not replace the provider.
+
+```json
+{
+  "id": "stems",
+  "name": "Stems",
+  "standards": ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"],
+  "capabilities": {
+    "stems": {
+      "roles": ["owner", "provider"],
+      "commands": ["mute", "restore", "inspect"],
+      "operations": ["stem.get-state", "stem.apply-automation", "stem.restore-automation"],
+      "events": ["owner-available", "automation-applied", "automation-restored", "automation-overridden", "claim-orphaned"],
+      "mode": "active",
+      "compatibility": "shim-allowed",
+      "ownership": "exclusive-owner",
+      "safety": "safe",
+      "version": 1
+    }
+  }
+}
+```
+
 ## Future Expansion Domains
 
 Some domain names are reserved for expected future contracts, but they are not registered in the runtime graph yet. For example, `ui.player-panels` is documented as a likely panel-host surface, but Slopsmith does not currently expose a capability command for panel contributions. See [capability-roadmap.md](capability-roadmap.md) for the PR1 domain set and deferred-domain checklist.
 
-Plugins should not declare future expansion domains until the corresponding host workflow ships. For PR1 integrations, prefer active domains such as `library`; plugin-owned domains such as `stems` should wait for their own domain PR.
+Plugins should not declare future expansion domains until the corresponding host workflow ships. For PR1 integrations, prefer active domains such as `library`; after the audio graph/session slice, audio participants may also declare `audio-mix`, `audio-input`, `audio-monitoring`, or `stems` intent matching the recipes above.
 
 Invalid capability metadata is excluded from the capability graph, but legacy manifest fields still load through their existing app paths. The `library` workflow is native in PR1 and does not use compatibility shim metadata. Unsupported `capability-pipelines` versions are reported as incompatible and their runtime handlers must not execute.

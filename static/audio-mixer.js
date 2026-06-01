@@ -23,6 +23,60 @@ let _openTimer = null;
 
 function _audioEl() { return document.getElementById('audio'); }
 
+function _audioSession() {
+    return window.slopsmith && window.slopsmith.audioSession;
+}
+
+function _registerAudioSessionFader(spec, currentValue, compatibilitySource) {
+    const session = _audioSession();
+    if (!session || typeof session.registerMixParticipant !== 'function') return;
+    session.registerMixParticipant({
+        participantId: spec.id === 'song' ? 'core.song' : `fader.${spec.id}`,
+        ownerPluginId: spec.id === 'song' ? 'core' : spec.id,
+        label: spec.label || spec.id,
+        kind: spec.id === 'song' ? 'song' : 'plugin',
+        fader: {
+            id: spec.id,
+            label: spec.label || spec.id,
+            unit: spec.unit || '',
+            min: spec.min,
+            max: spec.max,
+            step: spec.step,
+            defaultValue: spec.defaultValue,
+            currentValue,
+        },
+        operations: ['fader.get-value', 'fader.set-value'],
+        availability: 'available',
+        compatibilitySource,
+    });
+}
+
+function _recordAudioBridge(bridgeId, legacySurface, participantId, outcome, reason) {
+    const session = _audioSession();
+    if (!session || typeof session.recordBridgeHit !== 'function') return;
+    session.recordBridgeHit({
+        domain: bridgeId && bridgeId.startsWith('stems.') ? 'stems' : 'audio-mix',
+        bridgeId,
+        legacySurface,
+        participantId,
+        outcome: outcome || 'handled',
+        status: 'used',
+        reason,
+    });
+}
+
+function _reportSongRoute(routeKind, availability, reason) {
+    const session = _audioSession();
+    if (!session || typeof session.setRoute !== 'function') return;
+    session.setRoute({
+        routeId: 'song-output',
+        routeKind: routeKind || (window._juceMode ? 'juce' : 'html5'),
+        availability: availability || 'available',
+        selectedByUser: true,
+        fallbackReason: reason || '',
+    });
+}
+
 function _clampSongVolume(v) {
     const n = Number(v);
     if (!Number.isFinite(n)) return 80;
@@ -63,13 +117,32 @@ function _applySongVolume(v) {
         // A synchronous throw or a rejected Promise from the stems plugin hook
         // must not abort _applySongVolume before it returns / persists. The
         // try/catch covers a sync throw; the .catch() covers an async rejection.
+        // The bridge hit is attributed by outcome (handled vs failed) so support
+        // data reflects reality rather than always reporting success.
         try {
             // `void` marks the floating Promise as intentionally discarded,
             // consistent with the other ignored async calls in this module.
             void Promise.resolve(stemsSetMaster(linear))
-                .catch(function () { /* stems hook unavailable */ });
-        } catch (_) { /* stems hook unavailable */ }
+                .then(function () {
+                    _recordAudioBridge('stems.master-volume', 'window.slopsmith.stems.setMasterVolume', 'core.song', 'handled');
+                })
+                .catch(function () {
+                    _recordAudioBridge('stems.master-volume', 'window.slopsmith.stems.setMasterVolume', 'core.song', 'failed', 'Stems master volume hook rejected');
+                });
+        } catch (_) {
+            _recordAudioBridge('stems.master-volume', 'window.slopsmith.stems.setMasterVolume', 'core.song', 'failed', 'Stems master volume hook threw');
+        }
     }
+    _registerAudioSessionFader({
+        id: 'song',
+        label: 'Song',
+        unit: '%',
+        min: 0,
+        max: 100,
+        step: 1,
+        defaultValue: _readSongVolume(),
+    }, normalized, 'audio-mix.song-volume');
+    _recordAudioBridge('audio-mix.song-volume', 'applySongVolume', 'core.song', 'handled');
     // Desktop + JUCE: song audio is mixed in the native engine; HTML5 volume is ignored.
     if (window._juceMode) {
         const setGain = window.slopsmithDesktop?.audio?.setGain;
@@ -77,12 +150,14 @@ function _applySongVolume(v) {
             // Same dual guard as the stems hook above: the try/catch covers a
             // synchronous throw from setGain, the .catch() covers a rejected IPC.
             try {
+                _reportSongRoute('juce', 'available');
                 return Promise.resolve(setGain('backing', linear))
                     .catch(function () { /* IPC unavailable */ })
                     .then(function () { return normalized; });
             } catch (_) { /* IPC unavailable */ }
         }
     }
+    _reportSongRoute(typeof stemsSetMaster === 'function' ? 'stems' : 'html5', 'available');
     return Promise.resolve(normalized);
 }
 
@@ -129,11 +204,24 @@ function registerFader(spec) {
         console.warn('[mixer] registerFader: overwriting existing fader', spec.id);
     }
     _faders.set(spec.id, normalized);
+    // Report the fader's live value (best-effort, clamped) rather than the
+    // default, so diagnostics / Capability Inspector reflect persisted state.
+    let currentValue = normalized.defaultValue;
+    try {
+        const live = Number(normalized.getValue());
+        if (Number.isFinite(live)) currentValue = Math.min(max, Math.max(min, live));
+    } catch (_) { /* fall back to the default value */ }
+    _registerAudioSessionFader(normalized, currentValue, 'audio-mix.fader-registry');
+    _recordAudioBridge('audio-mix.fader-registry', 'registerFader', spec.id === 'song' ? 'core.song' : `fader.${spec.id}`, 'handled');
     if (_open) _renderPopover();
 }
 
 function unregisterFader(id) {
     _faders.delete(id);
+    const session = _audioSession();
+    if (session && typeof session.unregisterMixParticipant === 'function') {
+        session.unregisterMixParticipant(id === 'song' ? 'core.song' : `fader.${id}`);
+    }
     if (_open) _renderPopover();
 }
 

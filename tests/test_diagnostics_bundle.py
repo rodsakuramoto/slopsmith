@@ -185,6 +185,37 @@ def test_plugin_callable_exception_does_not_crash(tmp_path):
         assert "plugins/buggy/callable.json" not in zf.namelist()
 
 
+def test_client_audio_session_contribution_redacts_paths(tmp_path):
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    plugin = {
+        "id": "note_detect",
+        "name": "Note Detect",
+        "_dir": cfg,
+        "_manifest": {"version": "1.0.0"},
+        "_diagnostics_paths": [],
+        "_diagnostics_callable": None,
+    }
+    kw = _basic_kwargs(tmp_path)
+    kw["config_dir"] = cfg
+    home_path = Path.home()
+    kw["loaded_plugins"] = [plugin]
+    kw["include"]["plugins"] = True
+    kw["client_contributions"] = {
+        "note_detect": {
+            "schema": "slopsmith.audio_session.diagnostics.v1",
+            "session": {"sessionId": str(home_path / "DLC" / "private-song.psarc")},
+            "domains": {"audio-input": {"sources": [{"label": str(home_path / "devices" / "raw-id")}]}},
+        }
+    }
+    zip_bytes, _name, _m = db.build_bundle(**kw)
+    with _open_zip(zip_bytes) as zf:
+        data = json.loads(zf.read("plugins/note_detect/client.json"))
+    encoded = json.dumps(data)
+    assert str(home_path) not in encoded
+    assert "slopsmith.audio_session.diagnostics.v1" in encoded
+
+
 def test_system_plugins_exports_capability_metadata_and_shims(tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()
