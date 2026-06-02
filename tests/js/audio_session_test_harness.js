@@ -61,6 +61,52 @@ function makeInputProvider(overrides = {}) {
     };
 }
 
+function makeMonitoringProvider(overrides = {}) {
+    const calls = [];
+    const providerId = overrides.providerId || 'monitoring-provider';
+    const logicalMonitoringKey = overrides.logicalMonitoringKey || `${providerId}:main`;
+    const operations = overrides.operations || ['monitoring.start', 'monitoring.stop', 'monitoring.status', 'monitoring.set-direct-monitor'];
+    const defaultHandlers = {
+        'monitoring.start': request => {
+            calls.push(['monitoring.start', request]);
+            return overrides.startResult || { outcome: 'handled', status: 'active', summary: { directMonitor: overrides.directMonitor || { state: 'muted', control: 'supported', preference: 'muted', applied: true }, latencySummary: overrides.latencySummary || { bucket: 'low' } } };
+        },
+        'monitoring.stop': request => {
+            calls.push(['monitoring.stop', request]);
+            return overrides.stopResult || { outcome: 'handled', status: 'stopped' };
+        },
+        'monitoring.status': request => {
+            calls.push(['monitoring.status', request]);
+            return overrides.statusResult || { outcome: 'handled', status: 'active', summary: { availability: 'available', directMonitor: overrides.directMonitor || { state: 'muted', control: 'supported', preference: 'muted', applied: true }, latencySummary: overrides.latencySummary || { bucket: 'low' } } };
+        },
+        'monitoring.set-direct-monitor': request => {
+            calls.push(['monitoring.set-direct-monitor', request]);
+            return overrides.directMonitorResult || { outcome: 'handled', status: 'active', summary: { directMonitor: { state: request.state, control: 'supported', preference: request.state, applied: true } } };
+        },
+    };
+    const operationHandlers = {};
+    for (const operation of operations) {
+        if (defaultHandlers[operation]) operationHandlers[operation] = defaultHandlers[operation];
+    }
+    Object.assign(operationHandlers, overrides.operationHandlers || {});
+    return {
+        calls,
+        provider: {
+            providerId,
+            ownerPluginId: overrides.ownerPluginId || providerId,
+            logicalMonitoringKey,
+            safeLabel: overrides.safeLabel || 'Monitoring Provider',
+            availability: overrides.availability || 'available',
+            sourceMode: overrides.sourceMode || 'native',
+            compatibilitySource: overrides.compatibilitySource || '',
+            operations,
+            directMonitor: overrides.directMonitor || { state: 'muted', control: 'supported', preference: 'muted', applied: true },
+            latencySummary: overrides.latencySummary || { bucket: 'low' },
+            operationHandlers,
+        },
+    };
+}
+
 function installDeterministicTimers(window) {
     const timers = [];
     let nextId = 1;
@@ -139,6 +185,7 @@ module.exports = {
     diagnosticsSnapshot,
     storageEntries,
     makeInputProvider,
+    makeMonitoringProvider,
     installDeterministicTimers,
     installMixerDom,
     loadAudioMixer,

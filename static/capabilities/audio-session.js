@@ -13,7 +13,10 @@
     const MAX_DOMAIN_ITEMS = 50;
     const FADER_OPERATION_TIMEOUT_MS = 2000;
     const INPUT_OPERATION_TIMEOUT_MS = 2000;
+    const MONITORING_OPERATION_TIMEOUT_MS = 2000;
     const SELECTED_INPUT_STORAGE_KEY = 'slopsmith.audioInput.selectedLogicalSourceKey';
+    const SELECTED_MONITORING_PROVIDER_STORAGE_KEY = 'slopsmith.audioMonitoring.selectedLogicalMonitoringKey';
+    const DIRECT_MONITOR_STORAGE_KEY = 'slopsmith.audioMonitoring.directMonitorPreference';
     const OWNER_ID = 'core.audio.session';
     const REQUIRED_MIX_KINDS = Object.freeze(['song', 'plugin', 'stem', 'monitoring', 'preview']);
     const MIX_KINDS = new Set([...REQUIRED_MIX_KINDS, 'analyser', 'other']);
@@ -21,6 +24,15 @@
     const SOURCE_MODES = new Set(['native', 'compatibility', 'core']);
     const INPUT_KINDS = new Set(['instrument', 'microphone', 'desktop', 'plugin', 'virtual', 'unknown']);
     const CHANNEL_SHAPES = new Set(['mono', 'stereo', 'multi', 'unknown']);
+    const MONITORING_STATES = new Set(['active', 'degraded', 'stopped', 'unavailable', 'denied', 'failed', 'orphaned', 'unknown']);
+    const MONITORING_OUTCOMES = new Set(['handled', 'denied', 'degraded', 'failed', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped', 'overridden']);
+    // Outcomes accepted from audio-mix / audio-input provider handlers. Deliberately excludes the
+    // monitoring-only outcomes (provider-selection-required, user-action-required, stopped, unavailable)
+    // so a mix/input provider can't leak a monitoring-specific terminal outcome into generic dispatch.
+    const PROVIDER_OUTCOMES = new Set(['handled', 'denied', 'degraded', 'failed', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'overridden']);
+    const AUTHORIZATION_MODES = new Set(['user-action', 'attach-existing', 'background']);
+    const DIRECT_MONITOR_STATES = new Set(['muted', 'unmuted', 'unsupported', 'unavailable', 'unknown']);
+    const DIRECT_MONITOR_CONTROLS = new Set(['supported', 'unsupported', 'unavailable', 'unknown']);
     // Matched against a normalized key (camelCase split to snake_case, lowercased — see _safeInputValue)
     // so concatenated names like streamHandle / rawDeviceId / nativeHandleRef are caught, not just
     // underscore/exact-token forms.
@@ -33,6 +45,7 @@
     const knownMixParticipants = new Map();
     const knownInputSources = new Map();
     const knownInputProviders = new Map();
+    const knownMonitoringProviders = new Map();
     let currentSession = _newSession({});
 
     function _now() { return new Date().toISOString(); }
@@ -106,6 +119,7 @@
         const path = new RegExp(`(?:/Users/|/home/|/root\\b/?|[A-Za-z]:\\\\)${tail}`, 'g');
         return _string(value)
             .replace(path, '[path]')
+            .replace(/\b(raw[-_ ]?audio|audio[-_ ]?buffer|sample[s]?|waveform[s]?|recording[s]?)\b/gi, '[audio-data]')
             .replace(/\b(token|secret|password|api[_-]?key)=([^\s&]+)/gi, '$1=[redacted]');
     }
 
@@ -123,15 +137,14 @@
         }
     }
 
-    function _readSelectedLogicalSourceKey() {
+    function _readStorage(key) {
         try {
             if (!window.localStorage || typeof window.localStorage.getItem !== 'function') return '';
-            const stored = _string(window.localStorage.getItem(SELECTED_INPUT_STORAGE_KEY));
+            const stored = _string(window.localStorage.getItem(key));
             // localStorage is untrusted/mutable: ignore (and clear) a persisted key that isn't already
-            // redaction-safe, so an injected path/token can't be restored into the selection and then
-            // leak into the redaction-safe diagnostics snapshot via selected.logicalSourceKey.
-            if (stored && _boundedReason(stored) !== stored) {
-                try { window.localStorage.removeItem(SELECTED_INPUT_STORAGE_KEY); } catch (_) { /* best effort */ }
+            // redaction-safe, so an injected path/token can't be restored into selected logical keys.
+            if (stored && key !== DIRECT_MONITOR_STORAGE_KEY && _boundedReason(stored) !== stored) {
+                try { window.localStorage.removeItem(key); } catch (_) { /* best effort */ }
                 return '';
             }
             return stored;
@@ -140,14 +153,39 @@
         }
     }
 
-    function _writeSelectedLogicalSourceKey(logicalSourceKey) {
+    function _writeStorage(key, value) {
         try {
             if (!window.localStorage || typeof window.localStorage.setItem !== 'function') return 'unavailable';
-            window.localStorage.setItem(SELECTED_INPUT_STORAGE_KEY, _string(logicalSourceKey));
+            window.localStorage.setItem(key, _string(value));
             return 'available';
         } catch (_) {
             return 'failed';
         }
+    }
+
+    function _readSelectedLogicalSourceKey() {
+        return _readStorage(SELECTED_INPUT_STORAGE_KEY);
+    }
+
+    function _writeSelectedLogicalSourceKey(logicalSourceKey) {
+        return _writeStorage(SELECTED_INPUT_STORAGE_KEY, logicalSourceKey);
+    }
+
+    function _readSelectedLogicalMonitoringKey() {
+        return _readStorage(SELECTED_MONITORING_PROVIDER_STORAGE_KEY);
+    }
+
+    function _writeSelectedLogicalMonitoringKey(logicalMonitoringKey) {
+        return _writeStorage(SELECTED_MONITORING_PROVIDER_STORAGE_KEY, logicalMonitoringKey);
+    }
+
+    function _readDirectMonitorPreference() {
+        const stored = _readStorage(DIRECT_MONITOR_STORAGE_KEY);
+        return stored === 'muted' || stored === 'unmuted' ? stored : 'muted';
+    }
+
+    function _writeDirectMonitorPreference(state) {
+        return _writeStorage(DIRECT_MONITOR_STORAGE_KEY, state === 'unmuted' ? 'unmuted' : 'muted');
     }
 
     function _storedSelectedInput() {
@@ -163,6 +201,33 @@
             selectedAt: '',
             lastSelectedAt: '',
             lastRestoredAt: _now(),
+        };
+    }
+
+    function _storedSelectedMonitoringProvider() {
+        const logicalMonitoringKey = _readSelectedLogicalMonitoringKey();
+        if (!logicalMonitoringKey) return null;
+        return {
+            providerId: '',
+            logicalMonitoringKey,
+            availability: 'unavailable',
+            restored: true,
+            restoreStatus: 'missing-provider',
+            selectedAt: '',
+            lastSelectedAt: '',
+            lastRestoredAt: _now(),
+            requesterId: 'storage',
+        };
+    }
+
+    function _storedDirectMonitorPreference() {
+        return {
+            state: _readDirectMonitorPreference(),
+            control: 'unknown',
+            preference: _readDirectMonitorPreference(),
+            applied: false,
+            reason: '',
+            lastChangedAt: '',
         };
     }
 
@@ -218,6 +283,9 @@
             selectedInput: _storedSelectedInput(),
             openInputSessions: new Map(),
             storageStatus: _storageStatus(),
+            monitoringProviders: new Map(),
+            selectedMonitoringProvider: _storedSelectedMonitoringProvider(),
+            directMonitor: _storedDirectMonitorPreference(),
             monitoringSessions: new Map(),
             stemOwner: null,
             stemClaims: new Map(),
@@ -514,6 +582,339 @@
         }
     }
 
+    function _monitoringState(value, fallback = 'unknown') {
+        const normalized = _string(value, fallback);
+        if (MONITORING_STATES.has(normalized)) return normalized;
+        // Callers sometimes pass a non-state outcome (e.g. 'no-handler') as the fallback; clamp it
+        // so a session.state is always a declared MONITORING_STATES member for inspectors/events.
+        return MONITORING_STATES.has(fallback) ? fallback : 'unknown';
+    }
+
+    function _monitoringOutcome(value, fallback = 'handled') {
+        const normalized = _string(value, fallback);
+        return MONITORING_OUTCOMES.has(normalized) ? normalized : fallback;
+    }
+
+    function _authorizationMode(value) {
+        const normalized = _string(value, 'background');
+        return AUTHORIZATION_MODES.has(normalized) ? normalized : 'background';
+    }
+
+    function _directMonitorState(value, fallback = 'unknown') {
+        const normalized = _string(value, fallback);
+        return DIRECT_MONITOR_STATES.has(normalized) ? normalized : fallback;
+    }
+
+    function _directMonitorControl(value, fallback = 'unknown') {
+        const normalized = _string(value, fallback);
+        return DIRECT_MONITOR_CONTROLS.has(normalized) ? normalized : fallback;
+    }
+
+    function _normalizeDirectMonitor(value = {}) {
+        const source = _plainObject(value);
+        const preference = source.preference === 'muted' || source.preference === 'unmuted' ? source.preference : _readDirectMonitorPreference();
+        return {
+            state: _directMonitorState(source.state, preference || 'unknown'),
+            control: _directMonitorControl(source.control, source.supported === false ? 'unsupported' : 'unknown'),
+            preference,
+            applied: source.applied === true,
+            reason: _boundedReason(source.reason),
+            lastChangedAt: _string(source.lastChangedAt, source.changedAt || ''),
+        };
+    }
+
+    function _normalizeLatencySummary(value = {}) {
+        const source = _plainObject(value);
+        if (!Object.keys(source).length) return null;
+        return {
+            // bucket/level is provider-supplied and surfaced in diagnostics, so bound it like reason.
+            bucket: _boundedReason(source.bucket || source.level),
+            ms: _number(source.ms ?? source.latencyMs, null),
+            reason: _boundedReason(source.reason),
+        };
+    }
+
+    function _logicalMonitoringKey(provider, source) {
+        const explicit = source.logicalMonitoringKey || source.logicalKey || source.monitoringKey;
+        if (explicit) return _string(explicit);
+        return `${provider.sourceMode}:${provider.providerId}`;
+    }
+
+    function _normalizeMonitoringProvider(spec) {
+        const source = _plainObject(spec);
+        // providerId is surfaced in diagnostics/events and used for selection, so normalize it the same
+        // way requester ids are (redact paths/tokens, restrict to the id charset, bound length) before it
+        // becomes session state — a buggy/malicious provider must not leak a path/token through it.
+        const providerId = _boundedReason(_string(source.providerId || source.participantId || source.id)).replace(/[^A-Za-z0-9_.:-]+/g, '-').slice(0, 80);
+        if (!providerId) return null;
+        const existing = currentSession.monitoringProviders.get(providerId) || knownMonitoringProviders.get(providerId) || {};
+        const compatibilitySource = _string(source.compatibilitySource || source.legacySurface || existing.compatibilitySource, '');
+        const sourceMode = _sourceMode(source.sourceMode, compatibilitySource ? 'compatibility' : (source.ownerPluginId === 'core' || source.pluginId === 'core' || source.source === 'core' ? 'core' : 'native'));
+        const operationHandlers = { ...(existing.operationHandlers || {}), ..._normalizeOperationHandlers(source) };
+        const operations = Array.from(new Set([...(existing.operations || []), ..._strings(source.operations || source.providerOperations), ...Object.keys(operationHandlers)]));
+        const provider = {
+            providerId,
+            ownerPluginId: _string(source.ownerPluginId || source.pluginId || existing.ownerPluginId || providerId, providerId),
+            label: _safeInputLabel(source, _string(existing.label || providerId, providerId)),
+            sourceMode,
+            compatibilitySource,
+            logicalMonitoringKey: _string(source.logicalMonitoringKey || source.logicalKey || source.monitoringKey || existing.logicalMonitoringKey, ''),
+            availability: _availability(source.providerAvailability || source.availability || existing.availability, source.disabled ? 'disabled' : 'available'),
+            operations,
+            operationHandlers,
+            version: _number(source.version || existing.version, 1),
+            directMonitor: _normalizeDirectMonitor(source.directMonitor || existing.directMonitor || {}),
+            latencySummary: _normalizeLatencySummary(source.latencySummary || existing.latencySummary || {}),
+            reason: _boundedReason(source.reason || source.failureReason || source.unavailableReason || existing.reason),
+            supersededBy: _string(source.supersededBy || existing.supersededBy, ''),
+            registeredAt: existing.registeredAt || _string(source.registeredAt, _now()),
+            lastSeenAt: _now(),
+            lastChangedAt: _string(source.lastChangedAt || existing.lastChangedAt, _now()),
+        };
+        provider.logicalMonitoringKey = _logicalMonitoringKey(provider, source);
+        return provider;
+    }
+
+    function _monitoringProviderPriority(provider) {
+        if (provider.sourceMode === 'core') return 0;
+        if (provider.sourceMode === 'native') return 1;
+        return 2;
+    }
+
+    function _findMonitoringProvider(query = {}) {
+        const source = _plainObject(query);
+        const providerId = _string(source.providerId || source.participantId || source.id);
+        const logicalMonitoringKey = _string(source.logicalMonitoringKey || source.logicalKey || source.monitoringKey);
+        if (providerId && currentSession.monitoringProviders.has(providerId)) return currentSession.monitoringProviders.get(providerId);
+        const matches = Array.from(currentSession.monitoringProviders.values()).filter(item => item.logicalMonitoringKey === logicalMonitoringKey);
+        if (!matches.length) return null;
+        matches.sort((a, b) => _monitoringProviderPriority(a) - _monitoringProviderPriority(b) || _inputSourceAvailabilityRank(a) - _inputSourceAvailabilityRank(b) || a.providerId.localeCompare(b.providerId));
+        return matches[0];
+    }
+
+    function _refreshMonitoringDuplicateSuppression() {
+        const groups = new Map();
+        for (const provider of currentSession.monitoringProviders.values()) {
+            provider.supersededBy = '';
+            const list = groups.get(provider.logicalMonitoringKey) || [];
+            list.push(provider);
+            groups.set(provider.logicalMonitoringKey, list);
+        }
+        for (const list of groups.values()) {
+            if (list.length < 2) continue;
+            list.sort((a, b) => _monitoringProviderPriority(a) - _monitoringProviderPriority(b) || _inputSourceAvailabilityRank(a) - _inputSourceAvailabilityRank(b) || a.providerId.localeCompare(b.providerId));
+            const winner = list[0];
+            for (const loser of list.slice(1)) loser.supersededBy = winner.providerId;
+        }
+        _syncSelectedMonitoringProvider();
+    }
+
+    function _recordMonitoringDuplicateSuppression() {
+        for (const provider of currentSession.monitoringProviders.values()) {
+            if (!provider.supersededBy || provider.sourceMode !== 'compatibility') continue;
+            recordBridgeHit({
+                domain: 'audio-monitoring',
+                bridgeId: provider.compatibilitySource || 'audio-monitoring.legacy-provider',
+                legacySurface: provider.compatibilitySource || 'plugin/browser monitoring handoff',
+                participantId: provider.providerId,
+                outcome: 'overridden',
+                status: 'overshadowed',
+                reason: `Native monitoring provider ${provider.supersededBy} owns logical path ${provider.logicalMonitoringKey}`,
+            });
+        }
+    }
+
+    function _visibleMonitoringProviders() {
+        _refreshMonitoringDuplicateSuppression();
+        return Array.from(currentSession.monitoringProviders.values())
+            .filter(provider => !provider.supersededBy)
+            .sort((a, b) => _monitoringProviderPriority(a) - _monitoringProviderPriority(b) || a.label.localeCompare(b.label) || a.providerId.localeCompare(b.providerId));
+    }
+
+    function _syncSelectedMonitoringProvider() {
+        const selected = currentSession.selectedMonitoringProvider;
+        if (!selected || !selected.logicalMonitoringKey) return null;
+        const provider = _findMonitoringProvider({ logicalMonitoringKey: selected.logicalMonitoringKey });
+        if (provider && !provider.supersededBy) {
+            selected.providerId = provider.providerId;
+            selected.availability = provider.availability;
+            selected.restoreStatus = provider.availability === 'available' ? (selected.restored ? 'restored' : 'available') : provider.availability;
+            if (selected.restored && !selected.lastRestoredAt) selected.lastRestoredAt = _now();
+        } else {
+            selected.providerId = '';
+            selected.availability = 'unavailable';
+            selected.restoreStatus = selected.restored ? 'missing-provider' : 'unavailable';
+        }
+        return selected;
+    }
+
+    function _makeSelectedMonitoringProvider(provider, requester) {
+        const now = _now();
+        return {
+            providerId: provider.providerId,
+            logicalMonitoringKey: provider.logicalMonitoringKey,
+            availability: provider.availability,
+            restored: false,
+            restoreStatus: provider.availability === 'available' ? 'available' : provider.availability,
+            selectedAt: now,
+            lastSelectedAt: now,
+            lastRestoredAt: '',
+            requesterId: _requesterId(requester),
+        };
+    }
+
+    function _summaryMonitoringProvider(provider) {
+        if (!provider) return null;
+        return {
+            providerId: provider.providerId,
+            ownerPluginId: provider.ownerPluginId,
+            label: provider.label,
+            sourceMode: provider.sourceMode,
+            compatibilitySource: provider.compatibilitySource || '',
+            logicalMonitoringKey: provider.logicalMonitoringKey,
+            availability: provider.availability,
+            operations: _strings(provider.operations),
+            directMonitor: _clone(provider.directMonitor),
+            latencySummary: _clone(provider.latencySummary),
+            reason: provider.reason || '',
+            supersededBy: provider.supersededBy || '',
+            registeredAt: provider.registeredAt || '',
+            lastSeenAt: provider.lastSeenAt || '',
+            lastChangedAt: provider.lastChangedAt || '',
+        };
+    }
+
+    function _summarySelectedMonitoringProvider(selected) {
+        if (!selected) return null;
+        return {
+            providerId: selected.providerId || '',
+            logicalMonitoringKey: selected.logicalMonitoringKey || '',
+            availability: selected.availability || 'unavailable',
+            restored: !!selected.restored,
+            restoreStatus: selected.restoreStatus || 'not-selected',
+            selectedAt: selected.selectedAt || selected.lastSelectedAt || '',
+            lastSelectedAt: selected.lastSelectedAt || '',
+            lastRestoredAt: selected.lastRestoredAt || '',
+            requesterId: selected.requesterId || '',
+        };
+    }
+
+    function _monitoringSourceRef(openResult, fallback = {}) {
+        const payload = _plainObject(openResult && openResult.payload ? openResult.payload : openResult);
+        const source = _plainObject(fallback);
+        return {
+            logicalSourceKey: _string(payload.logicalSourceKey || source.logicalSourceKey, ''),
+            sourceId: _string(payload.sourceId || source.sourceId, ''),
+            providerId: _string(payload.providerId || source.providerId, ''),
+            availability: _string(payload.state || payload.availability || source.availability, ''),
+            channelShape: _channelShape(payload.channelShape || source.channelShape, 'unknown'),
+            openSessionId: _string(payload.openSessionId || payload.openInputSessionId || source.openSessionId, ''),
+        };
+    }
+
+    function _monitoringSessionKey(provider, sourceRef, requiredChannelShape, directMonitorPolicy) {
+        return [
+            provider && provider.logicalMonitoringKey,
+            sourceRef && sourceRef.logicalSourceKey,
+            _channelShape(requiredChannelShape, 'unknown'),
+            directMonitorPolicy || 'default',
+        ].map(item => _string(item, 'unknown')).join('::');
+    }
+
+    function _findCompatibleMonitoringSession(provider, sourceRef, requiredChannelShape, directMonitorPolicy) {
+        const key = _monitoringSessionKey(provider, sourceRef, requiredChannelShape, directMonitorPolicy);
+        for (const session of currentSession.monitoringSessions.values()) {
+            if (session.sessionKey === key && (session.state === 'active' || session.state === 'degraded')) return session;
+        }
+        return null;
+    }
+
+    function _monitoringRequesterRef(source = {}) {
+        return {
+            requesterId: _requesterId(source.requesterId || source.requester || source.source, 'unknown'),
+            purpose: _boundedReason(source.purpose).slice(0, 80),
+            requiredChannelShape: _channelShape(source.requiredChannelShape, 'unknown'),
+            directMonitorRequirement: _directMonitorState(source.directMonitorRequirement, source.directMonitorRequirement ? 'unknown' : 'unknown'),
+            status: _string(source.status, ''),
+            reason: _boundedReason(source.reason),
+            attachedAt: _string(source.attachedAt, _now()),
+        };
+    }
+
+    function _withMonitoringTimeout(promise, operation) {
+        let timer = null;
+        const timeout = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                const err = new Error(`${operation} timed out after ${MONITORING_OPERATION_TIMEOUT_MS}ms`);
+                err.timedOut = true;
+                reject(err);
+            }, MONITORING_OPERATION_TIMEOUT_MS);
+        });
+        return Promise.race([Promise.resolve(promise), timeout]).finally(() => { if (timer !== null) clearTimeout(timer); });
+    }
+
+    function _monitoringProviderOutcome(raw, fallbackPayload = {}, voidIsFailure = false) {
+        // Per the control-plane contract a malformed (non-object) provider response is a failure, not a
+        // silently-'handled' active session. A void return (null/undefined) is lenient for stop/status
+        // (some handlers legitimately return nothing) but a failure for monitoring.start (voidIsFailure),
+        // which must not report monitoring active when the provider returned no result.
+        const isVoid = raw === null || raw === undefined;
+        if ((isVoid && voidIsFailure) || (!isVoid && (typeof raw !== 'object' || Array.isArray(raw)))) {
+            return { outcome: 'failed', status: 'failed', reason: _boundedReason(isVoid ? 'Monitoring provider returned no result' : 'Malformed monitoring provider response'), payload: fallbackPayload };
+        }
+        if (isVoid) {
+            // Void return tolerated for stop/status: treat as handled but with a neutral 'unknown' status
+            // (never 'active', which would fake an active session) and surface fallbackPayload verbatim.
+            return { outcome: 'handled', status: 'unknown', reason: '', payload: fallbackPayload };
+        }
+        const source = _plainObject(raw);
+        const outcome = _monitoringOutcome(source.outcome, 'handled');
+        const payload = _safeInputValue(source.payload || source.session || source.summary || source, 0) || fallbackPayload;
+        return {
+            outcome,
+            status: _monitoringState(source.status || source.state, outcome === 'handled' ? 'active' : outcome),
+            reason: _boundedReason(source.reason || source.error || source.message),
+            payload,
+        };
+    }
+
+    function _monitoringEventFor(outcome, state) {
+        if (outcome === 'handled' && state === 'active') return 'monitoring-started';
+        if (outcome === 'degraded' || state === 'degraded') return 'monitoring-degraded';
+        if (outcome === 'denied' || state === 'denied') return 'monitoring-denied';
+        if (outcome === 'failed' || state === 'failed' || outcome === 'incompatible' || outcome === 'incompatible-version') return 'monitoring-failed';
+        if (outcome === 'stopped' || state === 'stopped') return 'monitoring-stopped';
+        if (outcome === 'provider-selection-required') return 'provider-selection-required';
+        return 'monitoring-unavailable';
+    }
+
+    function _emitMonitoringOutcome(outcome, session, extra = {}) {
+        // Events are broadcast to all observers, so emit the redaction-safe session shape (same as
+        // diagnostics) rather than a raw clone that would leak internal sessionKey/monitoringId/sourceRef.
+        const payload = { ..._redactedMonitoringSession(session, _newPseudonymizer()), ...extra };
+        const event = _monitoringEventFor(outcome, session && session.state);
+        capabilities.emitEvent('audio-monitoring', event, payload);
+        if (outcome === 'denied' || (session && session.state === 'denied')) capabilities.emitEvent('audio-monitoring', 'permission-denied', payload);
+    }
+
+    function _monitoringResultFor(outcome, reason, payload) {
+        if (outcome === 'handled') return _handled(payload);
+        if (outcome === 'denied') return _denied(reason, payload);
+        if (outcome === 'degraded') return _degraded(reason, payload);
+        if (outcome === 'failed') return _failed(reason, payload);
+        if (outcome === 'no-owner') return _noOwner(reason, payload);
+        if (outcome === 'no-handler') return _noHandler(reason, payload);
+        if (outcome === 'unsupported-command') return _unsupportedCommand(reason, payload);
+        if (outcome === 'incompatible') return _incompatible(reason, payload);
+        if (outcome === 'incompatible-version') return _incompatibleVersion(reason, payload);
+        if (outcome === 'provider-selection-required') return _providerSelectionRequired(reason, payload);
+        if (outcome === 'user-action-required') return _userActionRequired(reason, payload);
+        if (outcome === 'stopped') return _stopped(reason, payload);
+        if (outcome === 'unavailable') return _unavailable(reason, payload);
+        if (outcome === 'overridden') return { outcome: 'overridden', reason, payload };
+        return _degraded(reason, payload);
+    }
+
     function _syncSelectedInput() {
         const selected = currentSession.selectedInput;
         if (!selected || !selected.logicalSourceKey) {
@@ -596,7 +997,7 @@
         const outcome = _string(source.outcome, 'handled');
         const payload = _safeInputValue(source.payload || source.session || source.summary || source, 0) || fallbackPayload;
         return {
-            outcome: ['handled', 'denied', 'degraded', 'failed', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible-version', 'overridden'].includes(outcome) ? outcome : 'handled',
+            outcome: PROVIDER_OUTCOMES.has(outcome) ? outcome : 'handled',
             status: _string(source.status || source.state, ''),
             reason: _boundedReason(source.reason || source.error || source.message),
             payload,
@@ -611,6 +1012,7 @@
             operation: _string(source.operation || source.command || source.event, 'inspect'),
             participantId: _string(source.participantId || source.ownerId || source.requester, ''),
             providerId: _string(source.providerId, ''),
+            monitoringId: _string(source.monitoringId, ''),
             sourceId: _string(source.sourceId, ''),
             logicalSourceKey: _string(source.logicalSourceKey, ''),
             requesterId: _string(source.requesterId, ''),
@@ -630,7 +1032,7 @@
 
     function _redactedOutcome(outcome, pseudonymize) {
         const clone = _clone(outcome) || {};
-        if (clone.domain === 'audio-input') {
+        if (clone.domain === 'audio-input' || clone.domain === 'audio-monitoring') {
             if (clone.sourceId) clone.sourceId = pseudonymize(clone.sourceId, 'source');
             // openSessionId is left verbatim: it is an internally-generated `input-open-<n>` id (not
             // sensitive) and must correlate with openSessions[].openSessionId in the same snapshot.
@@ -643,6 +1045,17 @@
             if (clone.participantId) clone.participantId = _boundedReason(clone.participantId);
             if (clone.requesterId) clone.requesterId = _boundedReason(clone.requesterId);
         }
+        if (clone.domain === 'audio-monitoring' && clone.monitoringId) clone.monitoringId = pseudonymize(clone.monitoringId, 'monitoring');
+        // audio-input openSessionId is always an internally-generated `input-open-<n>` id (the one
+        // untrusted close-source path bounds it at its call site), so it stays verbatim to correlate
+        // with openSessions[]. On audio-monitoring it can be caller-supplied via sourceRef.openSessionId,
+        // so only keep it verbatim when it names a live internally-tracked open-input session (preserving
+        // the cross-domain correlation); pseudonymize anything else — a raw/native handle, or a spoofed
+        // id matching the safe format that would otherwise falsely correlate to another session.
+        if (clone.domain === 'audio-monitoring' && clone.openSessionId
+            && !Array.from(currentSession.openInputSessions.values()).some(item => item.openSessionId === clone.openSessionId)) {
+            clone.openSessionId = pseudonymize(clone.openSessionId, 'input-open');
+        }
         if (clone.reason) clone.reason = _boundedReason(clone.reason);
         return clone;
     }
@@ -652,7 +1065,12 @@
     function _failed(reason, payload) { return { outcome: 'failed', reason, payload }; }
     function _noHandler(reason, payload) { return { outcome: 'no-handler', reason, payload }; }
     function _noOwner(reason, payload) { return { outcome: 'no-owner', reason, payload }; }
-    function _incompatible(reason, payload) { return { outcome: 'incompatible-version', reason, payload }; }
+    function _incompatible(reason, payload) { return { outcome: 'incompatible', reason, payload }; }
+    function _incompatibleVersion(reason, payload) { return { outcome: 'incompatible-version', reason, payload }; }
+    function _unavailable(reason, payload) { return { outcome: 'unavailable', reason, payload }; }
+    function _providerSelectionRequired(reason, payload) { return { outcome: 'provider-selection-required', reason, payload }; }
+    function _userActionRequired(reason, payload) { return { outcome: 'user-action-required', reason, payload }; }
+    function _stopped(reason, payload) { return { outcome: 'stopped', reason, payload }; }
 
     function _denied(reason, payload) { return { outcome: 'denied', reason, payload }; }
 
@@ -844,15 +1262,25 @@
         // provider-owned capture with no state left to close it.
         if (currentSession) _closeOpenInputSessions('Session restarted');
         const previousSelectedInput = currentSession && currentSession.selectedInput ? _clone(currentSession.selectedInput) : null;
+        const previousSelectedMonitoringProvider = currentSession && currentSession.selectedMonitoringProvider ? _clone(currentSession.selectedMonitoringProvider) : null;
+        const previousDirectMonitor = currentSession && currentSession.directMonitor ? _clone(currentSession.directMonitor) : null;
+        const previousMonitoringSessions = currentSession ? Array.from(currentSession.monitoringSessions.values()).map(_clone) : [];
         const previousStorageStatus = currentSession && currentSession.storageStatus;
         currentSession = _newSession({ ...options, state: 'active' });
         if (previousStorageStatus === 'failed') {
             // Persistence is failed, so the stored key may be stale — keep the in-memory selection
             // stable instead of silently reverting to whatever storage happens to hold.
             if (previousSelectedInput) currentSession.selectedInput = previousSelectedInput;
+            if (previousSelectedMonitoringProvider) currentSession.selectedMonitoringProvider = previousSelectedMonitoringProvider;
+            if (previousDirectMonitor) currentSession.directMonitor = previousDirectMonitor;
             currentSession.storageStatus = 'failed';
         } else if (!currentSession.selectedInput && previousSelectedInput) {
             currentSession.selectedInput = previousSelectedInput;
+            if (!currentSession.selectedMonitoringProvider && previousSelectedMonitoringProvider) currentSession.selectedMonitoringProvider = previousSelectedMonitoringProvider;
+            if (previousDirectMonitor) currentSession.directMonitor = previousDirectMonitor;
+        } else {
+            if (!currentSession.selectedMonitoringProvider && previousSelectedMonitoringProvider) currentSession.selectedMonitoringProvider = previousSelectedMonitoringProvider;
+            if (previousDirectMonitor) currentSession.directMonitor = previousDirectMonitor;
         }
         for (const participant of knownMixParticipants.values()) {
             const attached = { ...participant, lastSeenAt: _now() };
@@ -866,10 +1294,18 @@
         for (const source of knownInputSources.values()) {
             currentSession.inputSources.set(source.sourceId, { ...source, lastSeenAt: _now(), selected: false });
         }
+        for (const provider of knownMonitoringProviders.values()) {
+            currentSession.monitoringProviders.set(provider.providerId, { ...provider, lastSeenAt: _now() });
+        }
+        for (const session of previousMonitoringSessions) {
+            if (session && (session.state === 'active' || session.state === 'degraded')) currentSession.monitoringSessions.set(session.monitoringId, { ...session, updatedAt: _now() });
+        }
         _refreshDuplicateSuppression();
         _refreshInputDuplicateSuppression();
+        _refreshMonitoringDuplicateSuppression();
         _recordOutcome({ domain: 'audio-mix', operation: 'session.start', participantId: OWNER_ID, outcome: 'handled' });
         _recordOutcome({ domain: 'audio-input', operation: 'session.start', participantId: OWNER_ID, outcome: 'handled', status: currentSession.selectedInput ? currentSession.selectedInput.restoreStatus : 'not-selected' });
+        _recordOutcome({ domain: 'audio-monitoring', operation: 'session.start', participantId: OWNER_ID, outcome: 'handled', status: currentSession.monitoringSessions.size ? 'active' : 'stopped' });
         _touch();
         return snapshot();
     }
@@ -879,6 +1315,7 @@
         currentSession.routeState = _normalizeRoute({ routeKind: 'unknown', availability: 'unavailable', reason });
         _closeOpenInputSessions(reason);
         _recordOutcome({ domain: 'audio-mix', operation: 'session.stop', participantId: OWNER_ID, outcome: 'handled', reason });
+        _recordOutcome({ domain: 'audio-monitoring', operation: 'session.stop', participantId: OWNER_ID, outcome: 'handled', status: currentSession.monitoringSessions.size ? 'active' : 'stopped', reason: 'Playback stopped; live monitoring remains requester-owned' });
         _touch();
         return snapshot();
     }
@@ -944,7 +1381,7 @@
     function registerMixParticipant(spec) {
         const source = _plainObject(spec);
         if (source.incompatible || (source.version && Number(source.version) !== 1)) {
-            const result = _incompatible('Mix participant requires audio-session contract version 1');
+            const result = _incompatibleVersion('Mix participant requires audio-session contract version 1');
             _recordOutcome({ domain: 'audio-mix', operation: 'register-participant', participantId: source.participantId || source.id, outcome: result.outcome, reason: result.reason });
             return result;
         }
@@ -982,7 +1419,7 @@
     function registerInputSource(spec) {
         const source = _plainObject(spec);
         if (source.incompatible || (source.version && Number(source.version) !== 1)) {
-            const result = _incompatible('Input source requires audio-session contract version 1');
+            const result = _incompatibleVersion('Input source requires audio-session contract version 1');
             _recordOutcome({ domain: 'audio-input', operation: 'register-source', participantId: source.providerId, providerId: source.providerId, outcome: result.outcome, reason: result.reason });
             _touch();
             return result;
@@ -1275,7 +1712,7 @@
             return result;
         }
         if (provider.version !== 1) {
-            const result = _incompatible('Input provider requires audio-session contract version 1');
+            const result = _incompatibleVersion('Input provider requires audio-session contract version 1');
             _recordOutcome({ domain: 'audio-input', operation: 'open-source', participantId: requesterId, requesterId, providerId: provider.providerId, sourceId: selected.sourceId, logicalSourceKey: selected.logicalSourceKey, outcome: result.outcome, status: 'incompatible-version', reason: result.reason });
             _touch();
             return result;
@@ -1434,63 +1871,530 @@
         }
     }
 
-    function startMonitoring(spec = {}) {
+    function registerMonitoringProvider(spec) {
         const source = _plainObject(spec);
-        const monitoringId = _string(source.monitoringId || source.id, _id('monitoring'));
-        const sourceId = _string(source.sourceId, '');
-        const knownSource = sourceId ? currentSession.inputSources.get(sourceId) : null;
-        const requestedState = _string(source.state, knownSource || !sourceId ? 'active' : 'unavailable');
-        const session = {
-            monitoringId,
-            participantId: _string(source.participantId || source.providerId || source.requester, 'core.audio.monitoring'),
-            sourceId,
-            state: requestedState,
-            startedAt: requestedState === 'active' ? _now() : null,
-            stoppedAt: null,
-            failureReason: _boundedReason(source.failureReason || source.reason),
-        };
-        currentSession.monitoringSessions.set(monitoringId, session);
-        // Distinguish a real failure (e.g. JUCE barrier failure) from transient
-        // unavailability so diagnostics don't conflate them.
-        let outcome = 'degraded';
-        if (requestedState === 'active') outcome = 'handled';
-        else if (requestedState === 'denied') outcome = 'denied';
-        else if (requestedState === 'failed') outcome = 'failed';
-        _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: session.participantId, outcome, status: session.state, reason: session.failureReason });
-        // Per-bundle pseudonym; redact once, snapshot an independent clone for the
-        // caller before dispatching the (mutable) event payload.
-        const pseudonymize = _newPseudonymizer();
-        const redactedSession = _redactedMonitoringSession(session, pseudonymize);
-        const returnedSession = _clone(redactedSession);
-        let eventName = 'monitoring-unavailable';
-        if (requestedState === 'active') eventName = 'monitoring-started';
-        else if (outcome === 'failed') eventName = 'monitoring-failed';
-        capabilities.emitEvent('audio-monitoring', eventName, redactedSession);
-        _touch();
-        if (outcome === 'handled') return _handled(returnedSession);
-        if (outcome === 'denied') return { outcome: 'denied', reason: session.failureReason || `Monitoring state: ${session.state}`, payload: returnedSession };
-        if (outcome === 'failed') return _failed(session.failureReason || `Monitoring state: ${session.state}`, returnedSession);
-        return _degraded(session.failureReason || `Monitoring state: ${session.state}`, returnedSession);
-    }
-
-    function stopMonitoring(monitoringId, requester = 'unknown') {
-        const id = _string(monitoringId);
-        const session = currentSession.monitoringSessions.get(id);
-        if (!session) {
-            const result = _noHandler(`Unknown monitoring session: ${id}`, { monitoringId: id });
-            _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requester, outcome: result.outcome, reason: result.reason });
+        if (source.incompatible || (source.version && Number(source.version) !== 1)) {
+            const result = _incompatibleVersion('Monitoring provider requires audio-session contract version 1');
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'register-provider', participantId: source.providerId || source.id, providerId: source.providerId || source.id, outcome: result.outcome, reason: result.reason });
             return result;
         }
-        session.state = 'stopped';
-        session.stoppedAt = _now();
-        _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requester, outcome: 'handled', status: 'stopped' });
-        // Per-bundle pseudonym; redact once, snapshot an independent clone for the
-        // caller before dispatching the (mutable) event payload.
-        const redactedSession = _redactedMonitoringSession(session, _newPseudonymizer());
-        const returnedSession = _clone(redactedSession);
-        capabilities.emitEvent('audio-monitoring', 'monitoring-stopped', redactedSession);
+        const provider = _normalizeMonitoringProvider(source);
+        if (!provider) {
+            const result = _failed('Monitoring provider registration requires providerId');
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'register-provider', outcome: result.outcome, reason: result.reason });
+            return result;
+        }
+        // logicalMonitoringKey is surfaced verbatim via list/inspect and persisted, so reject a key
+        // that isn't redaction-safe (path/token) the same way audio-input guards logicalSourceKey.
+        if (provider.logicalMonitoringKey && _boundedReason(provider.logicalMonitoringKey) !== provider.logicalMonitoringKey) {
+            const result = _failed('Monitoring provider logicalMonitoringKey must be redaction-safe');
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'register-provider', participantId: provider.providerId, providerId: provider.providerId, outcome: result.outcome, status: 'unsafe-key', reason: result.reason });
+            return result;
+        }
+        // providerId is the Map key surfaced in diagnostics/events; a different plugin claiming an
+        // already-owned providerId must fail rather than silently overwrite it (mirrors audio-input's
+        // sourceId-collision guard). Re-registration by the same owner is the normal idempotent update.
+        const ownerCollision = currentSession.monitoringProviders.get(provider.providerId) || knownMonitoringProviders.get(provider.providerId);
+        // Compute the effective new owner from the registration itself, defaulting to providerId — NOT
+        // inheriting the existing owner the way _normalizeMonitoringProvider does. Otherwise a colliding
+        // registration that omits ownerPluginId would silently inherit the original owner and bypass this.
+        const effectiveNewOwner = _string(source.ownerPluginId || source.pluginId, '') || provider.providerId;
+        if (ownerCollision && ownerCollision.ownerPluginId && ownerCollision.ownerPluginId !== effectiveNewOwner) {
+            const result = _failed(`Monitoring provider ${provider.providerId} is already registered by ${_boundedReason(ownerCollision.ownerPluginId)}`);
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'register-provider', participantId: provider.providerId, providerId: provider.providerId, outcome: result.outcome, status: 'providerid-collision', reason: result.reason });
+            return result;
+        }
+        const existingByKey = Array.from(currentSession.monitoringProviders.values()).find(item => item.logicalMonitoringKey === provider.logicalMonitoringKey && item.sourceMode === provider.sourceMode && item.providerId === provider.providerId);
+        const existing = currentSession.monitoringProviders.get(provider.providerId) || existingByKey || null;
+        const previousAvailability = existing && existing.availability;
+        if (existing) provider.registeredAt = existing.registeredAt;
+        currentSession.monitoringProviders.set(provider.providerId, provider);
+        knownMonitoringProviders.set(provider.providerId, provider);
+        _refreshMonitoringDuplicateSuppression();
+        _recordMonitoringDuplicateSuppression();
+        const summary = _summaryMonitoringProvider(provider);
+        _recordOutcome({ domain: 'audio-monitoring', operation: 'register-provider', participantId: provider.providerId, providerId: provider.providerId, outcome: 'handled', status: provider.availability });
+        capabilities.emitEvent('audio-monitoring', 'provider-registered', summary);
+        if (previousAvailability && previousAvailability !== provider.availability) capabilities.emitEvent('audio-monitoring', 'provider-availability-changed', summary);
         _touch();
-        return _handled(returnedSession);
+        return _handled(summary);
+    }
+
+    function unregisterMonitoringProvider(query) {
+        const payload = typeof query === 'string' ? { providerId: query } : _plainObject(query);
+        const provider = _findMonitoringProvider(payload);
+        const id = provider ? provider.providerId : _string(payload.providerId || payload.id || payload.logicalMonitoringKey);
+        const removed = provider ? currentSession.monitoringProviders.delete(provider.providerId) : false;
+        if (provider) knownMonitoringProviders.delete(provider.providerId);
+        if (removed) {
+            for (const session of currentSession.monitoringSessions.values()) {
+                if (session.providerId !== provider.providerId || (session.state !== 'active' && session.state !== 'degraded')) continue;
+                session.state = 'orphaned';
+                session.reason = 'Monitoring provider disappeared';
+                session.updatedAt = _now();
+                capabilities.emitEvent('audio-monitoring', 'monitoring-orphaned', _redactedMonitoringSession(session, _newPseudonymizer()));
+            }
+        }
+        _refreshMonitoringDuplicateSuppression();
+        const outcome = removed ? 'handled' : 'no-handler';
+        _recordOutcome({ domain: 'audio-monitoring', operation: 'unregister-provider', participantId: id, providerId: id, outcome });
+        if (removed) capabilities.emitEvent('audio-monitoring', 'provider-removed', { providerId: id, logicalMonitoringKey: provider.logicalMonitoringKey, removed: true });
+        _touch();
+        if (removed) return _handled({ providerId: id, logicalMonitoringKey: provider.logicalMonitoringKey, removed: true });
+        // `id` here is caller-supplied (no provider matched), so bound it before reflecting it back.
+        const safeId = _boundedReason(id);
+        return _noHandler(`Unknown monitoring provider: ${safeId}`, { providerId: safeId, removed: false });
+    }
+
+    function selectMonitoringProvider(query, requester = 'unknown') {
+        const payload = typeof query === 'string' ? { providerId: query } : _plainObject(query);
+        const provider = _findMonitoringProvider(payload);
+        // requestedKey is caller-supplied; bound it before echoing it back in the reason/payload.
+        const requestedKey = _boundedReason(_string(payload.logicalMonitoringKey || payload.logicalKey || payload.monitoringKey || payload.providerId || payload.id));
+        if (!provider || provider.supersededBy) {
+            const result = _unavailable(`Monitoring provider is unavailable: ${requestedKey}`, { logicalMonitoringKey: requestedKey, availability: 'unavailable' });
+            // No logicalSourceKey here: requestedKey is a monitoring key, not an audio-input logical
+            // source key, and reusing that field would misrepresent the outcome in diagnostics. The
+            // requested key is already present in the bounded reason.
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'select-provider', participantId: requester, requesterId: requester, outcome: result.outcome, status: 'unavailable', reason: result.reason });
+            return result;
+        }
+        currentSession.selectedMonitoringProvider = _makeSelectedMonitoringProvider(provider, requester);
+        currentSession.storageStatus = _writeSelectedLogicalMonitoringKey(provider.logicalMonitoringKey);
+        _syncSelectedMonitoringProvider();
+        const summary = _summarySelectedMonitoringProvider(currentSession.selectedMonitoringProvider);
+        _recordOutcome({ domain: 'audio-monitoring', operation: 'select-provider', participantId: requester, requesterId: requester, providerId: provider.providerId, outcome: 'handled', status: provider.availability });
+        capabilities.emitEvent('audio-monitoring', 'provider-selected', summary);
+        _touch();
+        return _handled(summary);
+    }
+
+    function listMonitoringProviders(payload = {}) {
+        const includeUnavailable = payload.includeUnavailable !== false;
+        const providers = _visibleMonitoringProviders()
+            .filter(provider => includeUnavailable || provider.availability === 'available')
+            .map(_summaryMonitoringProvider);
+        _recordOutcome({ domain: 'audio-monitoring', operation: 'list-providers', participantId: OWNER_ID, outcome: 'handled', status: `${providers.length}` });
+        return _handled({ providers, selectedProvider: _summarySelectedMonitoringProvider(_syncSelectedMonitoringProvider()), timeoutMs: MONITORING_OPERATION_TIMEOUT_MS });
+    }
+
+    function _resolveMonitoringProvider(payload = {}) {
+        _refreshMonitoringDuplicateSuppression();
+        const explicit = _findMonitoringProvider(payload);
+        if (explicit && !explicit.supersededBy) return { outcome: 'handled', provider: explicit };
+        const selected = _syncSelectedMonitoringProvider();
+        if (selected && selected.providerId) {
+            const selectedProvider = currentSession.monitoringProviders.get(selected.providerId);
+            if (selectedProvider && !selectedProvider.supersededBy) return { outcome: 'handled', provider: selectedProvider };
+        }
+        const compatible = _visibleMonitoringProviders().filter(provider => provider.availability === 'available' || provider.availability === 'pending');
+        if (compatible.length === 1) return { outcome: 'handled', provider: compatible[0] };
+        if (compatible.length > 1) return { outcome: 'provider-selection-required', reason: 'Multiple compatible monitoring providers require an explicit provider choice', providers: compatible.map(_summaryMonitoringProvider) };
+        return { outcome: 'no-owner', reason: 'No monitoring provider is available', providers: [] };
+    }
+
+    async function _refreshMonitoringStatuses(payload = {}) {
+        const providers = _visibleMonitoringProviders().filter(provider => !payload.providerId || provider.providerId === payload.providerId);
+        // Prompt-free status must not hand the raw device sourceId to providers: selectedInput.sourceId is
+        // the raw input source id, so strip it (keep only the redaction-safe logicalSourceKey context).
+        const statusSourceRef = { ..._monitoringSourceRef(currentSession.selectedInput || {}), sourceId: '' };
+        // Refresh provider statuses concurrently: a single hung/slow provider must not serialize the
+        // whole prompt-free inspect path into O(N * timeout). Each provider mutates only its own record.
+        await Promise.allSettled(providers.map(async (provider) => {
+            if (provider.version !== 1) return;
+            const handler = provider.operationHandlers && provider.operationHandlers['monitoring.status'];
+            if (!provider.operations.includes('monitoring.status') || typeof handler !== 'function') return;
+            try {
+                const raw = await _withMonitoringTimeout(handler({ providerId: provider.providerId, sourceRef: statusSourceRef }), 'monitoring.status');
+                const result = _monitoringProviderOutcome(raw);
+                if (result.payload && typeof result.payload === 'object') {
+                    // result.status is a clamped/derived value: a non-state provider outcome (e.g.
+                    // 'no-handler') resolves to 'unknown', which is itself a valid availability and would
+                    // wrongly overwrite a healthy provider. Only let an explicit payload.availability or a
+                    // genuine reported state drive availability; a derived 'unknown' preserves the prior value.
+                    const statusAvailability = result.status && result.status !== 'unknown' ? result.status : '';
+                    provider.availability = _availability(result.payload.availability || statusAvailability || provider.availability, provider.availability);
+                    provider.directMonitor = _normalizeDirectMonitor(result.payload.directMonitor || provider.directMonitor || {});
+                    provider.latencySummary = _normalizeLatencySummary(result.payload.latencySummary || provider.latencySummary || {});
+                }
+                provider.reason = result.reason || provider.reason;
+                provider.lastChangedAt = _now();
+                _recordOutcome({ domain: 'audio-monitoring', operation: 'status', participantId: provider.providerId, providerId: provider.providerId, outcome: result.outcome, status: result.status, reason: result.reason });
+            } catch (err) {
+                provider.availability = 'failed';
+                provider.reason = err && err.timedOut ? 'Monitoring status timed out' : _boundedReason(err && err.message ? err.message : String(err));
+                _recordOutcome({ domain: 'audio-monitoring', operation: 'status', participantId: provider.providerId, providerId: provider.providerId, outcome: 'failed', status: err && err.timedOut ? 'timeout' : 'failed', reason: provider.reason });
+            }
+        }));
+        _syncSelectedMonitoringProvider();
+        // An explicit status refresh mutates provider state/outcomes, so bump diagnostics freshness.
+        _touch();
+    }
+
+    async function inspectMonitoring(payload = {}) {
+        if (payload.refreshStatus === true || payload.includeStatus === true) await _refreshMonitoringStatuses(payload);
+        const snapshotData = snapshot().domains['audio-monitoring'];
+        if (payload.providerId || payload.logicalMonitoringKey) {
+            const match = snapshotData.providers.find(provider => (payload.providerId && provider.providerId === payload.providerId) || (payload.logicalMonitoringKey && provider.logicalMonitoringKey === payload.logicalMonitoringKey));
+            return _handled({ ...snapshotData, provider: match || null });
+        }
+        return _handled(snapshotData);
+    }
+
+    async function _ensureMonitoringInput(payload, requesterId) {
+        const requiredChannelShape = _channelShape(payload.requiredChannelShape || payload.channelShape, 'unknown');
+        // Always resolve through audio-input open-source and derive the monitoring sourceRef from its
+        // redaction-safe payload — never the caller payload — so a caller can't bypass open-source
+        // readiness/ownership or inject arbitrary sourceId/logicalSourceKey fields that would leak into
+        // the shared session and other requesters' start() responses. openInputSource reuses an
+        // already-open session for the selected source, so this does not double-open; openSessionId is the
+        // only trusted cross-domain correlation.
+        return openInputSource({ ...(payload.sourceRef || {}), logicalSourceKey: payload.logicalSourceKey || payload.sourceRef?.logicalSourceKey, sourceId: payload.sourceId || payload.sourceRef?.sourceId, requesterId, purpose: payload.purpose, requiredChannelShape }, requesterId);
+    }
+
+    function _blockingInputOutcome(openResult) {
+        if (openResult.outcome === 'handled') return null;
+        const payload = _plainObject(openResult.payload);
+        const status = _string(payload.state || openResult.status, openResult.outcome);
+        if (openResult.outcome === 'denied') return { outcome: 'denied', state: 'denied', reason: openResult.reason || 'Input permission denied' };
+        if (status === 'incompatible') return { outcome: 'incompatible', state: 'failed', reason: openResult.reason || 'Selected source cannot satisfy requested channel shape' };
+        if (openResult.outcome === 'no-owner') return { outcome: 'no-owner', state: 'unavailable', reason: openResult.reason || 'No selected input source is available' };
+        if (openResult.outcome === 'failed') return { outcome: 'failed', state: 'failed', reason: openResult.reason || 'Input source failed to open' };
+        return { outcome: 'unavailable', state: 'unavailable', reason: openResult.reason || 'Input source is unavailable' };
+    }
+
+    async function startMonitoring(spec = {}, requester = 'unknown') {
+        const payload = _plainObject(spec);
+        // Identity comes from the authenticated dispatch caller, never the payload — a
+        // payload-supplied requesterId/source could otherwise spoof another requester and
+        // misattribute or share a monitoring session it does not own (mirrors openInputSource).
+        const requesterId = _requesterId(requester, 'unknown');
+        const requiredChannelShape = _channelShape(payload.requiredChannelShape || payload.channelShape, 'unknown');
+        const directMonitorPreference = payload.directMonitorPreference === 'muted' || payload.directMonitorPreference === 'unmuted' ? payload.directMonitorPreference : _readDirectMonitorPreference();
+        const authorization = _authorizationMode(payload.authorization || payload.mode);
+        capabilities.emitEvent('audio-monitoring', 'monitoring-start-requested', { requesterId, authorization, requiredChannelShape });
+
+        const resolved = _resolveMonitoringProvider(payload);
+        if (resolved.outcome !== 'handled') {
+            const result = _monitoringResultFor(resolved.outcome, resolved.reason, { providers: resolved.providers || [] });
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, outcome: result.outcome, status: resolved.outcome, reason: result.reason });
+            if (result.outcome === 'provider-selection-required') capabilities.emitEvent('audio-monitoring', 'provider-selection-required', result.payload);
+            return result;
+        }
+        const provider = resolved.provider;
+        const selectedRef = _monitoringSourceRef(payload.sourceRef || currentSession.selectedInput || {});
+        const existing = _findCompatibleMonitoringSession(provider, selectedRef, requiredChannelShape, directMonitorPreference);
+        if (existing) {
+            // Attaching to a shared session must still honor this requester's direct-monitor requirement:
+            // if it conflicts with the active preference, surface degraded (or unsupported-command when
+            // strict) and annotate the requester ref, mirroring the fresh-start conflict handling.
+            const attachRequirement = _directMonitorState(payload.directMonitorRequirement, 'unknown');
+            const attachConflict = (attachRequirement === 'muted' || attachRequirement === 'unmuted') && attachRequirement !== directMonitorPreference;
+            const attachOutcome = attachConflict ? (payload.directMonitorStrict === true ? 'unsupported-command' : 'degraded') : 'handled';
+            const conflictReason = 'Direct-monitor requirement conflicts with user/default setting';
+            if (!existing.requesters.some(item => item.requesterId === requesterId)) existing.requesters.push(_monitoringRequesterRef({ ...payload, requesterId, requiredChannelShape, directMonitorRequirement: attachRequirement, status: attachConflict ? attachOutcome : '', reason: attachConflict ? conflictReason : '' }));
+            existing.lastUsedAt = _now();
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, monitoringId: existing.monitoringId, outcome: attachOutcome, status: existing.state, reason: attachConflict ? conflictReason : '' });
+            if (attachConflict) _emitMonitoringOutcome(attachOutcome, existing);
+            _touch();
+            return _monitoringResultFor(attachOutcome, attachConflict ? conflictReason : '', _clone(existing));
+        }
+        if (authorization !== 'user-action') {
+            const result = _userActionRequired('Fresh monitoring start requires explicit user action', { requesterId, providerId: provider.providerId });
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, outcome: result.outcome, status: 'user-action-required', reason: result.reason });
+            // user-action-required is not a permission denial — emit a dedicated event (like
+            // provider-selection-required) so subscribers don't conflate it with 'monitoring-denied'.
+            capabilities.emitEvent('audio-monitoring', 'monitoring-user-action-required', result.payload);
+            return result;
+        }
+        if (provider.availability !== 'available' && provider.availability !== 'pending') {
+            const result = _unavailable(provider.reason || `Monitoring provider is ${provider.availability}`, _summaryMonitoringProvider(provider));
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, outcome: result.outcome, status: provider.availability, reason: result.reason });
+            capabilities.emitEvent('audio-monitoring', 'monitoring-unavailable', result.payload);
+            return result;
+        }
+        if (provider.version !== 1) {
+            const result = _incompatibleVersion('Monitoring provider requires audio-session contract version 1', _summaryMonitoringProvider(provider));
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, outcome: result.outcome, status: 'incompatible-version', reason: result.reason });
+            return result;
+        }
+        const openResult = await _ensureMonitoringInput(payload, requesterId);
+        const blockingInput = _blockingInputOutcome(openResult);
+        const sourceRef = _monitoringSourceRef(openResult.payload || payload.sourceRef || currentSession.selectedInput || {});
+        if (blockingInput) {
+            const session = {
+                monitoringId: _string(payload.monitoringId || payload.id, _id('monitoring')),
+                sessionKey: _monitoringSessionKey(provider, sourceRef, requiredChannelShape, directMonitorPreference),
+                providerId: provider.providerId,
+                logicalMonitoringKey: provider.logicalMonitoringKey,
+                sourceRef,
+                openInputSessionId: sourceRef.openSessionId || '',
+                state: blockingInput.state,
+                requesters: [_monitoringRequesterRef({ ...payload, requesterId, requiredChannelShape, status: blockingInput.outcome, reason: blockingInput.reason })],
+                directMonitor: _normalizeDirectMonitor({ ...provider.directMonitor, preference: directMonitorPreference }),
+                latencySummary: _clone(provider.latencySummary),
+                reason: blockingInput.reason,
+                startedAt: '',
+                lastUsedAt: _now(),
+                stoppedAt: '',
+                updatedAt: _now(),
+            };
+            currentSession.monitoringSessions.set(session.monitoringId, session);
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, monitoringId: session.monitoringId, logicalSourceKey: sourceRef.logicalSourceKey, sourceId: sourceRef.sourceId, openSessionId: sourceRef.openSessionId, outcome: blockingInput.outcome, status: session.state, reason: blockingInput.reason });
+            _emitMonitoringOutcome(blockingInput.outcome, session);
+            _touch();
+            return _monitoringResultFor(blockingInput.outcome, blockingInput.reason, _clone(session));
+        }
+        if (!provider.operations.includes('monitoring.start')) {
+            const result = _unsupportedCommand('Monitoring provider does not support monitoring.start', _summaryMonitoringProvider(provider));
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, outcome: result.outcome, status: 'unsupported-command', reason: result.reason });
+            return result;
+        }
+        const handler = provider.operationHandlers && provider.operationHandlers['monitoring.start'];
+        if (typeof handler !== 'function') {
+            const result = _noHandler('Monitoring provider has no monitoring.start handler', _summaryMonitoringProvider(provider));
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, outcome: result.outcome, status: 'no-handler', reason: result.reason });
+            return result;
+        }
+        const monitoringId = _string(payload.monitoringId || payload.id, _id('monitoring'));
+        const directMonitorRequirement = _directMonitorState(payload.directMonitorRequirement, payload.directMonitorRequirement ? 'unknown' : 'unknown');
+        const conflict = (directMonitorRequirement === 'muted' || directMonitorRequirement === 'unmuted') && directMonitorRequirement !== directMonitorPreference;
+        try {
+            const raw = await _withMonitoringTimeout(handler({ monitoringId, providerId: provider.providerId, requesterId, sourceRef, requiredChannelShape, directMonitorPreference, directMonitorRequirement }), 'monitoring.start');
+            const providerResult = _monitoringProviderOutcome(raw, {}, true);
+            // A provider that reports a terminal state (denied/unavailable/failed/stopped/orphaned) but a
+            // 'handled' (or omitted) outcome must not be coerced into an active session — derive the
+            // effective outcome from the reported state so the real condition surfaces. 'degraded' is
+            // intentionally NOT promoted: it stays a handled start with session.state 'degraded'
+            // (a working-but-degraded session), matching the established degraded contract.
+            const reportedState = providerResult.status;
+            const TERMINAL_MONITORING_STATES = ['denied', 'unavailable', 'failed', 'stopped', 'orphaned'];
+            const effectiveOutcome = providerResult.outcome === 'handled' && TERMINAL_MONITORING_STATES.includes(reportedState)
+                ? (reportedState === 'orphaned' ? 'failed' : reportedState)
+                : providerResult.outcome;
+            const baseState = effectiveOutcome === 'handled' ? (reportedState === 'degraded' ? 'degraded' : 'active') : _monitoringState(reportedState, effectiveOutcome === 'degraded' ? 'degraded' : effectiveOutcome);
+            // The direct-monitor conflict only downgrades a session that the provider otherwise
+            // accepted (handled/degraded). When the provider itself reported a terminal state the
+            // real provider reason must win, so the conflict status/reason must NOT overwrite it.
+            const conflictApplies = conflict && (effectiveOutcome === 'handled' || effectiveOutcome === 'degraded');
+            const resultOutcome = conflictApplies ? (payload.directMonitorStrict === true ? 'unsupported-command' : 'degraded') : effectiveOutcome;
+            const sessionState = conflictApplies && baseState === 'active' ? 'degraded' : baseState;
+            const session = {
+                monitoringId,
+                sessionKey: _monitoringSessionKey(provider, sourceRef, requiredChannelShape, directMonitorPreference),
+                providerId: provider.providerId,
+                logicalMonitoringKey: provider.logicalMonitoringKey,
+                sourceRef,
+                openInputSessionId: sourceRef.openSessionId || '',
+                state: sessionState,
+                requesters: [_monitoringRequesterRef({ ...payload, requesterId, requiredChannelShape, directMonitorRequirement, status: conflictApplies ? resultOutcome : '', reason: conflictApplies ? 'Direct-monitor requirement conflicts with user/default setting' : '' })],
+                directMonitor: _normalizeDirectMonitor({ ...((providerResult.payload && providerResult.payload.directMonitor) || provider.directMonitor || {}), preference: directMonitorPreference }),
+                latencySummary: _normalizeLatencySummary((providerResult.payload && providerResult.payload.latencySummary) || provider.latencySummary || {}),
+                reason: conflictApplies ? 'Direct-monitor requirement conflicts with user/default setting' : providerResult.reason,
+                startedAt: sessionState === 'active' || sessionState === 'degraded' ? _now() : '',
+                lastUsedAt: _now(),
+                stoppedAt: '',
+                updatedAt: _now(),
+            };
+            currentSession.monitoringSessions.set(monitoringId, session);
+            provider.directMonitor = _normalizeDirectMonitor({ ...provider.directMonitor, ...session.directMonitor, preference: directMonitorPreference });
+            provider.latencySummary = session.latencySummary;
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, monitoringId, logicalSourceKey: sourceRef.logicalSourceKey, sourceId: sourceRef.sourceId, openSessionId: sourceRef.openSessionId, outcome: resultOutcome, status: session.state, reason: session.reason || providerResult.reason });
+            _emitMonitoringOutcome(resultOutcome, session);
+            _touch();
+            return _monitoringResultFor(resultOutcome, session.reason || providerResult.reason || `Monitoring returned ${resultOutcome}`, _clone(session));
+        } catch (err) {
+            const reason = err && err.timedOut ? 'Monitoring start timed out' : _boundedReason(err && err.message ? err.message : String(err));
+            const session = { monitoringId, sessionKey: _monitoringSessionKey(provider, sourceRef, requiredChannelShape, directMonitorPreference), providerId: provider.providerId, logicalMonitoringKey: provider.logicalMonitoringKey, sourceRef, openInputSessionId: sourceRef.openSessionId || '', state: 'failed', requesters: [_monitoringRequesterRef({ ...payload, requesterId, requiredChannelShape, status: 'failed', reason })], directMonitor: _normalizeDirectMonitor({ ...provider.directMonitor, preference: directMonitorPreference }), latencySummary: _clone(provider.latencySummary), reason, startedAt: '', lastUsedAt: _now(), stoppedAt: '', updatedAt: _now() };
+            currentSession.monitoringSessions.set(monitoringId, session);
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: requesterId, requesterId, providerId: provider.providerId, monitoringId, outcome: 'failed', status: err && err.timedOut ? 'timeout' : 'failed', reason });
+            _emitMonitoringOutcome('failed', session);
+            _touch();
+            return _failed(reason, { ..._clone(session), timedOut: !!(err && err.timedOut) });
+        }
+    }
+
+    async function stopMonitoring(target, requester = 'unknown') {
+        const payload = typeof target === 'object' ? _plainObject(target) : { monitoringId: target };
+        const requesterId = _requesterId(requester, requester);
+        const id = _string(payload.monitoringId || payload.id);
+        // stopAll is a user-authoritative global stop (see the audio-monitoring control-plane contract).
+        // Require an explicit user action so a background requester can't tear down everyone's monitoring
+        // (a DoS); targeted stops remain ownership-scoped below.
+        if (payload.stopAll && payload.authorization !== 'user-action') {
+            const result = _userActionRequired('Stopping all monitoring sessions requires explicit user action', { requesterId });
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, outcome: result.outcome, status: 'user-action-required', reason: result.reason });
+            return result;
+        }
+        const sessions = payload.stopAll ? Array.from(currentSession.monitoringSessions.values()).filter(session => session.state === 'active' || session.state === 'degraded') : [currentSession.monitoringSessions.get(id)].filter(Boolean);
+        if (!sessions.length) {
+            // `id` is caller-supplied and didn't match a session; bound it before reflecting it back.
+            const safeId = _boundedReason(id);
+            const result = _noHandler(`Unknown monitoring session: ${safeId || 'active session'}`, { monitoringId: safeId });
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, monitoringId: safeId, outcome: result.outcome, reason: result.reason });
+            return result;
+        }
+        let lastResult = null;
+        for (const session of sessions) {
+            // A targeted stop may only release/tear down a session the caller actually owns —
+            // otherwise any requester could end another's monitoring. `stopAll` is the documented
+            // explicit user-authoritative global stop (see audio-monitoring-control-plane contract)
+            // and is intentionally not ownership-scoped. An already-ownerless session (every requester
+            // released, or a failed/timed-out final stop that emptied requesters before the provider
+            // confirmed) has no owner left to protect, so any caller may retry the stop on it.
+            if (!payload.stopAll && session.requesters.length > 0 && !session.requesters.some(item => item.requesterId === requesterId)) {
+                lastResult = _noHandler('Requester does not own this monitoring session', { monitoringId: session.monitoringId });
+                _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, providerId: session.providerId, monitoringId: session.monitoringId, outcome: lastResult.outcome, status: 'not-owner', reason: lastResult.reason });
+                continue;
+            }
+            const beforeCount = session.requesters.length;
+            if (!payload.stopAll) session.requesters = session.requesters.filter(item => item.requesterId !== requesterId);
+            if (!payload.stopAll && beforeCount > 1 && session.requesters.length > 0) {
+                session.lastUsedAt = _now();
+                _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, providerId: session.providerId, monitoringId: session.monitoringId, outcome: 'handled', status: session.state });
+                lastResult = _handled(_clone(session));
+                continue;
+            }
+            const provider = currentSession.monitoringProviders.get(session.providerId) || knownMonitoringProviders.get(session.providerId);
+            const handler = provider && provider.operationHandlers && provider.operationHandlers['monitoring.stop'];
+            try {
+                if (!provider) {
+                    // Provider disappeared — we can't confirm the live capture actually stopped, so orphan
+                    // the session and report no-owner rather than falsely claiming 'stopped'.
+                    session.state = 'orphaned';
+                    session.reason = 'Monitoring provider is no longer available';
+                    session.updatedAt = _now();
+                    _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, providerId: session.providerId, monitoringId: session.monitoringId, outcome: 'no-owner', status: 'orphaned', reason: session.reason });
+                    capabilities.emitEvent('audio-monitoring', 'monitoring-orphaned', _redactedMonitoringSession(session, _newPseudonymizer()));
+                    lastResult = _noOwner(session.reason, _clone(session));
+                    continue;
+                }
+                if (!provider.operations.includes('monitoring.stop')) {
+                    // Provider advertises no stop operation — don't pretend the live capture stopped.
+                    session.state = 'failed';
+                    session.reason = 'Monitoring provider does not support monitoring.stop';
+                    session.updatedAt = _now();
+                    _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, providerId: session.providerId, monitoringId: session.monitoringId, outcome: 'unsupported-command', status: 'unsupported-command', reason: session.reason });
+                    lastResult = _unsupportedCommand(session.reason, _clone(session));
+                    continue;
+                }
+                if (typeof handler === 'function') {
+                    const raw = await _withMonitoringTimeout(handler({ monitoringId: session.monitoringId, providerId: session.providerId, requesterIds: Array.from(new Set(session.requesters.map(item => item.requesterId).concat(requesterId))), reason: payload.stopAll ? 'user-stop-all' : 'final-requester-released' }), 'monitoring.stop');
+                    const providerResult = _monitoringProviderOutcome(raw, _clone(session));
+                    // A 'handled'/'stopped' outcome paired with a terminal non-stopped status (failed/
+                    // denied/unavailable/orphaned) must not be reported as a clean stop — derive the
+                    // effective outcome from the reported state, mirroring startMonitoring.
+                    const reportedState = providerResult.status;
+                    const stopEffectiveOutcome = (providerResult.outcome === 'handled' || providerResult.outcome === 'stopped') && ['denied', 'unavailable', 'failed', 'orphaned'].includes(reportedState)
+                        ? (reportedState === 'orphaned' ? 'failed' : reportedState)
+                        : providerResult.outcome;
+                    if (stopEffectiveOutcome !== 'handled' && stopEffectiveOutcome !== 'stopped') {
+                        session.state = stopEffectiveOutcome === 'failed' ? 'failed' : _monitoringState(reportedState, stopEffectiveOutcome);
+                        session.reason = providerResult.reason;
+                        session.updatedAt = _now();
+                        _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, providerId: session.providerId, monitoringId: session.monitoringId, outcome: stopEffectiveOutcome, status: session.state, reason: providerResult.reason });
+                        _emitMonitoringOutcome(stopEffectiveOutcome, session);
+                        lastResult = _monitoringResultFor(stopEffectiveOutcome, providerResult.reason || `Monitoring stop returned ${stopEffectiveOutcome}`, _clone(session));
+                        continue;
+                    }
+                } else {
+                    // Provider advertises monitoring.stop but supplied no handler.
+                    session.state = 'failed';
+                    session.reason = 'Monitoring provider has no monitoring.stop handler';
+                    _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, providerId: session.providerId, monitoringId: session.monitoringId, outcome: 'no-handler', status: 'no-handler', reason: session.reason });
+                    lastResult = _noHandler(session.reason, _clone(session));
+                    continue;
+                }
+                session.state = 'stopped';
+                session.stoppedAt = _now();
+                session.updatedAt = _now();
+                session.requesters = [];
+                _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, providerId: session.providerId, monitoringId: session.monitoringId, outcome: 'stopped', status: 'stopped' });
+                capabilities.emitEvent('audio-monitoring', 'monitoring-stopped', _redactedMonitoringSession(session, _newPseudonymizer()));
+                lastResult = _stopped('Monitoring stopped', _clone(session));
+            } catch (err) {
+                session.state = 'failed';
+                session.reason = err && err.timedOut ? 'Monitoring stop timed out' : _boundedReason(err && err.message ? err.message : String(err));
+                session.updatedAt = _now();
+                _recordOutcome({ domain: 'audio-monitoring', operation: 'stop', participantId: requesterId, requesterId, providerId: session.providerId, monitoringId: session.monitoringId, outcome: 'failed', status: err && err.timedOut ? 'timeout' : 'failed', reason: session.reason });
+                _emitMonitoringOutcome('failed', session);
+                lastResult = _failed(session.reason, { ..._clone(session), timedOut: !!(err && err.timedOut) });
+            }
+        }
+        _touch();
+        return lastResult || _stopped('Monitoring stopped', {});
+    }
+
+    async function setDirectMonitoringState(payload = {}, requester = 'unknown') {
+        const source = typeof payload === 'string' ? { state: payload } : _plainObject(payload);
+        const state = _directMonitorState(source.state, 'unknown');
+        // Identity comes from the authenticated dispatch caller, never the payload (anti-spoofing).
+        const requesterId = _requesterId(requester, 'unknown');
+        if (state !== 'muted' && state !== 'unmuted') {
+            const result = _denied('Direct-monitor preference must be muted or unmuted', { state });
+            _recordOutcome({ domain: 'audio-monitoring', operation: 'set-direct-monitor', participantId: requesterId, requesterId, outcome: result.outcome, status: 'invalid-state', reason: result.reason });
+            return result;
+        }
+        currentSession.directMonitor = _normalizeDirectMonitor({ ...currentSession.directMonitor, state, preference: state, applied: false, lastChangedAt: _now() });
+        currentSession.storageStatus = _writeDirectMonitorPreference(state);
+        const activeSessions = Array.from(currentSession.monitoringSessions.values()).filter(session => session.state === 'active' || session.state === 'degraded');
+        let outcome = 'handled';
+        let reason = '';
+        for (const session of activeSessions) {
+            const provider = currentSession.monitoringProviders.get(session.providerId);
+            const handler = provider && provider.operationHandlers && (provider.operationHandlers['monitoring.set-direct-monitor'] || provider.operationHandlers['direct-monitor.set']);
+            const supports = provider && (provider.operations.includes('monitoring.set-direct-monitor') || provider.operations.includes('direct-monitor.set'));
+            if (supports && typeof handler === 'function') {
+                try {
+                    const raw = await _withMonitoringTimeout(handler({ monitoringId: session.monitoringId, providerId: session.providerId, state, requesterId }), 'set-direct-monitor');
+                    const result = _monitoringProviderOutcome(raw, session.directMonitor);
+                    if (result.outcome !== 'handled' && result.outcome !== 'degraded') {
+                        outcome = result.outcome;
+                        reason = result.reason || reason;
+                    }
+                    // Only claim applied when the provider explicitly reports a directMonitor summary; a
+                    // bare 'handled' doesn't confirm the hardware preference was actually applied.
+                    session.directMonitor = _normalizeDirectMonitor((result.payload && result.payload.directMonitor) || { state, control: 'supported', preference: state, applied: false, reason: result.reason, lastChangedAt: _now() });
+                } catch (err) {
+                    outcome = 'failed';
+                    reason = err && err.timedOut ? 'Direct-monitor apply timed out' : _boundedReason(err && err.message ? err.message : String(err));
+                    session.directMonitor = _normalizeDirectMonitor({ state, control: 'unknown', preference: state, applied: false, reason, lastChangedAt: _now() });
+                }
+            } else {
+                outcome = outcome === 'handled' ? 'unsupported-command' : outcome;
+                reason = reason || 'Monitoring provider does not support direct-monitor control';
+                session.directMonitor = _normalizeDirectMonitor({ state, control: 'unsupported', preference: state, applied: false, reason, lastChangedAt: _now() });
+            }
+            // The session key encodes the direct-monitor policy; refresh its policy segment to the new
+            // user preference so a later start with this preference re-attaches to the live session
+            // instead of failing to match and forking a duplicate (or returning user-action-required).
+            session.sessionKey = String(session.sessionKey).split('::').slice(0, -1).concat(state).join('::');
+            session.updatedAt = _now();
+        }
+        // Reflect the actual per-session apply results back into the domain-level summary so
+        // snapshot().domains['audio-monitoring'].directMonitor and the emitted event are not stale
+        // (the pre-call seed above optimistically set applied:false/unknown control). Derive from the
+        // sessions' own directMonitor states — not the aggregate outcome — so a provider that returns
+        // outcome:'handled' but directMonitor.applied:false is reported as not-applied.
+        if (activeSessions.length) {
+            const monitors = activeSessions.map(session => session.directMonitor || {});
+            const applied = monitors.every(monitor => monitor.applied === true);
+            const control = monitors.some(monitor => monitor.control === 'unsupported') ? 'unsupported'
+                : monitors.some(monitor => monitor.control === 'unavailable') ? 'unavailable'
+                : (monitors.every(monitor => monitor.control === 'supported') ? 'supported' : 'unknown');
+            // Prefer the command-level error reason (unsupported/failed/timeout), else surface the first
+            // per-session reason so a handled-but-not-applied provider note (e.g. 'hardware busy') isn't lost.
+            const summaryReason = reason || monitors.map(monitor => monitor.reason).find(value => value) || '';
+            currentSession.directMonitor = _normalizeDirectMonitor({ ...currentSession.directMonitor, state, preference: state, control, applied, reason: summaryReason, lastChangedAt: _now() });
+        }
+        const summary = { directMonitor: _clone(currentSession.directMonitor), sessions: activeSessions.map(_clone) };
+        _recordOutcome({ domain: 'audio-monitoring', operation: 'set-direct-monitor', participantId: requesterId, requesterId, outcome, status: state, reason });
+        // The event is broadcast to all observers, so emit redaction-safe sessions; the raw summary is
+        // only returned to the (owning) dispatch caller.
+        const eventPseudonymizer = _newPseudonymizer();
+        capabilities.emitEvent('audio-monitoring', 'direct-monitor-changed', { directMonitor: _clone(currentSession.directMonitor), sessions: activeSessions.map(session => _redactedMonitoringSession(session, eventPseudonymizer)) });
+        _touch();
+        return _monitoringResultFor(outcome, reason || 'Direct-monitor preference updated', summary);
     }
 
     function registerStemOwner(owner) {
@@ -1739,22 +2643,51 @@
         };
     }
 
+    function _redactedMonitoringProvider(provider) {
+        // supersededBy is a (normalized, redaction-safe) providerId, and providerId itself is surfaced
+        // verbatim, so keep supersededBy verbatim too — pseudonymizing only it would break correlation
+        // with the winning provider in the same snapshot (and diverges from the audio-input pattern).
+        return _summaryMonitoringProvider(provider) || {};
+    }
+
+    function _redactedMonitoringSession(session, pseudonymize) {
+        if (!session) return null;
+        const sourceRef = _plainObject(session.sourceRef);
+        // Keep an internally-generated `input-open-<n>` id verbatim so monitoring sessions still
+        // correlate with audio-input openSessions[] in the same snapshot (and match the diagnostics
+        // schema); pseudonymize anything else as defense-in-depth.
+        const _openId = value => (value && /^input-open-\d+$/.test(value)) ? value : (value ? pseudonymize(value, 'input-open') : '');
+        return {
+            monitoringId: session.monitoringId ? pseudonymize(session.monitoringId, 'monitoring') : '',
+            sessionKey: session.sessionKey ? pseudonymize(session.sessionKey, 'monitoring-session') : '',
+            providerId: session.providerId || '',
+            logicalMonitoringKey: session.logicalMonitoringKey || '',
+            sourceRef: {
+                logicalSourceKey: sourceRef.logicalSourceKey || '',
+                sourceId: sourceRef.sourceId ? pseudonymize(sourceRef.sourceId, 'source') : '',
+                providerId: sourceRef.providerId || '',
+                availability: sourceRef.availability || '',
+                channelShape: sourceRef.channelShape || '',
+                openSessionId: _openId(sourceRef.openSessionId),
+            },
+            openInputSessionId: _openId(session.openInputSessionId),
+            state: session.state || 'unknown',
+            requesters: Array.isArray(session.requesters) ? session.requesters.map(requester => ({ requesterId: requester.requesterId, purpose: requester.purpose || '', requiredChannelShape: requester.requiredChannelShape || 'unknown', directMonitorRequirement: requester.directMonitorRequirement || 'unknown', status: requester.status || '', reason: requester.reason || '' })) : [],
+            directMonitor: _clone(session.directMonitor),
+            latencySummary: _clone(session.latencySummary),
+            reason: _boundedReason(session.reason),
+            startedAt: session.startedAt || '',
+            lastUsedAt: session.lastUsedAt || '',
+            stoppedAt: session.stoppedAt || '',
+            updatedAt: session.updatedAt || '',
+        };
+    }
+
     function _redactedRoute(route, pseudonymize) {
         return {
             ...route,
             devicePseudonym: route.devicePseudonym ? pseudonymize(route.devicePseudonym, 'device') : '',
         };
-    }
-
-    function _redactedMonitoringSession(session, pseudonymize) {
-        const clone = _clone(session) || {};
-        if (clone.sourceId) {
-            // Per-bundle pseudonym keyed off the sourceId, which equals the input
-            // source's key when known, so monitoring correlates with audio-input
-            // within one bundle without exposing the raw (device-id/path-like) id.
-            clone.sourceId = pseudonymize(clone.sourceId, 'source');
-        }
-        return clone;
     }
 
     function _domainBridges(domain) {
@@ -1766,8 +2699,10 @@
         // within this export but pseudonyms are not stable across exports.
         const pseudonymize = _newPseudonymizer();
         _refreshInputDuplicateSuppression();
+        _refreshMonitoringDuplicateSuppression();
         const inputSources = Array.from(currentSession.inputSources.values()).slice(-MAX_DOMAIN_ITEMS);
         const openInputSessions = Array.from(currentSession.openInputSessions.values()).slice(-MAX_DOMAIN_ITEMS);
+        const monitoringProviders = Array.from(currentSession.monitoringProviders.values()).slice(-MAX_DOMAIN_ITEMS);
         const monitoringSessions = Array.from(currentSession.monitoringSessions.values()).slice(-MAX_DOMAIN_ITEMS);
         return {
             schema: SCHEMA,
@@ -1802,8 +2737,12 @@
                     bridges: _domainBridges('audio-input'),
                 },
                 'audio-monitoring': {
+                    providers: monitoringProviders.map(provider => _redactedMonitoringProvider(provider)),
+                    selectedProvider: _summarySelectedMonitoringProvider(_syncSelectedMonitoringProvider()),
                     sessions: monitoringSessions.map(session => _redactedMonitoringSession(session, pseudonymize)),
+                    totalProviders: currentSession.monitoringProviders.size,
                     totalSessions: currentSession.monitoringSessions.size,
+                    directMonitor: _clone(currentSession.directMonitor),
                     bridges: _domainBridges('audio-monitoring'),
                 },
                 stems: {
@@ -1852,9 +2791,14 @@
 
     function _audioMonitoringCommand(commandName, ctx = {}) {
         const payload = _target(ctx);
-        if (commandName === 'inspect') return _handled(snapshot().domains['audio-monitoring']);
-        if (commandName === 'start') return startMonitoring({ ...payload, requester: ctx.requester });
-        if (commandName === 'stop') return stopMonitoring(payload.monitoringId || payload.id, ctx.requester);
+        if (commandName === 'inspect') return inspectMonitoring(payload);
+        if (commandName === 'list-providers') return listMonitoringProviders(payload);
+        if (commandName === 'register-provider') return registerMonitoringProvider(payload);
+        if (commandName === 'unregister-provider') return unregisterMonitoringProvider(payload);
+        if (commandName === 'select-provider') return selectMonitoringProvider(payload, ctx.requester);
+        if (commandName === 'start') return startMonitoring(payload, ctx.requester);
+        if (commandName === 'stop') return stopMonitoring(payload, ctx.requester);
+        if (commandName === 'set-direct-monitor') return setDirectMonitoringState(payload, ctx.requester);
         return _degraded(`Unsupported audio-monitoring command: ${commandName}`);
     }
 
@@ -1910,15 +2854,20 @@
         capabilities.registerOwner('audio-monitoring', {
             pluginId: OWNER_ID,
             kind: 'provider-coordinator',
-            commands: ['inspect', 'start', 'stop'],
-            operations: ['monitoring.start', 'monitoring.stop', 'monitoring.status'],
-            events: ['monitoring-start-requested', 'monitoring-started', 'monitoring-stopped', 'monitoring-failed', 'monitoring-unavailable', 'permission-denied', 'bridge-hit'],
+            commands: ['inspect', 'list-providers', 'register-provider', 'unregister-provider', 'select-provider', 'start', 'stop', 'set-direct-monitor'],
+            operations: ['monitoring.start', 'monitoring.stop', 'monitoring.status', 'monitoring.set-direct-monitor'],
+            events: ['provider-registered', 'provider-removed', 'provider-availability-changed', 'provider-selected', 'provider-selection-required', 'monitoring-start-requested', 'monitoring-started', 'monitoring-degraded', 'monitoring-unavailable', 'monitoring-failed', 'monitoring-denied', 'monitoring-user-action-required', 'monitoring-stopped', 'monitoring-orphaned', 'direct-monitor-changed', 'permission-denied', 'bridge-hit'],
             safety: 'sensitive',
-            description: 'Coordinates monitoring lifecycle, consent/availability state, and monitoring compatibility bridge diagnostics.',
+            description: 'Coordinates monitoring provider selection, live monitoring lifecycle, direct-monitor state, consent/availability state, and monitoring compatibility bridge diagnostics.',
             handlers: {
                 inspect: ctx => _audioMonitoringCommand('inspect', ctx),
+                'list-providers': ctx => _audioMonitoringCommand('list-providers', ctx),
+                'register-provider': ctx => _audioMonitoringCommand('register-provider', ctx),
+                'unregister-provider': ctx => _audioMonitoringCommand('unregister-provider', ctx),
+                'select-provider': ctx => _audioMonitoringCommand('select-provider', ctx),
                 start: ctx => _audioMonitoringCommand('start', ctx),
                 stop: ctx => _audioMonitoringCommand('stop', ctx),
+                'set-direct-monitor': ctx => _audioMonitoringCommand('set-direct-monitor', ctx),
             },
         });
         capabilities.registerParticipant(OWNER_ID, {
@@ -1984,8 +2933,14 @@
         enumerateInputSources,
         openInputSource,
         closeInputSource,
+        registerMonitoringProvider,
+        unregisterMonitoringProvider,
+        selectMonitoringProvider,
+        listMonitoringProviders,
+        inspectMonitoring,
         startMonitoring,
         stopMonitoring,
+        setDirectMonitoringState,
         registerStemOwner,
         muteStems,
         restoreStems,

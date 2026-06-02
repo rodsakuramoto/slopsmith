@@ -72,7 +72,8 @@
     const OUTCOMES = new Set([
         'passed', 'transformed', 'handled', 'denied', 'degraded', 'failed',
         'short-circuited', 'overridden', 'no-owner', 'no-handler',
-        'unsupported-command', 'incompatible-version',
+        'unsupported-command', 'incompatible', 'incompatible-version',
+        'unavailable', 'provider-selection-required', 'user-action-required', 'stopped',
     ]);
     const MAX_DECISIONS = 100;
     const MAX_SNAPSHOT_BYTES = 64 * 1024;
@@ -760,7 +761,7 @@
 
     function _finalOutcome(decisions) {
         if (!decisions.length) return 'degraded';
-        const terminal = decisions.find(d => ['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible-version'].includes(d.outcome));
+        const terminal = decisions.find(d => ['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped'].includes(d.outcome));
         return terminal ? terminal.outcome : decisions[decisions.length - 1].outcome;
     }
 
@@ -914,7 +915,7 @@
                 commandContext.payload = decision.payload;
                 continue;
             }
-            if (['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible-version'].includes(decision.outcome)) break;
+            if (['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped'].includes(decision.outcome)) break;
         }
         if (!decisions.length) {
             const reason = `No provider handled ${capabilityName}.${commandName}`;
@@ -933,7 +934,7 @@
             });
         }
         const outcome = _finalOutcome(decisions);
-        const terminalDecision = decisions.find(d => ['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible-version'].includes(d.outcome))
+        const terminalDecision = decisions.find(d => ['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped'].includes(d.outcome))
             || decisions[decisions.length - 1];
         return {
             capability: capabilityName,
@@ -1243,7 +1244,12 @@
         if (result.outcome === 'no-owner') return 'no-owner';
         if (result.outcome === 'no-handler') return 'no-handler';
         if (result.outcome === 'unsupported-command') return 'unsupported-command';
+        if (result.outcome === 'incompatible') return 'incompatible';
         if (result.outcome === 'incompatible-version') return 'incompatible-version';
+        if (result.outcome === 'unavailable') return 'unavailable';
+        if (result.outcome === 'provider-selection-required') return 'provider-selection-required';
+        if (result.outcome === 'user-action-required') return 'user-action-required';
+        if (result.outcome === 'stopped') return 'stopped';
         if (result.outcome === 'denied' || result.outcome === 'short-circuited') return 'blocked';
         if (result.outcome === 'failed') return 'error';
         if (result.outcome === 'degraded') return 'no-handler';

@@ -638,3 +638,57 @@ test('capability inspector renders audio-input sources selection sessions bridge
     assert.match(content, /Input bridges: audio-input\.legacy-source:overshadowed/);
     assert.match(content, /Failures: audio-input:open-source:source-03:denied/);
 });
+
+test('capability inspector renders audio-monitoring providers sessions direct monitor bridges and failures', () => {
+    const snapshot = {
+        pipelines: [
+            { name: 'audio-monitoring', review: { lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Audio monitoring surface.' }, participants: [
+                { pluginId: 'core.audio.session', roles: ['owner'], commands: ['list-providers', 'select-provider', 'start', 'stop', 'set-direct-monitor'], operations: ['monitoring.start', 'monitoring.stop', 'monitoring.status'], events: ['monitoring-started', 'direct-monitor-changed'], runtime: true, availability: 'available', ownership: 'multi-provider', safety: 'sensitive' },
+            ], conflicts: [] },
+        ],
+        participants: [{ pluginId: 'core.audio.session' }],
+        compatibilityShims: [],
+        expectedCompatibilityShims: [],
+    };
+    const { window, elements } = loadInspector(snapshot);
+    window.slopsmith.audioSession = {
+        snapshot: () => ({
+            schema: 'slopsmith.audio_session.diagnostics.v1',
+            session: { route: { routeKind: 'desktop', availability: 'available' }, analyser: { source: 'plugin', availability: 'available' } },
+            domains: {
+                'audio-mix': { participants: [], faders: [], route: { routeKind: 'desktop', availability: 'available' }, analyser: { source: 'plugin', availability: 'available' }, bridges: [] },
+                'audio-input': { sources: [], totalSources: 0, openSessions: [], totalOpenSessions: 0, bridges: [] },
+                'audio-monitoring': {
+                    providers: [
+                        { providerId: 'native_monitor', logicalMonitoringKey: 'native:monitor:main', label: 'Native Monitor', availability: 'available', sourceMode: 'native' },
+                        { providerId: 'legacy_monitor', logicalMonitoringKey: 'native:monitor:main', label: 'Legacy Monitor', availability: 'available', sourceMode: 'compatibility', supersededBy: 'native_monitor' },
+                    ],
+                    selectedProvider: { providerId: 'native_monitor', logicalMonitoringKey: 'native:monitor:main', availability: 'available' },
+                    sessions: [
+                        { monitoringId: 'monitoring-01', state: 'active', sourceRef: { logicalSourceKey: 'native:instrument:primary' }, requesters: [{ requesterId: 'user' }, { requesterId: 'note_detect' }], directMonitor: { preference: 'muted', control: 'supported', applied: true } },
+                        { monitoringId: 'monitoring-02', state: 'failed', sourceRef: { logicalSourceKey: 'native:instrument:primary' }, requesters: [{ requesterId: 'practice_overlay' }], directMonitor: { preference: 'unmuted', control: 'unsupported', applied: false } },
+                    ],
+                    totalProviders: 2,
+                    totalSessions: 2,
+                    directMonitor: { preference: 'muted', control: 'supported', applied: true },
+                    bridges: [{ bridgeId: 'audio-monitoring.audio-barrier', status: 'overshadowed', outcome: 'overridden', hitCount: 2 }],
+                },
+                stems: { owner: null, claims: [], bridges: [] },
+            },
+            recentOutcomes: [
+                { domain: 'audio-monitoring', operation: 'start', monitoringId: 'monitoring-02', requesterId: 'practice_overlay', outcome: 'failed', status: 'timeout' },
+                { domain: 'audio-monitoring', operation: 'start', requesterId: 'note_detect', outcome: 'provider-selection-required', status: 'provider-selection-required' },
+            ],
+        }),
+    };
+
+    window.__slopsmithCapabilityInspector.render();
+    const content = elements.get('capability-inspector-content').innerHTML;
+
+    assert.match(content, /Monitoring providers: Native Monitor:available:native, Legacy Monitor:available:compatibility:superseded/);
+    assert.match(content, /Selected monitoring: native:monitor:main:available:native_monitor/);
+    assert.match(content, /Monitoring: monitoring-01:active:user\+note_detect:native:instrument:primary, monitoring-02:failed:practice_overlay:native:instrument:primary/);
+    assert.match(content, /Direct monitor: muted:supported:applied/);
+    assert.match(content, /Monitoring bridges: audio-monitoring\.audio-barrier:overshadowed/);
+    assert.match(content, /Failures: audio-monitoring:start:monitoring-02:timeout, audio-monitoring:start:note_detect:provider-selection-required/);
+});

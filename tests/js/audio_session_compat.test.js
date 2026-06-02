@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { loadAudioSession, runBrowserScript, installMixerDom, makeInputProvider } = require('./audio_session_test_harness');
+const { loadAudioSession, runBrowserScript, installMixerDom, makeInputProvider, makeMonitoringProvider } = require('./audio_session_test_harness');
 
 function installAnalyserDom(window) {
     const audio = { addEventListener() {} };
@@ -156,6 +156,36 @@ test('audio-input native source wins over compatibility-backed duplicate', async
     assert.equal(listed.payload.sources[0].providerId, 'native_input');
     assert.equal(snapshot.sources.some(source => source.providerId === 'legacy_input' && source.supersededBy), true);
     assert.equal(snapshot.bridges.some(bridge => bridge.bridgeId === 'audio-input.legacy-source' && bridge.status === 'overshadowed'), true);
+});
+
+test('audio-monitoring native provider wins over legacy compatibility provider and overshadows its compatibility bridge', async () => {
+    const window = loadAudioSession();
+    const api = window.slopsmith.capabilities;
+    const legacy = makeMonitoringProvider({
+        providerId: 'legacy_monitor',
+        logicalMonitoringKey: 'shared:monitor:primary',
+        sourceMode: 'compatibility',
+        compatibilitySource: 'audio-monitoring.audio-barrier',
+    });
+    const native = makeMonitoringProvider({
+        providerId: 'native_monitor',
+        logicalMonitoringKey: 'shared:monitor:primary',
+        sourceMode: 'native',
+    });
+
+    await api.dispatch({ capability: 'audio-monitoring', command: 'register-provider', source: 'legacy_monitor', payload: legacy.provider });
+    await api.dispatch({ capability: 'audio-monitoring', command: 'register-provider', source: 'native_monitor', payload: native.provider });
+
+    const listed = await api.dispatch({ capability: 'audio-monitoring', command: 'list-providers', source: 'test' });
+    const snapshot = window.slopsmith.audioSession.snapshot().domains['audio-monitoring'];
+
+    // The compatibility bridge below is the one the registration/supersession path actually produces;
+    // asserting only on it (not on manually pre-seeded bridge hits) keeps this test honest if the
+    // compatibility layer ever stops overshadowing superseded providers.
+    assert.equal(listed.payload.providers.length, 1);
+    assert.equal(listed.payload.providers[0].providerId, 'native_monitor');
+    assert.equal(snapshot.providers.some(provider => provider.providerId === 'legacy_monitor' && provider.supersededBy), true);
+    assert.equal(snapshot.bridges.some(bridge => bridge.bridgeId === 'audio-monitoring.audio-barrier' && bridge.status === 'overshadowed'), true);
 });
 
 test('legacy registerFader callbacks are usable through audio-mix get and set operations', async () => {

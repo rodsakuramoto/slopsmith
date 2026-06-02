@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { loadAudioSession, captureEvents, makeInputProvider } = require('./audio_session_test_harness');
+const { loadAudioSession, captureEvents, makeInputProvider, makeMonitoringProvider } = require('./audio_session_test_harness');
 
 async function registerSource(api, payload = {}) {
     return api.dispatch({
@@ -209,16 +209,24 @@ test('caller-provided logical keys are bounded so a path/token cannot leak into 
     assert.equal(encoded.includes('token=abc123'), false);
 });
 
-test('audio-monitoring distinguishes a failed state from transient unavailability', () => {
+test('audio-monitoring distinguishes a failed state from transient unavailability', async () => {
     const window = loadAudioSession();
-    const audioSession = window.slopsmith.audioSession;
+    const api = window.slopsmith.capabilities;
 
-    const failed = audioSession.startMonitoring({ monitoringId: 'mon-failed', state: 'failed', reason: 'JUCE barrier failed' });
-    const unavailable = audioSession.startMonitoring({ monitoringId: 'mon-unavail', sourceId: 'missing-device' });
+    await registerSource(api);
+    await api.dispatch({ capability: 'audio-input', command: 'select-source', source: 'user', payload: { logicalSourceKey: 'test:instrument:primary' } });
+    const failedProvider = makeMonitoringProvider({ providerId: 'mon-failed', startResult: { outcome: 'failed', status: 'failed', reason: 'JUCE barrier failed' } });
+    const unavailableProvider = makeMonitoringProvider({ providerId: 'mon-unavail', availability: 'unavailable' });
+    await api.dispatch({ capability: 'audio-monitoring', command: 'register-provider', source: 'mon-failed', payload: failedProvider.provider });
+    await api.dispatch({ capability: 'audio-monitoring', command: 'register-provider', source: 'mon-unavail', payload: unavailableProvider.provider });
+
+    const failed = await api.dispatch({ capability: 'audio-monitoring', command: 'start', source: 'note_detect', payload: { providerId: 'mon-failed', requesterId: 'note_detect', authorization: 'user-action' } });
+    const unavailable = await api.dispatch({ capability: 'audio-monitoring', command: 'start', source: 'note_detect', payload: { providerId: 'mon-unavail', requesterId: 'note_detect', authorization: 'user-action' } });
 
     assert.equal(failed.outcome, 'failed');
-    assert.equal(unavailable.outcome, 'degraded');
-    assert.equal(unavailable.payload.state, 'unavailable');
+    assert.equal(failed.payload.state, 'failed');
+    assert.equal(unavailable.outcome, 'unavailable');
+    assert.equal(unavailable.payload.availability, 'unavailable');
 });
 
 test('inspect list and select do not call provider enumeration or open handlers', async () => {

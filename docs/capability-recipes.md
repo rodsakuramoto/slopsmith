@@ -171,8 +171,8 @@ Plugins that need live instrument input should declare requester/observer intent
     },
     "audio-monitoring": {
       "roles": ["requester", "observer"],
-      "requests": ["start", "stop", "inspect"],
-      "observes": ["monitoring-started", "monitoring-unavailable", "monitoring-stopped"],
+      "requests": ["inspect", "list-providers", "select-provider", "start", "stop", "set-direct-monitor"],
+      "observes": ["provider-registered", "provider-selected", "provider-selection-required", "monitoring-started", "monitoring-degraded", "monitoring-unavailable", "monitoring-failed", "monitoring-denied", "monitoring-stopped", "direct-monitor-changed"],
       "mode": "active",
       "compatibility": "shim-allowed",
       "ownership": "requester-only",
@@ -196,6 +196,32 @@ const opened = await api.dispatch({
 });
 // Keep provider-owned streams/nodes private. Diagnostics receive only opened.payload summaries.
 await api.dispatch({ capability: 'audio-input', command: 'close-source', source: 'note_detect', payload: { openSessionId: opened.payload.openSessionId } });
+```
+
+Monitoring is a separate lifecycle layered on top of input readiness. A fresh live monitoring start must come from an explicit user action; background requesters can attach only when an already-active compatible session exists.
+
+```js
+const monitoring = await api.dispatch({
+  capability: 'audio-monitoring',
+  command: 'start',
+  source: 'note_detect',
+  payload: {
+    authorization: 'user-action',
+    requiredChannelShape: 'mono',
+    directMonitorRequirement: 'muted'
+  },
+});
+
+if (monitoring.outcome === 'user-action-required') {
+  // Show your own UI affordance; do not trigger a device prompt in the background.
+}
+
+await api.dispatch({
+  capability: 'audio-monitoring',
+  command: 'stop',
+  source: 'note_detect',
+  payload: { monitoringId: monitoring.payload && monitoring.payload.monitoringId },
+});
 ```
 
 ## Audio Input Provider
@@ -222,6 +248,31 @@ Native input providers register redaction-safe source summaries with stable logi
 ```
 
 Provider source records should include `sourceId`, `providerId`, `logicalSourceKey`, `kind`, safe label or diagnostics pseudonym, availability, `channelSummary`, and supported operations/handlers. Do not put browser `MediaStream`, `AudioNode`, native handles, buffers, samples, waveform data, raw device labels, stable hardware ids, paths, or secrets in returned payloads; keep those in provider-private state.
+
+## Audio Monitoring Provider
+
+Native monitoring providers register a stable `logicalMonitoringKey` and keep actual audio streams, native handles, and device labels provider-private. The core host coordinates selected provider, requester sharing, direct-monitor policy, and diagnostics, but the provider owns the actual live monitor graph.
+
+```json
+{
+  "id": "desktop_audio",
+  "name": "Desktop Audio",
+  "standards": ["capability-pipelines.v1"],
+  "capabilities": {
+    "audio-monitoring": {
+      "roles": ["provider", "observer"],
+      "operations": ["monitoring.start", "monitoring.stop", "monitoring.status", "monitoring.set-direct-monitor"],
+      "events": ["provider-registered", "monitoring-started", "monitoring-stopped", "direct-monitor-changed"],
+      "mode": "active",
+      "compatibility": "none",
+      "safety": "sensitive",
+      "version": 1
+    }
+  }
+}
+```
+
+Provider records should include `providerId`, `logicalMonitoringKey`, safe label or diagnostics pseudonym, `availability`, `sourceMode`, supported operations, `directMonitor` summary, and `latencySummary`. `monitoring.start` receives a redaction-safe `sourceRef`, `requesterId`, `requiredChannelShape`, `directMonitorPreference`, and optional `directMonitorRequirement`; it should return only status summaries such as active/degraded/denied/unavailable/failed. `monitoring.status` must be prompt-free and must not open audio input. `monitoring.set-direct-monitor` may apply the user's preference for active sessions; requester requirements must never mutate the user's stored preference.
 
 ## Stems Provider Behind Audio Session Coordination
 

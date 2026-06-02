@@ -83,7 +83,7 @@ def test_capability_runtime_overrides_do_not_mask_claims():
     set_enabled = source[source.index("function setParticipantEnabled("):source.index("function registerParticipants(")]
     reserved = source[source.index("const RESERVED_FUTURE_DOMAINS"):source.index("const RUNTIME_DOMAIN_DEFAULTS")]
 
-    assert "['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible-version'].includes(decision.outcome)" in source
+    assert "['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped'].includes(decision.outcome)" in source
     assert "if (entry.type !== 'manual') return false;" in source
     assert "type: 'manual'" in source
     assert "_remember(userOverrides" not in set_enabled

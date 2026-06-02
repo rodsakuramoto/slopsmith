@@ -1478,18 +1478,21 @@
         const sources = Array.isArray(input.sources) ? input.sources : [];
         const selectedInput = input.selected || null;
         const openInputSessions = Array.isArray(input.openSessions) ? input.openSessions : [];
+        const monitoringProviders = Array.isArray(monitoring.providers) ? monitoring.providers : [];
+        const selectedMonitoringProvider = monitoring.selectedProvider || null;
         const monitoringSessions = Array.isArray(monitoring.sessions) ? monitoring.sessions : [];
+        const monitoringBridges = Array.isArray(monitoring.bridges) ? monitoring.bridges : [];
         const inputBridges = Array.isArray(input.bridges) ? input.bridges : [];
         const bridges = [
             ...(Array.isArray(mix.bridges) ? mix.bridges : []),
             ...inputBridges,
-            ...(Array.isArray(monitoring.bridges) ? monitoring.bridges : []),
+            ...monitoringBridges,
             ...(Array.isArray(stems.bridges) ? stems.bridges : []),
         ];
         const bridgeHits = bridges.reduce((sum, bridge) => sum + Number(bridge.hitCount || 0), 0);
         const faders = Array.isArray(mix.faders) ? mix.faders : [];
         const failedOutcomes = (Array.isArray(audioData.recentOutcomes) ? audioData.recentOutcomes : [])
-            .filter(outcome => outcome && (outcome.domain === 'audio-mix' || outcome.domain === 'audio-input') && (outcome.outcome === 'failed' || outcome.outcome === 'denied' || outcome.status === 'timeout'))
+            .filter(outcome => outcome && (outcome.domain === 'audio-mix' || outcome.domain === 'audio-input' || outcome.domain === 'audio-monitoring') && (outcome.outcome === 'failed' || outcome.outcome === 'denied' || outcome.outcome === 'degraded' || outcome.outcome === 'unavailable' || outcome.outcome === 'provider-selection-required' || outcome.status === 'timeout'))
             .slice(-5);
         const claims = Array.isArray(stems.claims) ? stems.claims : [];
         const owner = stems.owner || null;
@@ -1505,6 +1508,7 @@
                     ${pill(`${faders.length} fader${faders.length === 1 ? '' : 's'}`, faders.length ? 'info' : 'muted')}
                     ${pill(`${input.totalSources ?? sources.length} input source${(input.totalSources ?? sources.length) === 1 ? '' : 's'}`, sources.length ? 'info' : 'muted')}
                     ${pill(`${input.totalOpenSessions ?? openInputSessions.length} open input${(input.totalOpenSessions ?? openInputSessions.length) === 1 ? '' : 's'}`, openInputSessions.length ? 'used' : 'muted')}
+                    ${pill(`${monitoring.totalProviders ?? monitoringProviders.length} monitor provider${(monitoring.totalProviders ?? monitoringProviders.length) === 1 ? '' : 's'}`, monitoringProviders.length ? 'info' : 'muted')}
                     ${pill(`${monitoring.totalSessions ?? monitoringSessions.length} monitor${(monitoring.totalSessions ?? monitoringSessions.length) === 1 ? '' : 's'}`, monitoringSessions.length ? 'info' : 'muted')}
                     ${pill(owner ? `stems: ${owner.ownerId}` : 'stems: no owner', owner ? 'clean' : 'muted')}
                     ${pill(`${claims.length} claim${claims.length === 1 ? '' : 's'}`, claims.length ? 'used' : 'muted')}
@@ -1518,13 +1522,17 @@
                 <div data-audio-session-input>Input: ${sources.map(s => `${text(s.label || s.sourceId || s.kind)}:${text(s.availability || 'unknown')}:${text(s.channelSummary && s.channelSummary.channelShape ? s.channelSummary.channelShape : s.channelShape || 'unknown')}:${text(s.sourceMode || 'native')}${s.supersededBy ? ':superseded' : ''}`).join(', ') || 'none'}</div>
                 <div data-audio-session-selected-input>Selected input: ${selectedInput ? `${text(selectedInput.logicalSourceKey || selectedInput.sourceId || 'selected')}:${text(selectedInput.availability || 'unknown')}:${text(selectedInput.restoreStatus || 'unknown')}` : 'none'}</div>
                 <div data-audio-session-open-input>Open input: ${openInputSessions.map(s => `${text(s.openSessionId)}:${text(s.channelShape || 'unknown')}:${text(s.state || 'unknown')}:${text((s.requesters || []).map(r => r.requesterId).join('+'))}`).join(', ') || 'none'}</div>
-                <div data-audio-session-monitoring>Monitoring: ${monitoringSessions.map(s => `${text(s.monitoringId)}:${text(s.state)}`).join(', ') || 'none'}</div>
+                <div data-audio-session-monitoring-providers>Monitoring providers: ${monitoringProviders.map(p => `${text(p.label || p.providerId)}:${text(p.availability || 'unknown')}:${text(p.sourceMode || 'native')}${p.supersededBy ? ':superseded' : ''}`).join(', ') || 'none'}</div>
+                <div data-audio-session-selected-monitoring>Selected monitoring: ${selectedMonitoringProvider ? `${text(selectedMonitoringProvider.logicalMonitoringKey || selectedMonitoringProvider.providerId || 'selected')}:${text(selectedMonitoringProvider.availability || 'unknown')}:${text(selectedMonitoringProvider.providerId || 'unknown')}` : 'none'}</div>
+                <div data-audio-session-monitoring>Monitoring: ${monitoringSessions.map(s => `${text(s.monitoringId)}:${text(s.state)}:${text((s.requesters || []).map(r => r.requesterId).join('+'))}:${text((s.sourceRef && (s.sourceRef.logicalSourceKey || s.sourceRef.sourceId)) || 'unknown')}`).join(', ') || 'none'}</div>
+                <div data-audio-session-direct-monitor>Direct monitor: ${monitoring.directMonitor ? `${text(monitoring.directMonitor.state || monitoring.directMonitor.preference || 'unknown')}:${text(monitoring.directMonitor.control || 'unknown')}:${text(monitoring.directMonitor.applied === true ? 'applied' : (monitoring.directMonitor.applied === false ? 'not-applied' : 'unknown'))}` : 'unknown'}</div>
                 <div data-audio-session-stems>Stem owner: ${text(owner && owner.ownerId ? owner.ownerId : 'none')}</div>
                 <div data-audio-session-participants>Participants: ${participants.map(p => text(p.label || p.participantId)).join(', ') || 'none'}</div>
                 <div data-audio-session-claims>Claims: ${claims.map(c => `${text(c.claimId)}:${text(c.state)}`).join(', ') || 'none'}</div>
                 <div data-audio-session-bridges>Bridges: ${bridges.map(b => `${text(b.bridgeId)}:${text(b.outcome || 'handled')}${b.reason ? ` (${text(b.reason)})` : ''}`).join(', ') || 'none'}</div>
                 <div data-audio-session-input-bridges>Input bridges: ${inputBridges.map(b => `${text(b.bridgeId)}:${text(b.status || b.outcome || 'handled')}`).join(', ') || 'none'}</div>
-                <div data-audio-session-failures>Failures: ${failedOutcomes.map(outcome => `${text(outcome.domain)}:${text(outcome.operation)}:${text(outcome.faderId || outcome.sourceId || outcome.logicalSourceKey || outcome.participantId || outcome.requesterId)}:${text(outcome.status || outcome.outcome)}`).join(', ') || 'none'}</div>
+                <div data-audio-session-monitoring-bridges>Monitoring bridges: ${monitoringBridges.map(b => `${text(b.bridgeId)}:${text(b.status || b.outcome || 'handled')}`).join(', ') || 'none'}</div>
+                <div data-audio-session-failures>Failures: ${failedOutcomes.map(outcome => `${text(outcome.domain)}:${text(outcome.operation)}:${text(outcome.faderId || outcome.monitoringId || outcome.sourceId || outcome.logicalSourceKey || outcome.participantId || outcome.requesterId)}:${text(outcome.status || outcome.outcome)}`).join(', ') || 'none'}</div>
             </div>
         </section>`;
     }

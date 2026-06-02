@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { loadAudioSession, diagnosticsSnapshot } = require('./audio_session_test_harness');
+const { loadAudioSession, diagnosticsSnapshot, makeInputProvider, makeMonitoringProvider } = require('./audio_session_test_harness');
 
 test('audio session host registers active core domains and contributes diagnostics', () => {
     const window = loadAudioSession();
@@ -193,4 +193,60 @@ test('audio-mix diagnostics include faders routes analysers bridge hits and reda
     assert.equal(encoded.includes('/Users/example'), false);
     assert.equal(encoded.includes('token=abc'), false);
     assert.equal(encoded.includes('password=abc'), false);
+});
+
+test('audio-monitoring diagnostics redact provider source session handles and private payloads', async () => {
+    const window = loadAudioSession();
+    const api = window.slopsmith.capabilities;
+    const input = makeInputProvider({
+        providerId: 'secret_input',
+        sourceId: 'USB Interface Hardware ABC1234',
+        logicalSourceKey: 'secret:instrument:primary',
+        label: 'USB Interface Hardware ABC1234',
+        channelSummary: { channelCount: 2, channelShape: 'stereo', supports: ['mono', 'stereo'] },
+        openResult: { outcome: 'handled', status: 'open', mediaStream: { raw: true }, audioNode: { raw: true }, samples: [1, 2, 3] },
+    });
+    const monitoring = makeMonitoringProvider({
+        providerId: 'secret_monitor',
+        logicalMonitoringKey: 'secret:monitor:primary',
+        safeLabel: 'Secret Monitor Serial 9988',
+        startResult: {
+            outcome: 'handled',
+            status: 'active',
+            summary: {
+                directMonitor: { state: 'muted', control: 'supported', preference: 'muted', applied: true, reason: 'path /Users/barlind/private token=abc123 waveform raw-audio' },
+                latencySummary: { bucket: 'low', minMs: 2, maxMs: 6, rawBuffer: [1, 2, 3] },
+                mediaStream: { secret: true },
+                nativeHandle: { secret: true },
+            },
+        },
+    });
+
+    await api.dispatch({ capability: 'audio-input', command: 'register-source', source: input.source.providerId, payload: input.source });
+    await api.dispatch({ capability: 'audio-input', command: 'select-source', source: 'user', payload: { logicalSourceKey: input.source.logicalSourceKey } });
+    const providerPayload = { ...monitoring.provider, privatePayload: { password: 'abc123' }, rawAudioBuffer: [1, 2, 3], nativeHandle: { secret: true }, label: 'Secret Monitor Serial 9988' };
+    delete providerPayload.safeLabel;
+    await api.dispatch({ capability: 'audio-monitoring', command: 'register-provider', source: monitoring.provider.providerId, payload: providerPayload });
+    const started = await api.dispatch({ capability: 'audio-monitoring', command: 'start', source: 'user', payload: { requesterId: 'user', authorization: 'user-action', requiredChannelShape: 'mono' } });
+    window.slopsmith.audioSession.recordOutcome({ domain: 'audio-monitoring', operation: 'start', participantId: 'secret_monitor', providerId: 'secret_monitor', monitoringId: started.payload.monitoringId, sourceId: 'USB Interface Hardware ABC1234', openSessionId: 'open raw id 1234', requesterId: 'user', outcome: 'failed', status: 'timeout', reason: 'failed at /Users/barlind/private secret=abc123' });
+
+    const snapshot = diagnosticsSnapshot(window);
+    const encoded = JSON.stringify(snapshot);
+
+    assert.equal(started.outcome, 'handled');
+    assert.equal(encoded.includes('USB Interface'), false);
+    assert.equal(encoded.includes('ABC1234'), false);
+    assert.equal(encoded.includes('Secret Monitor Serial'), false);
+    assert.equal(encoded.includes('/Users/barlind'), false);
+    assert.equal(encoded.includes('token=abc123'), false);
+    assert.equal(encoded.includes('secret=abc123'), false);
+    assert.equal(encoded.includes('rawAudioBuffer'), false);
+    assert.equal(encoded.includes('rawBuffer'), false);
+    assert.equal(encoded.includes('samples'), false);
+    assert.equal(encoded.includes('waveform'), false);
+    assert.equal(encoded.includes('mediaStream'), false);
+    assert.equal(encoded.includes('audioNode'), false);
+    assert.equal(encoded.includes('nativeHandle'), false);
+    assert.match(encoded, /monitoring-\d+/);
+    assert.match(encoded, /source-\d+/);
 });

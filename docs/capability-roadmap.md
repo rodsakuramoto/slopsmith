@@ -32,7 +32,7 @@ The audio graph/session slice promotes these domains after PR1:
 |--------|-------|------------|--------|-----------------------|
 | `audio-mix` | Song volume, fader participants, route summary, analyser bridge accounting | provider-coordinator | safe | `audio-mix.fader-registry`, `audio-mix.song-volume`, `audio-mix.analyser` |
 | `audio-input` | Redaction-safe input source registration, selection, open-session lifecycle, channel compatibility, and provider migration diagnostics | provider-coordinator | sensitive | `audio-input.legacy-source` |
-| `audio-monitoring` | Monitoring lifecycle and audio startup barrier readiness | provider-coordinator | sensitive | `audio-monitoring.audio-barrier` |
+| `audio-monitoring` | Monitoring provider selection, explicit user-action start/stop, direct-monitor policy, requester sharing, and audio startup barrier readiness | provider-coordinator | sensitive | `audio-monitoring.audio-barrier`, `audio-monitoring.legacy-provider` |
 | `stems` | Stem automation claims and active provider status | coordinator plus plugin provider | safe | `stems.master-volume`, `stems.private-state` |
 
 `core.audio.session` is the runtime coordinator for all four domains. It owns `audio-mix`, `audio-input`, and `audio-monitoring`; for `stems`, it coordinates the active Stems provider without replacing the Stems plugin as the owner of actual stem playback/state.
@@ -40,6 +40,8 @@ The audio graph/session slice promotes these domains after PR1:
 The focused audio-mix control-plane slice promotes fader discovery, read/write operations, committed-value events, native-over-legacy duplicate handling, route/analyser inspection, and compatibility removal gates into `audio-mix`. During migration, `window.slopsmith.audio.registerFader(...)` remains available as a compatibility adapter, but the player mixer consumes the audio-mix control plane as its source of truth.
 
 The focused audio-input control-plane slice promotes source listing, prompt-free selection/inspection, explicit provider enumeration, open/close dispatch, channel-shape compatibility, selected-source persistence, shared requester sessions, and redaction-safe failure diagnostics into `audio-input`. During migration, legacy browser, desktop, or plugin-specific input handoffs should be recorded as `audio-input.legacy-source` bridge hits. Native providers own the visible source when they share a logical source key with a compatibility-backed source; the compatibility source remains diagnostics-only until normal playback shows no unexpected legacy hits.
+
+The focused audio-monitoring control-plane slice promotes monitoring provider registration, selected-provider persistence, explicit user-action live monitoring start, shared requester attachment, final-requester stop, provider disappearance/orphan diagnostics, direct-monitor preference/control summaries, prompt-free status inspection, and redaction-safe failure outcomes into `audio-monitoring`. Fresh monitoring starts from plugins/background code return `user-action-required`; background requesters may attach only to an already-active compatible monitoring session. Native providers own a logical monitoring path when they share it with compatibility-backed startup barrier or legacy monitoring surfaces, and the legacy path remains diagnostics-only until normal playback shows no unexpected bridge hits.
 
 ## Recommended Next Slices
 
@@ -85,7 +87,7 @@ These domains are planned but should stay out of the runtime graph until a host 
 | `settings` | exclusive-owner | sensitive | Plugin settings contribution metadata without settings values. | A settings contribution PR with redaction rules and migration story. |
 | `visualization` | multi-provider | safe | Renderer providers, overlay participation, and renderer selection. | A visualization PR that defines provider ordering/selection and legacy highway shim attribution. |
 | `audio-mix` | multi-provider | safe | Mixer fader registration and current fader inspection. | Promoted by the audio graph/session slice. |
-| `audio-monitoring` | multi-provider | sensitive | Native/audio-input barrier participation and monitoring lifecycle. | Promoted by the audio graph/session slice. |
+| `audio-monitoring` | multi-provider | sensitive | Monitoring provider selection, live start/stop lifecycle, shared requester sessions, direct-monitor state, and redacted failure diagnostics. | Promoted by the audio graph/session slice and implemented by the audio-monitoring control-plane slice. |
 | `note-detection` | multi-provider | sensitive | Note-state providers and note event integration. | A note-detection PR with performance-data redaction and provider lifecycle tests. |
 | `backend.routes` | multi-provider | privileged | Server route/provider participation and route inspection. | A backend domain PR with concrete core/provider workflow, privilege review, and route diagnostics. |
 | `ui.player-controls` | exclusive-owner | safe | Player-control contributions and ordering. | A first-party player-control host and layout policy. |
