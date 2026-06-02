@@ -45,11 +45,38 @@ function setupSandbox() {
             if (idx >= 0) headLinks.splice(idx, 1);
         },
     });
+    // Seed a stand-in for core's prebuilt <link href="/static/tailwind.min.css">
+    // so the ordering test can assert plugin sheets are inserted before it.
+    const seedCore = () => {
+        const core = makeLink();
+        core.rel = 'stylesheet';
+        core.href = '/static/tailwind.min.css';
+        headLinks.push(core);
+        return core;
+    };
+    // Minimal but faithful <head>: appendChild pushes to the end, insertBefore
+    // splices before the reference node, and querySelector resolves the two
+    // anchor selectors _injectPluginStyles uses to find core's stylesheet
+    // (the tailwind-specific one, then any stylesheet as a fallback).
+    const head = {
+        appendChild: (node) => { headLinks.push(node); },
+        insertBefore: (node, ref) => {
+            const i = ref ? headLinks.indexOf(ref) : -1;
+            if (i >= 0) headLinks.splice(i, 0, node);
+            else headLinks.push(node);
+        },
+        querySelector: (sel) => {
+            if (sel.includes('tailwind.min.css')) {
+                return headLinks.find((l) => (l.href || '').includes('tailwind.min.css')) || null;
+            }
+            return headLinks.find((l) => l.rel === 'stylesheet') || null;
+        },
+    };
     const sandbox = {
         console: { warn() {} },
         encodeURIComponent,
         document: {
-            head: { appendChild: (node) => { headLinks.push(node); } },
+            head,
             createElement: () => makeLink(),
             // Production only ever queries 'link[data-plugin-id]'; return a
             // copy so a remove() splice during forEach is safe.
@@ -70,7 +97,7 @@ function setupSandbox() {
         `globalThis.__head = () => null;`,
         sandbox,
     );
-    return { inject: sandbox.__inject, reconcile: sandbox.__reconcile, headLinks };
+    return { inject: sandbox.__inject, reconcile: sandbox.__reconcile, headLinks, seedCore };
 }
 
 const plug = (over = {}) => ({
@@ -88,6 +115,26 @@ test('injects exactly one <link> for a plugin with styles', () => {
     // Root-relative styles → routes through /api/plugins/{id}/assets/... (no
     // doubled "assets/"), with the version as a cache-busting query.
     assert.equal(link.href, '/api/plugins/demo/assets/plugin.css?v=1');
+});
+
+test('inserts the plugin <link> before core tailwind.min.css so core wins equal-specificity collisions', () => {
+    const { inject, headLinks, seedCore } = setupSandbox();
+    const core = seedCore();
+    inject(plug());
+    assert.equal(headLinks.length, 2, 'core link plus the plugin link');
+    const pluginIdx = headLinks.findIndex((l) => l.dataset.pluginId === 'demo');
+    const coreIdx = headLinks.indexOf(core);
+    assert.ok(pluginIdx >= 0, 'plugin <link> was injected');
+    assert.ok(pluginIdx < coreIdx, 'plugin <link> must precede core tailwind.min.css');
+});
+
+test('falls back to appendChild when no stylesheet <link> anchor exists in <head>', () => {
+    // With an empty <head>, both anchor queries (tailwind-specific, then any
+    // stylesheet) miss, so coreSheet is null and the link is appended.
+    const { inject, headLinks } = setupSandbox();
+    inject(plug());
+    assert.equal(headLinks.length, 1, 'still injects when there is no anchor to insert before');
+    assert.equal(headLinks[0].dataset.pluginId, 'demo');
 });
 
 test('is idempotent — re-activation does not duplicate the tag', () => {

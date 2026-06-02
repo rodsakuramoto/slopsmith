@@ -7010,7 +7010,27 @@ async function loadPlugins() {
             // fetches fresh CSS instead of a copy cached by path alone.
             const v = encodeURIComponent(wantedVersion);
             link.href = `/api/plugins/${plugin.id}/${path}${v ? `?v=${v}` : ''}`;
-            document.head.appendChild(link);
+            // Cascade ordering: insert this <link> BEFORE core's prebuilt
+            // Tailwind (/static/tailwind.min.css) instead of appending at the
+            // end of <head>. A plugin that ships a full utility build — the
+            // default output of running the Tailwind CLI without a scoped
+            // content config — re-defines core utilities like .grid /
+            // .xl:grid-cols-4; appended last, those equal-specificity rules
+            // would win on source order and clobber core's responsive layout
+            // (e.g. the library grid collapses to 2 columns, the nav bar
+            // breaks). Loading the plugin sheet first means core wins any
+            // EQUAL-specificity collision, while the plugin's own namespaced
+            // classes still apply. A plugin can still deliberately override core
+            // via higher-specificity selectors or !important — this only removes
+            // the accidental source-order clobber.
+            const coreSheet =
+                document.head.querySelector('link[rel="stylesheet"][href*="tailwind.min.css"]')
+                || document.head.querySelector('link[rel="stylesheet"]');
+            if (coreSheet) {
+                document.head.insertBefore(link, coreSheet);
+            } else {
+                document.head.appendChild(link);
+            }
             loadedStyles.set(plugin.id, wantedVersion);
         };
         const _reconcilePluginStyles = (currentPlugins) => {
