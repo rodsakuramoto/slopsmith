@@ -161,8 +161,8 @@ Plugins that need live instrument input should declare requester/observer intent
   "capabilities": {
     "audio-input": {
       "roles": ["requester", "observer"],
-      "requests": ["inspect", "select-source"],
-      "observes": ["source-registered", "source-selected"],
+      "requests": ["inspect", "list-sources", "select-source", "open-source", "close-source"],
+      "observes": ["source-registered", "source-selected", "source-opened", "source-open-degraded", "source-closed", "permission-denied"],
       "mode": "active",
       "compatibility": "shim-allowed",
       "ownership": "requester-only",
@@ -182,6 +182,46 @@ Plugins that need live instrument input should declare requester/observer intent
   }
 }
 ```
+
+Requesters should list or inspect sources before opening them. `inspect`, `list-sources`, and `select-source` are prompt-free and must not call provider enumeration or open live input. When a requester needs audio, it dispatches `open-source` with a purpose and required channel shape. The requester identity is taken from the dispatch `source` (the authenticated caller) — a payload-supplied `requesterId` is ignored, so a requester cannot spoof another's identity or release a shared session it does not own. Compatible requesters share one open session; each requester later dispatches `close-source`, and the provider is closed only after the last requester releases it.
+
+```js
+const api = window.slopsmith.capabilities;
+await api.dispatch({ capability: 'audio-input', command: 'select-source', source: 'user', payload: { logicalSourceKey: 'browser:instrument:primary' } });
+const opened = await api.dispatch({
+  capability: 'audio-input',
+  command: 'open-source',
+  source: 'note_detect', // identity for the open session; payload requesterId is ignored
+  payload: { purpose: 'note-detection', requiredChannelShape: 'mono' },
+});
+// Keep provider-owned streams/nodes private. Diagnostics receive only opened.payload summaries.
+await api.dispatch({ capability: 'audio-input', command: 'close-source', source: 'note_detect', payload: { openSessionId: opened.payload.openSessionId } });
+```
+
+## Audio Input Provider
+
+Native input providers register redaction-safe source summaries with stable logical keys. Use `source.enumerate` only for an explicit user/provider discovery action; normal list/inspect/select flows should use already-registered summaries.
+
+```json
+{
+  "id": "desktop_audio",
+  "name": "Desktop Audio",
+  "standards": ["capability-pipelines.v1"],
+  "capabilities": {
+    "audio-input": {
+      "roles": ["provider", "observer"],
+      "operations": ["source.enumerate", "source.open", "source.close"],
+      "events": ["source-registered", "source-opened", "source-closed", "source-open-degraded", "permission-denied"],
+      "mode": "active",
+      "compatibility": "none",
+      "safety": "sensitive",
+      "version": 1
+    }
+  }
+}
+```
+
+Provider source records should include `sourceId`, `providerId`, `logicalSourceKey`, `kind`, safe label or diagnostics pseudonym, availability, `channelSummary`, and supported operations/handlers. Do not put browser `MediaStream`, `AudioNode`, native handles, buffers, samples, waveform data, raw device labels, stable hardware ids, paths, or secrets in returned payloads; keep those in provider-private state.
 
 ## Stems Provider Behind Audio Session Coordination
 

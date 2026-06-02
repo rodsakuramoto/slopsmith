@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { loadAudioSession } = require('./audio_session_test_harness');
+const { loadAudioSession, diagnosticsSnapshot } = require('./audio_session_test_harness');
 
 test('audio session host registers active core domains and contributes diagnostics', () => {
     const window = loadAudioSession();
@@ -24,7 +24,7 @@ test('audio session lifecycle and snapshots redact source identity with per-snap
 
     audioSession.startSession({ sessionId: 'main:/Users/example/DLC/song.psarc', songKey: '/Users/example/DLC/song.psarc', songFormat: 'psarc' });
     audioSession.setRoute({ routeKind: 'html5', availability: 'available', deviceLabel: 'Scarlett 2i2 Serial 1234' });
-    audioSession.registerInputSource({ sourceId: 'mic-raw-id', providerId: 'browser', kind: 'instrument', channelCount: 2, availability: 'available', label: 'Scarlett 2i2 Serial 1234' });
+    audioSession.registerInputSource({ sourceId: 'mic-raw-id', logicalSourceKey: 'browser:instrument:primary', providerId: 'browser', kind: 'instrument', channelCount: 2, availability: 'available', label: 'Scarlett 2i2 Serial 1234' });
 
     const snapshot = audioSession.snapshot();
     const encoded = JSON.stringify(snapshot);
@@ -32,6 +32,80 @@ test('audio session lifecycle and snapshots redact source identity with per-snap
     assert.match(snapshot.domains['audio-input'].sources[0].diagnosticsPseudonym, /^source-\d{2}$/);
     assert.equal(encoded.includes('Scarlett'), false);
     assert.equal(encoded.includes('/Users/example'), false);
+});
+
+test('audio-input diagnostics redact source ids labels handles and bounded reasons', async () => {
+    const window = loadAudioSession();
+    const api = window.slopsmith.capabilities;
+
+    await api.dispatch({
+        capability: 'audio-input',
+        command: 'register-source',
+        source: 'secret_plugin',
+        payload: {
+            sourceId: 'Built-in Microphone Serial ABC123',
+            logicalSourceKey: 'secret:instrument:primary',
+            providerId: 'secret_plugin',
+            kind: 'instrument',
+            label: 'Built-in Microphone Serial ABC123',
+            availability: 'available',
+            reason: 'Path /Users/barlind/private/project token=abc123 should be redacted',
+            channelSummary: { channelCount: 2, channelShape: 'stereo', supports: ['mono', 'stereo'] },
+            operations: ['source.open'],
+            operationHandlers: {
+                'source.open': () => ({ outcome: 'handled', mediaStream: { secret: true }, audioNode: { secret: true } }),
+            },
+        },
+    });
+    await api.dispatch({ capability: 'audio-input', command: 'select-source', source: 'user', payload: { logicalSourceKey: 'secret:instrument:primary' } });
+    await api.dispatch({ capability: 'audio-input', command: 'open-source', source: 'note_detect', payload: { requesterId: 'note_detect', requiredChannelShape: 'mono' } });
+
+    const encoded = JSON.stringify(diagnosticsSnapshot(window));
+    assert.equal(encoded.includes('Built-in Microphone'), false);
+    assert.equal(encoded.includes('ABC123'), false);
+    assert.equal(encoded.includes('/Users/barlind'), false);
+    assert.equal(encoded.includes('token=abc123'), false);
+    assert.equal(encoded.includes('mediaStream'), false);
+    assert.equal(encoded.includes('audioNode'), false);
+    assert.match(encoded, /source-\d+/);
+});
+
+test('audio-input shares compatible open sessions and closes provider after last release', async () => {
+    const window = loadAudioSession();
+    const api = window.slopsmith.capabilities;
+    const calls = [];
+
+    await api.dispatch({
+        capability: 'audio-input',
+        command: 'register-source',
+        source: 'provider',
+        payload: {
+            sourceId: 'shared-source',
+            logicalSourceKey: 'shared:instrument:primary',
+            providerId: 'provider',
+            kind: 'instrument',
+            safeLabel: 'Shared Input',
+            channelSummary: { channelCount: 2, channelShape: 'stereo', supports: ['mono', 'stereo'] },
+            operations: ['source.open', 'source.close'],
+            operationHandlers: {
+                'source.open': request => { calls.push(['open', request.requesterId]); return { outcome: 'handled' }; },
+                'source.close': request => { calls.push(['close', request.openSessionId]); return { outcome: 'handled' }; },
+            },
+        },
+    });
+    await api.dispatch({ capability: 'audio-input', command: 'select-source', source: 'user', payload: { logicalSourceKey: 'shared:instrument:primary' } });
+
+    const first = await api.dispatch({ capability: 'audio-input', command: 'open-source', source: 'note_detect', payload: { requesterId: 'note_detect', requiredChannelShape: 'mono' } });
+    const second = await api.dispatch({ capability: 'audio-input', command: 'open-source', source: 'practice_overlay', payload: { requesterId: 'practice_overlay', requiredChannelShape: 'mono' } });
+    const closeFirst = await api.dispatch({ capability: 'audio-input', command: 'close-source', source: 'note_detect', payload: { requesterId: 'note_detect', openSessionId: first.payload.openSessionId } });
+    const closeSecond = await api.dispatch({ capability: 'audio-input', command: 'close-source', source: 'practice_overlay', payload: { requesterId: 'practice_overlay', openSessionId: second.payload.openSessionId } });
+
+    assert.equal(first.outcome, 'handled');
+    assert.equal(second.outcome, 'handled');
+    assert.equal(first.payload.openSessionId, second.payload.openSessionId);
+    assert.equal(closeFirst.payload.state, 'open');
+    assert.equal(closeSecond.payload.state, 'closed');
+    assert.deepEqual(calls.map(call => call[0]), ['open', 'close']);
 });
 
 test('audio diagnostics record bounded runtime outcomes and domain statuses', () => {

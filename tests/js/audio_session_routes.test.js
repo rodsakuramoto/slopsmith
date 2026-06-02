@@ -82,3 +82,40 @@ test('stems provider ownership remains separate from audio-mix stem participatio
     assert.equal(stemsInspect.payload.owner.ownerId, 'stems_plugin');
     assert.equal(mixInspect.payload.faders.some(fader => fader.kind === 'stem' && fader.ownerPluginId === 'stems_plugin'), true);
 });
+
+test('audio-input selection and registered providers survive song session switches without live sessions', async () => {
+    const window = loadAudioSession();
+    const api = window.slopsmith.capabilities;
+    const audioSession = window.slopsmith.audioSession;
+
+    audioSession.startSession({ sessionId: 'main:first-song', songKey: 'first-song.sloppak', songFormat: 'sloppak' });
+    await api.dispatch({
+        capability: 'audio-input',
+        command: 'register-source',
+        source: 'note_detect',
+        payload: {
+            sourceId: 'switch-source',
+            logicalSourceKey: 'switch:instrument:primary',
+            providerId: 'note_detect',
+            kind: 'instrument',
+            safeLabel: 'Switch Input',
+            channelSummary: { channelCount: 1, channelShape: 'mono', supports: ['mono'] },
+            operations: ['source.open', 'source.close'],
+            operationHandlers: {
+                'source.open': () => ({ outcome: 'handled' }),
+                'source.close': () => ({ outcome: 'handled' }),
+            },
+        },
+    });
+    await api.dispatch({ capability: 'audio-input', command: 'select-source', source: 'user', payload: { logicalSourceKey: 'switch:instrument:primary' } });
+    const open = await api.dispatch({ capability: 'audio-input', command: 'open-source', source: 'note_detect', payload: { requesterId: 'note_detect', requiredChannelShape: 'mono' } });
+    assert.equal(open.outcome, 'handled');
+
+    const next = audioSession.startSession({ sessionId: 'main:second-song', songKey: 'second-song.psarc', songFormat: 'psarc' });
+    const listed = await api.dispatch({ capability: 'audio-input', command: 'list-sources', source: 'note_detect' });
+
+    assert.equal(next.session.songFormat, 'psarc');
+    assert.equal(next.domains['audio-input'].selected.logicalSourceKey, 'switch:instrument:primary');
+    assert.equal(next.domains['audio-input'].totalOpenSessions, 0);
+    assert.equal(listed.payload.sources.some(source => source.logicalSourceKey === 'switch:instrument:primary'), true);
+});

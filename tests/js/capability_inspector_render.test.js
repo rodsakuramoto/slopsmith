@@ -590,5 +590,51 @@ test('capability inspector renders audio-mix fader diagnostics from audio-sessio
     assert.match(content, /Faders: Delay Wet:available:native, Legacy Gain:disabled:compatibility:failed/);
     assert.match(content, /Analyser: plugin \(available\)/);
     assert.match(content, /audio-mix\.fader-registry:overridden \(overshadowed\)/);
-    assert.match(content, /Failures: set-fader-value:gain:timeout/);
+    assert.match(content, /Failures: audio-mix:set-fader-value:gain:timeout/);
+});
+
+test('capability inspector renders audio-input sources selection sessions bridges and failures', () => {
+    const snapshot = {
+        pipelines: [
+            { name: 'audio-input', review: { lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Audio input surface.' }, participants: [
+                { pluginId: 'core.audio.session', roles: ['owner'], commands: ['list-sources', 'open-source', 'close-source'], operations: ['source.enumerate', 'source.open', 'source.close'], events: ['source-opened', 'source-closed'], runtime: true, availability: 'available', ownership: 'multi-provider', safety: 'sensitive' },
+            ], conflicts: [] },
+        ],
+        participants: [{ pluginId: 'core.audio.session' }],
+        compatibilityShims: [],
+        expectedCompatibilityShims: [],
+    };
+    const { window, elements } = loadInspector(snapshot);
+    window.slopsmith.audioSession = {
+        snapshot: () => ({
+            schema: 'slopsmith.audio_session.diagnostics.v1',
+            session: { route: { routeKind: 'html5', availability: 'available' }, analyser: { source: 'none', availability: 'unavailable' } },
+            domains: {
+                'audio-mix': { participants: [], faders: [], route: { routeKind: 'html5', availability: 'available' }, analyser: { source: 'none', availability: 'unavailable' }, bridges: [] },
+                'audio-input': {
+                    sources: [
+                        { sourceId: 'source-01', logicalSourceKey: 'native:instrument:primary', providerId: 'native', label: 'Input 1', availability: 'available', sourceMode: 'native', channelSummary: { channelShape: 'mono' } },
+                        { sourceId: 'source-02', logicalSourceKey: 'legacy:instrument:primary', providerId: 'legacy', label: 'Legacy Input', availability: 'available', sourceMode: 'compatibility', channelSummary: { channelShape: 'stereo' }, supersededBy: 'source-01' },
+                    ],
+                    selected: { logicalSourceKey: 'native:instrument:primary', availability: 'available', restoreStatus: 'available' },
+                    openSessions: [{ openSessionId: 'input-open-01', channelShape: 'mono', state: 'open', requesters: [{ requesterId: 'note_detect' }] }],
+                    totalSources: 2,
+                    totalOpenSessions: 1,
+                    bridges: [{ bridgeId: 'audio-input.legacy-source', status: 'overshadowed', outcome: 'overridden', hitCount: 1 }],
+                },
+                'audio-monitoring': { sessions: [], totalSessions: 0 },
+                stems: { owner: null, claims: [], bridges: [] },
+            },
+            recentOutcomes: [{ domain: 'audio-input', operation: 'open-source', sourceId: 'source-03', outcome: 'denied', status: 'denied' }],
+        }),
+    };
+
+    window.__slopsmithCapabilityInspector.render();
+    const content = elements.get('capability-inspector-content').innerHTML;
+
+    assert.match(content, /Input: Input 1:available:mono:native, Legacy Input:available:stereo:compatibility:superseded/);
+    assert.match(content, /Selected input: native:instrument:primary:available:available/);
+    assert.match(content, /Open input: input-open-01:mono:open:note_detect/);
+    assert.match(content, /Input bridges: audio-input\.legacy-source:overshadowed/);
+    assert.match(content, /Failures: audio-input:open-source:source-03:denied/);
 });

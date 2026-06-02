@@ -139,9 +139,10 @@ def test_nam_and_stems_use_owner_claim_dispatch_semantics():
     stems_source = _sibling_text("slopsmith-plugin-stems", "screen.js", "claimSnapshots")
 
     assert "NAM_STEM_CLAIM_ID = 'nam.amp-active'" in nam_source
-    assert "api.claim({ capability: 'stems'" in nam_source
     assert "api.dispatch({" in nam_source
-    assert "api.release({ capability: 'stems'" in nam_source
+    assert "command: 'mute'" in nam_source
+    assert "command: 'restore'" in nam_source
+    assert "claim: { claimId, requester: NAM_PLUGIN_ID }" in nam_source
     assert "window._stemsState" not in nam_source
     assert "claimSnapshots" in stems_source
     assert "api.registerParticipant('stems'" in stems_source

@@ -1476,17 +1476,20 @@
         const stems = audioData.domains['stems'] || {};
         const participants = Array.isArray(mix.participants) ? mix.participants : [];
         const sources = Array.isArray(input.sources) ? input.sources : [];
+        const selectedInput = input.selected || null;
+        const openInputSessions = Array.isArray(input.openSessions) ? input.openSessions : [];
         const monitoringSessions = Array.isArray(monitoring.sessions) ? monitoring.sessions : [];
+        const inputBridges = Array.isArray(input.bridges) ? input.bridges : [];
         const bridges = [
             ...(Array.isArray(mix.bridges) ? mix.bridges : []),
-            ...(Array.isArray(input.bridges) ? input.bridges : []),
+            ...inputBridges,
             ...(Array.isArray(monitoring.bridges) ? monitoring.bridges : []),
             ...(Array.isArray(stems.bridges) ? stems.bridges : []),
         ];
         const bridgeHits = bridges.reduce((sum, bridge) => sum + Number(bridge.hitCount || 0), 0);
         const faders = Array.isArray(mix.faders) ? mix.faders : [];
         const failedOutcomes = (Array.isArray(audioData.recentOutcomes) ? audioData.recentOutcomes : [])
-            .filter(outcome => outcome && outcome.domain === 'audio-mix' && (outcome.outcome === 'failed' || outcome.status === 'timeout'))
+            .filter(outcome => outcome && (outcome.domain === 'audio-mix' || outcome.domain === 'audio-input') && (outcome.outcome === 'failed' || outcome.outcome === 'denied' || outcome.status === 'timeout'))
             .slice(-5);
         const claims = Array.isArray(stems.claims) ? stems.claims : [];
         const owner = stems.owner || null;
@@ -1500,8 +1503,9 @@
                     ${pill(`route: ${route.routeKind || 'unknown'}`, route.availability === 'available' ? 'clean' : 'warning')}
                     ${pill(`${participants.length} mix participant${participants.length === 1 ? '' : 's'}`, participants.length ? 'info' : 'muted')}
                     ${pill(`${faders.length} fader${faders.length === 1 ? '' : 's'}`, faders.length ? 'info' : 'muted')}
-                    ${pill(`${input.totalSources || sources.length} input source${(input.totalSources || sources.length) === 1 ? '' : 's'}`, sources.length ? 'info' : 'muted')}
-                    ${pill(`${monitoring.totalSessions || monitoringSessions.length} monitor${(monitoring.totalSessions || monitoringSessions.length) === 1 ? '' : 's'}`, monitoringSessions.length ? 'info' : 'muted')}
+                    ${pill(`${input.totalSources ?? sources.length} input source${(input.totalSources ?? sources.length) === 1 ? '' : 's'}`, sources.length ? 'info' : 'muted')}
+                    ${pill(`${input.totalOpenSessions ?? openInputSessions.length} open input${(input.totalOpenSessions ?? openInputSessions.length) === 1 ? '' : 's'}`, openInputSessions.length ? 'used' : 'muted')}
+                    ${pill(`${monitoring.totalSessions ?? monitoringSessions.length} monitor${(monitoring.totalSessions ?? monitoringSessions.length) === 1 ? '' : 's'}`, monitoringSessions.length ? 'info' : 'muted')}
                     ${pill(owner ? `stems: ${owner.ownerId}` : 'stems: no owner', owner ? 'clean' : 'muted')}
                     ${pill(`${claims.length} claim${claims.length === 1 ? '' : 's'}`, claims.length ? 'used' : 'muted')}
                     ${pill(`${bridgeHits} bridge hit${bridgeHits === 1 ? '' : 's'}`, bridges.length ? 'used' : 'muted')}
@@ -1509,15 +1513,18 @@
             </div>
             <div class="mt-3 grid gap-2 text-xs text-gray-400 md:grid-cols-2">
                 <div data-audio-session-route>Route: ${text(route.routeKind || 'unknown')} (${text(route.availability || 'unknown')})</div>
-                <div data-audio-session-input>Input: ${sources.map(s => text(s.sourceId || s.kind)).join(', ') || 'none'}</div>
                 <div data-audio-session-analyser>Analyser: ${text(analyser.source || 'unavailable')} (${text(analyser.availability || 'unavailable')})</div>
                 <div data-audio-session-faders>Faders: ${faders.map(fader => `${text(fader.label || fader.faderLabel || fader.participantId)}:${text(fader.availability || 'unknown')}:${text(fader.sourceMode || 'native')}${fader.lastRejectedValue != null ? ':failed' : ''}`).join(', ') || 'none'}</div>
+                <div data-audio-session-input>Input: ${sources.map(s => `${text(s.label || s.sourceId || s.kind)}:${text(s.availability || 'unknown')}:${text(s.channelSummary && s.channelSummary.channelShape ? s.channelSummary.channelShape : s.channelShape || 'unknown')}:${text(s.sourceMode || 'native')}${s.supersededBy ? ':superseded' : ''}`).join(', ') || 'none'}</div>
+                <div data-audio-session-selected-input>Selected input: ${selectedInput ? `${text(selectedInput.logicalSourceKey || selectedInput.sourceId || 'selected')}:${text(selectedInput.availability || 'unknown')}:${text(selectedInput.restoreStatus || 'unknown')}` : 'none'}</div>
+                <div data-audio-session-open-input>Open input: ${openInputSessions.map(s => `${text(s.openSessionId)}:${text(s.channelShape || 'unknown')}:${text(s.state || 'unknown')}:${text((s.requesters || []).map(r => r.requesterId).join('+'))}`).join(', ') || 'none'}</div>
                 <div data-audio-session-monitoring>Monitoring: ${monitoringSessions.map(s => `${text(s.monitoringId)}:${text(s.state)}`).join(', ') || 'none'}</div>
                 <div data-audio-session-stems>Stem owner: ${text(owner && owner.ownerId ? owner.ownerId : 'none')}</div>
                 <div data-audio-session-participants>Participants: ${participants.map(p => text(p.label || p.participantId)).join(', ') || 'none'}</div>
                 <div data-audio-session-claims>Claims: ${claims.map(c => `${text(c.claimId)}:${text(c.state)}`).join(', ') || 'none'}</div>
                 <div data-audio-session-bridges>Bridges: ${bridges.map(b => `${text(b.bridgeId)}:${text(b.outcome || 'handled')}${b.reason ? ` (${text(b.reason)})` : ''}`).join(', ') || 'none'}</div>
-                <div data-audio-session-failures>Failures: ${failedOutcomes.map(outcome => `${text(outcome.operation)}:${text(outcome.faderId || outcome.participantId)}:${text(outcome.status || outcome.outcome)}`).join(', ') || 'none'}</div>
+                <div data-audio-session-input-bridges>Input bridges: ${inputBridges.map(b => `${text(b.bridgeId)}:${text(b.status || b.outcome || 'handled')}`).join(', ') || 'none'}</div>
+                <div data-audio-session-failures>Failures: ${failedOutcomes.map(outcome => `${text(outcome.domain)}:${text(outcome.operation)}:${text(outcome.faderId || outcome.sourceId || outcome.logicalSourceKey || outcome.participantId || outcome.requesterId)}:${text(outcome.status || outcome.outcome)}`).join(', ') || 'none'}</div>
             </div>
         </section>`;
     }

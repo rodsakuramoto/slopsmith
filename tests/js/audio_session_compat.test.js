@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { loadAudioSession, runBrowserScript, installMixerDom } = require('./audio_session_test_harness');
+const { loadAudioSession, runBrowserScript, installMixerDom, makeInputProvider } = require('./audio_session_test_harness');
 
 function installAnalyserDom(window) {
     const audio = { addEventListener() {} };
@@ -67,6 +67,95 @@ test('barrier and input compatibility surfaces are visible in diagnostics', () =
     const snapshot = audioSession.snapshot();
     assert.equal(snapshot.domains['audio-monitoring'].bridges.some(bridge => bridge.bridgeId === 'audio-monitoring.audio-barrier' && bridge.outcome === 'degraded'), true);
     assert.equal(snapshot.domains['audio-input'].bridges.some(bridge => bridge.bridgeId === 'audio-input.legacy-source' && bridge.outcome === 'denied'), true);
+});
+
+test('a legacy bridge hit with unsafe fields never leaks a path/token into diagnostics', () => {
+    const window = loadAudioSession();
+    const audioSession = window.slopsmith.audioSession;
+
+    audioSession.recordBridgeHit({
+        domain: 'audio-input',
+        legacySurface: '/Users/me/legacy token=brk1',
+        participantId: '/Users/me/who token=brk2',
+        logicalSourceKey: '/Users/me/key token=brk3',
+        outcome: 'degraded',
+        reason: 'legacy handoff',
+    });
+
+    const encoded = JSON.stringify(audioSession.snapshot());
+    assert.equal(encoded.includes('/Users/me'), false);
+    assert.equal(encoded.includes('token=brk1'), false);
+    assert.equal(encoded.includes('token=brk2'), false);
+    assert.equal(encoded.includes('token=brk3'), false);
+});
+
+test('audio-input explicit enumeration registers provider sources without list prompting', async () => {
+    const window = loadAudioSession();
+    const api = window.slopsmith.capabilities;
+    const provider = makeInputProvider({
+        providerId: 'desktop_audio',
+        sourceId: 'bootstrap-source',
+        logicalSourceKey: 'desktop:bootstrap',
+        sources: [
+            { sourceId: 'desktop-source-2', logicalSourceKey: 'desktop:instrument:secondary', kind: 'instrument', safeLabel: 'Desktop Input 2', channelSummary: { channelCount: 1, channelShape: 'mono', supports: ['mono'] } },
+        ],
+    });
+
+    await api.dispatch({ capability: 'audio-input', command: 'register-source', source: 'desktop_audio', payload: provider.source });
+    const listed = await api.dispatch({ capability: 'audio-input', command: 'list-sources', source: 'test' });
+    assert.equal(listed.payload.sources.some(source => source.logicalSourceKey === 'desktop:instrument:secondary'), false);
+    assert.deepEqual(provider.calls, []);
+
+    const enumerated = await window.slopsmith.audioSession.enumerateInputSources({ providerId: 'desktop_audio', explicit: true, requesterId: 'settings' });
+    const after = await api.dispatch({ capability: 'audio-input', command: 'list-sources', source: 'test' });
+
+    assert.equal(enumerated.outcome, 'handled');
+    assert.equal(provider.calls.length, 1);
+    assert.equal(provider.calls[0][0], 'source.enumerate');
+    assert.equal(after.payload.sources.some(source => source.logicalSourceKey === 'desktop:instrument:secondary'), true);
+});
+
+test('audio-input native source wins over compatibility-backed duplicate', async () => {
+    const window = loadAudioSession();
+    const api = window.slopsmith.capabilities;
+
+    await api.dispatch({
+        capability: 'audio-input',
+        command: 'register-source',
+        source: 'legacy_input',
+        payload: {
+            sourceId: 'legacy-raw-source',
+            logicalSourceKey: 'shared:instrument:primary',
+            providerId: 'legacy_input',
+            kind: 'instrument',
+            safeLabel: 'Legacy Input',
+            sourceMode: 'compatibility',
+            compatibilitySource: 'navigator.mediaDevices.getUserMedia',
+            channelSummary: { channelCount: 1, channelShape: 'mono', supports: ['mono'] },
+        },
+    });
+    await api.dispatch({
+        capability: 'audio-input',
+        command: 'register-source',
+        source: 'native_input',
+        payload: {
+            sourceId: 'native-raw-source',
+            logicalSourceKey: 'shared:instrument:primary',
+            providerId: 'native_input',
+            kind: 'instrument',
+            safeLabel: 'Native Input',
+            sourceMode: 'native',
+            channelSummary: { channelCount: 1, channelShape: 'mono', supports: ['mono'] },
+        },
+    });
+
+    const listed = await api.dispatch({ capability: 'audio-input', command: 'list-sources', source: 'test' });
+    const snapshot = window.slopsmith.audioSession.snapshot().domains['audio-input'];
+
+    assert.equal(listed.payload.sources.length, 1);
+    assert.equal(listed.payload.sources[0].providerId, 'native_input');
+    assert.equal(snapshot.sources.some(source => source.providerId === 'legacy_input' && source.supersededBy), true);
+    assert.equal(snapshot.bridges.some(bridge => bridge.bridgeId === 'audio-input.legacy-source' && bridge.status === 'overshadowed'), true);
 });
 
 test('legacy registerFader callbacks are usable through audio-mix get and set operations', async () => {

@@ -31,7 +31,7 @@ The audio graph/session slice promotes these domains after PR1:
 | Domain | Scope | Owner Kind | Safety | Compatibility Bridges |
 |--------|-------|------------|--------|-----------------------|
 | `audio-mix` | Song volume, fader participants, route summary, analyser bridge accounting | provider-coordinator | safe | `audio-mix.fader-registry`, `audio-mix.song-volume`, `audio-mix.analyser` |
-| `audio-input` | Redaction-safe input source registration, selection, and availability | provider-coordinator | sensitive | `audio-input.legacy-source` |
+| `audio-input` | Redaction-safe input source registration, selection, open-session lifecycle, channel compatibility, and provider migration diagnostics | provider-coordinator | sensitive | `audio-input.legacy-source` |
 | `audio-monitoring` | Monitoring lifecycle and audio startup barrier readiness | provider-coordinator | sensitive | `audio-monitoring.audio-barrier` |
 | `stems` | Stem automation claims and active provider status | coordinator plus plugin provider | safe | `stems.master-volume`, `stems.private-state` |
 
@@ -39,16 +39,17 @@ The audio graph/session slice promotes these domains after PR1:
 
 The focused audio-mix control-plane slice promotes fader discovery, read/write operations, committed-value events, native-over-legacy duplicate handling, route/analyser inspection, and compatibility removal gates into `audio-mix`. During migration, `window.slopsmith.audio.registerFader(...)` remains available as a compatibility adapter, but the player mixer consumes the audio-mix control plane as its source of truth.
 
+The focused audio-input control-plane slice promotes source listing, prompt-free selection/inspection, explicit provider enumeration, open/close dispatch, channel-shape compatibility, selected-source persistence, shared requester sessions, and redaction-safe failure diagnostics into `audio-input`. During migration, legacy browser, desktop, or plugin-specific input handoffs should be recorded as `audio-input.legacy-source` bridge hits. Native providers own the visible source when they share a logical source key with a compatibility-backed source; the compatibility source remains diagnostics-only until normal playback shows no unexpected legacy hits.
+
 ## Recommended Next Slices
 
 The plugin inventory suggests this migration order after the audio graph/session slice:
 
-1. `audio-mix` control plane: make faders executable through capability commands and provider operations so `registerFader(...)` can become a compatibility wrapper only. This is the active 005 migration slice.
-2. `playback`: replace `window.playSong`/transport wrapper chains with transport commands, media snapshot access, and lifecycle events.
-3. `jobs`: coordinate conversion, import, update, preview, and studio work with progress, cancellation, retry, and terminal failure semantics.
-4. `note-detection`: formalize note-state providers, calibration diagnostics, audio-input coupling, and hit/miss event flow.
-5. UI contribution host: migrate navigation, plugin screens, player controls, player panels, overlays, shortcuts, and guided tours under placement/lifecycle policy.
-6. Backend and privileged capability cleanup: migrate routes, plugin lifecycle, media import/export, recording, external services, and subprocess-backed workflows with explicit user confirmation and diagnostics redaction.
+1. `playback`: replace `window.playSong`/transport wrapper chains with transport commands, media snapshot access, and lifecycle events.
+2. `jobs`: coordinate conversion, import, update, preview, and studio work with progress, cancellation, retry, and terminal failure semantics.
+3. `note-detection`: formalize note-state providers, calibration diagnostics, audio-input coupling, and hit/miss event flow. Requesters should use `audio-input` for source selection/opening rather than owning device prompts directly.
+4. UI contribution host: migrate navigation, plugin screens, player controls, player panels, overlays, shortcuts, and guided tours under placement/lifecycle policy.
+5. Backend and privileged capability cleanup: migrate routes, plugin lifecycle, media import/export, recording, external services, and subprocess-backed workflows with explicit user confirmation and diagnostics redaction.
 
 ## UI/UX Migration Path
 
@@ -93,7 +94,7 @@ These domains are planned but should stay out of the runtime graph until a host 
 | `plugins` | exclusive-owner | privileged | Plugin enable/disable/install/update workflows. | Visible user confirmation, rollback, and disabled-handler enforcement. |
 | `jobs` | multi-provider | privileged | Long-running jobs, cancellation, status, failures. | Scheduling limits, cancellation semantics, and user-visible failures. |
 | `midi-control` | multi-provider | sensitive | MIDI device providers and control mappings. | Device consent and redacted diagnostics. |
-| `audio-input` | multi-provider | sensitive | Audio input device providers and lifecycle. | Promoted by the audio graph/session slice. |
+| `audio-input` | multi-provider | sensitive | Audio input device providers, source selection, open/close lifecycle, shared sessions, and redacted failure diagnostics. | Promoted by the audio graph/session slice and implemented by the audio-input control-plane slice. |
 | `tempo-clock` | multi-provider | safe | Tempo/clock provider registration and consumers. | A concrete tempo source and consumer workflow. |
 
 Deferred domains may remain documented or reserved, but they should not produce expected shims, inspector links, or runtime handlers before their implementation slice.

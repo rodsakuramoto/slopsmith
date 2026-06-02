@@ -31,6 +31,36 @@ function diagnosticsSnapshot(window) {
     return window.slopsmith.audioSession.snapshot();
 }
 
+function storageEntries(window) {
+    return Object.fromEntries(window.__storage || new Map());
+}
+
+function makeInputProvider(overrides = {}) {
+    const calls = [];
+    const sources = overrides.sources || [];
+    return {
+        calls,
+        source: {
+            sourceId: overrides.sourceId || 'provider-source-1',
+            logicalSourceKey: overrides.logicalSourceKey || 'provider:input:primary',
+            providerId: overrides.providerId || 'provider',
+            ownerPluginId: overrides.ownerPluginId || overrides.providerId || 'provider',
+            kind: overrides.kind || 'instrument',
+            safeLabel: overrides.safeLabel || 'Input 1',
+            availability: overrides.availability || 'available',
+            channelSummary: overrides.channelSummary || { channelCount: 2, channelShape: 'stereo', supports: ['mono', 'stereo'] },
+            sourceMode: overrides.sourceMode || 'native',
+            operations: overrides.operations || ['source.enumerate', 'source.open', 'source.close'],
+            operationHandlers: {
+                'source.enumerate': request => { calls.push(['source.enumerate', request]); return { sources }; },
+                'source.open': request => { calls.push(['source.open', request]); return overrides.openResult || { outcome: 'handled', status: 'open' }; },
+                'source.close': request => { calls.push(['source.close', request]); return overrides.closeResult || { outcome: 'handled', status: 'closed' }; },
+                ...(overrides.operationHandlers || {}),
+            },
+        },
+    };
+}
+
 function installDeterministicTimers(window) {
     const timers = [];
     let nextId = 1;
@@ -107,6 +137,8 @@ module.exports = {
     runBrowserScript,
     captureEvents,
     diagnosticsSnapshot,
+    storageEntries,
+    makeInputProvider,
     installDeterministicTimers,
     installMixerDom,
     loadAudioMixer,

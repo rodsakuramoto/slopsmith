@@ -29,7 +29,7 @@ test('audio-session diagnostics remain bounded during frequent input monitoring 
     const window = loadAudioSession();
     const audioSession = window.slopsmith.audioSession;
     for (let index = 0; index < 500; index += 1) {
-        audioSession.registerInputSource({ sourceId: `source-${index}`, providerId: 'bench', label: `/Users/example/private-${index}` });
+        audioSession.registerInputSource({ sourceId: `source-${index}`, providerId: 'bench', logicalSourceKey: `bench:source-${index}`, label: `/Users/example/private-${index}` });
         audioSession.startMonitoring({ monitoringId: `mon-${index}`, sourceId: `source-${index}` });
     }
     const snapshot = audioSession.snapshot();
