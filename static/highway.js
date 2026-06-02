@@ -12,6 +12,11 @@ function createHighway() {
     // reconnect can detect they are stale and bail out before mutating
     // shared state.
     let _wsGen = 0;
+    // The audio-element accessor below is polled by plugins, so record its
+    // legacy bridge hit only once per highway instead of on every call —
+    // otherwise a per-frame poller floods playback:bridge-hit events and
+    // diagnostics.
+    let _audioElementBridgeRecorded = false;
     // Pending JUCE routing promise for the current connection's song_info.
     // The 'ready' handler awaits this so _juceMode is settled before
     // _onReady / song:ready fire, without blocking note/chord processing.
@@ -3258,7 +3263,29 @@ function createHighway() {
         // jucePlayer's clock and writes go through the seek queue, and
         // `audio.play/pause` route to the JUCE backing engine — so the
         // returned element behaves uniformly regardless of mode.
-        getAudioElement() { return document.getElementById('audio'); },
+        getAudioElement() {
+            if (typeof window !== 'undefined' && !_audioElementBridgeRecorded) {
+                const playback = window.slopsmith && window.slopsmith.playback;
+                if (playback && typeof playback.recordBridgeHit === 'function') {
+                    // Consume the one-shot before recording so a reentrant poll
+                    // during the synchronous bridge-hit emit can't double-record;
+                    // reset it if recordBridgeHit throws so a failed record (and
+                    // an early call before the domain is ready) still retries.
+                    _audioElementBridgeRecorded = true;
+                    try {
+                        playback.recordBridgeHit({
+                            bridgeId: 'playback.audio-element-shim',
+                            legacySurface: 'highway.getAudioElement',
+                            source: 'core.highway',
+                            reason: 'legacy audio element bridge requested',
+                        });
+                    } catch (_) {
+                        _audioElementBridgeRecorded = false;
+                    }
+                }
+            }
+            return document.getElementById('audio');
+        },
         // Force the highway's visibility state for the rAF skip
         // (#246). Pass `true` or `false` to override; pass `null` to
         // clear the override and resume DOM-based detection via

@@ -73,13 +73,13 @@
         'passed', 'transformed', 'handled', 'denied', 'degraded', 'failed',
         'short-circuited', 'overridden', 'no-owner', 'no-handler',
         'unsupported-command', 'incompatible', 'incompatible-version',
-        'unavailable', 'provider-selection-required', 'user-action-required', 'stopped',
+        'unavailable', 'provider-selection-required', 'user-action-required', 'no-target',
+        'stale', 'cancelled', 'stopped',
     ]);
     const MAX_DECISIONS = 100;
     const MAX_SNAPSHOT_BYTES = 64 * 1024;
     const DEFAULT_HANDLER_TIMEOUT_MS = 250;
     const RESERVED_FUTURE_DOMAINS = new Set([
-        'playback',
         'ui.navigation',
         'ui.plugin-screens',
         'settings',
@@ -111,6 +111,7 @@
         'audio-mix': Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Core-coordinated song route, fader, participant, and analyser inspection surface.' }),
         'audio-monitoring': Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Core-coordinated monitoring lifecycle, availability, consent, and bridge diagnostics.' }),
         library: Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Current local and plugin-provided library source selection and sync surface.' }),
+        playback: Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Core-coordinated song transport, timing, loop, route, requester, bridge, and diagnostics surface.' }),
         pipeline: Object.freeze({ lifecycle: 'diagnostic', label: 'Graph controls', tone: 'info', summary: 'Capability graph operations: resolve, inspect, validate, and enable or disable participants.' }),
         stems: Object.freeze({ lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Core-coordinated stem automation, restore, manual override, and compatibility bridge surface backed by the active Stems provider.' }),
     });
@@ -750,6 +751,7 @@
         const decision = {
             participant: participant.pluginId,
             outcome,
+            status: typeof source.status === 'string' ? source.status : undefined,
             reason: typeof source.reason === 'string' ? source.reason : undefined,
             payload: source.payload,
         };
@@ -761,7 +763,7 @@
 
     function _finalOutcome(decisions) {
         if (!decisions.length) return 'degraded';
-        const terminal = decisions.find(d => ['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped'].includes(d.outcome));
+        const terminal = decisions.find(d => ['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'no-target', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stale', 'cancelled', 'stopped'].includes(d.outcome));
         return terminal ? terminal.outcome : decisions[decisions.length - 1].outcome;
     }
 
@@ -915,7 +917,7 @@
                 commandContext.payload = decision.payload;
                 continue;
             }
-            if (['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped'].includes(decision.outcome)) break;
+            if (['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'no-target', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stale', 'cancelled', 'stopped'].includes(decision.outcome)) break;
         }
         if (!decisions.length) {
             const reason = `No provider handled ${capabilityName}.${commandName}`;
@@ -934,13 +936,14 @@
             });
         }
         const outcome = _finalOutcome(decisions);
-        const terminalDecision = decisions.find(d => ['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped'].includes(d.outcome))
+        const terminalDecision = decisions.find(d => ['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'no-target', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stale', 'cancelled', 'stopped'].includes(d.outcome))
             || decisions[decisions.length - 1];
         return {
             capability: capabilityName,
             command: commandName,
             requester: commandContext.requester,
             outcome,
+            status: terminalDecision && terminalDecision.status,
             reason: decisions.find(d => d.reason)?.reason,
             payload: terminalDecision && terminalDecision.payload,
             decisions,
@@ -1243,12 +1246,15 @@
         if (result.outcome === 'overridden') return 'overridden';
         if (result.outcome === 'no-owner') return 'no-owner';
         if (result.outcome === 'no-handler') return 'no-handler';
+        if (result.outcome === 'no-target') return 'no-target';
         if (result.outcome === 'unsupported-command') return 'unsupported-command';
         if (result.outcome === 'incompatible') return 'incompatible';
         if (result.outcome === 'incompatible-version') return 'incompatible-version';
         if (result.outcome === 'unavailable') return 'unavailable';
         if (result.outcome === 'provider-selection-required') return 'provider-selection-required';
         if (result.outcome === 'user-action-required') return 'user-action-required';
+        if (result.outcome === 'stale') return 'stale';
+        if (result.outcome === 'cancelled') return 'cancelled';
         if (result.outcome === 'stopped') return 'stopped';
         if (result.outcome === 'denied' || result.outcome === 'short-circuited') return 'blocked';
         if (result.outcome === 'failed') return 'error';

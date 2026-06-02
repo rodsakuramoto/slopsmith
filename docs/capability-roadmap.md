@@ -43,15 +43,22 @@ The focused audio-input control-plane slice promotes source listing, prompt-free
 
 The focused audio-monitoring control-plane slice promotes monitoring provider registration, selected-provider persistence, explicit user-action live monitoring start, shared requester attachment, final-requester stop, provider disappearance/orphan diagnostics, direct-monitor preference/control summaries, prompt-free status inspection, and redaction-safe failure outcomes into `audio-monitoring`. Fresh monitoring starts from plugins/background code return `user-action-required`; background requesters may attach only to an already-active compatible monitoring session. Native providers own a logical monitoring path when they share it with compatibility-backed startup barrier or legacy monitoring surfaces, and the legacy path remains diagnostics-only until normal playback shows no unexpected bridge hits.
 
+## Playback Control Plane Slice
+
+The playback slice promotes `playback` from a deferred domain to an active exclusive-owner core domain. It owns transport commands (`start`, `pause`, `resume`, `stop`, `seek`, `set-loop`, `clear-loop`, `inspect`), lifecycle events (`playback:requested`, `playback:loading`, `playback:ready`, `playback:started`, `playback:paused`, `playback:resumed`, `playback:seeking`, `playback:seeked`, `playback:ended`, `playback:stopped`, route events, bridge hits, and loop events), and redaction-safe diagnostics for session, target, timing, route, loop, requester, observer, bridge, and recent outcome state.
+
+The implementation deliberately keeps raw transport handles in `static/app.js`: the domain host registers a private adapter and receives sanitized snapshots instead of exposing the `<audio>` element, JUCE player, decoded audio buffers, waveform data, or native route handles. Playback targets expose a pseudonymous arrangement-scoped `targetId` plus a hashed per-song `settingsKey` so observers can store local per-song settings without reading raw filenames or paths. Compatibility bridges currently account for `window.playSong`, `window.slopsmith` transport helpers, legacy song events, loop helpers, media snapshots, route switching, and native-route handoff. Fresh audible starts require `authorization: "user-action"`; background requesters can inspect or control only an existing compatible session according to the command conflict policy.
+
+Playback bridge removal gates are: bundled and first-party plugins use native playback dispatch for normal requester/observer workflows; normal play/pause/seek/loop/route smoke runs show no unexpected bridge hits beyond compatibility-only listeners; playback diagnostics distinguish denied, no-target, stale, cancelled, degraded, unavailable, failed, and stopped outcomes; repeated plugin hydration does not duplicate requesters, observers, wrappers, or bridge entries; and exported support snapshots contain no raw song filenames, paths, URLs, media handles, buffers, waveforms, samples, or recordings.
+
 ## Recommended Next Slices
 
-The plugin inventory suggests this migration order after the audio graph/session slice:
+The plugin inventory suggests this migration order after the audio graph/session and playback slices:
 
-1. `playback`: replace `window.playSong`/transport wrapper chains with transport commands, media snapshot access, and lifecycle events.
-2. `jobs`: coordinate conversion, import, update, preview, and studio work with progress, cancellation, retry, and terminal failure semantics.
-3. `note-detection`: formalize note-state providers, calibration diagnostics, audio-input coupling, and hit/miss event flow. Requesters should use `audio-input` for source selection/opening rather than owning device prompts directly.
-4. UI contribution host: migrate navigation, plugin screens, player controls, player panels, overlays, shortcuts, and guided tours under placement/lifecycle policy.
-5. Backend and privileged capability cleanup: migrate routes, plugin lifecycle, media import/export, recording, external services, and subprocess-backed workflows with explicit user confirmation and diagnostics redaction.
+1. `jobs`: coordinate conversion, import, update, preview, and studio work with progress, cancellation, retry, and terminal failure semantics.
+2. `note-detection`: formalize note-state providers, calibration diagnostics, audio-input coupling, and hit/miss event flow. Requesters should use `audio-input` for source selection/opening rather than owning device prompts directly.
+3. UI contribution host: migrate navigation, plugin screens, player controls, player panels, overlays, shortcuts, and guided tours under placement/lifecycle policy.
+4. Backend and privileged capability cleanup: migrate routes, plugin lifecycle, media import/export, recording, external services, and subprocess-backed workflows with explicit user confirmation and diagnostics redaction.
 
 ## UI/UX Migration Path
 
@@ -81,7 +88,6 @@ These domains are planned but should stay out of the runtime graph until a host 
 | Domain | Expected Ownership | Expected Safety | Candidate Scope | Implementation Trigger |
 |--------|--------------------|-----------------|-----------------|------------------------|
 | `stems` | coordinated plugin provider | safe | Stem mute/restore, ownership claims, manual override events, and requester/observer coordination. | Promoted by the audio graph/session slice as a coordinated provider domain. |
-| `playback` | exclusive-owner | safe | Transport, seek, loop, media snapshot, and song lifecycle events. | A focused playback facade PR with command/event tests and legacy transport shim accounting. |
 | `ui.navigation` | exclusive-owner | safe | Navigation contributions and screen-change events. | A UI host PR that owns contribution placement and route/screen semantics. |
 | `ui.plugin-screens` | exclusive-owner | safe | Plugin screen registration and lifecycle. | A screen host PR with mount/unmount and visibility policy. |
 | `settings` | exclusive-owner | sensitive | Plugin settings contribution metadata without settings values. | A settings contribution PR with redaction rules and migration story. |
@@ -144,3 +150,5 @@ A PR that promotes a deferred domain into the runtime graph should include:
 7. Inspector behavior and meaningful labels/tooltips.
 8. Tests for valid metadata, invalid metadata, unsupported versions, disabled participants, command outcomes, and shim hit accounting.
 9. Documentation updates in the safety matrix and capability docs.
+
+Before opening the PR, run the reusable review checklist in [capability-review-preflight.md](capability-review-preflight.md). It records the cross-cutting findings from previous capability reviews so each new slice can focus additional review research on the most recently merged PR.

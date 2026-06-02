@@ -99,6 +99,14 @@ Compatibility-backed monitoring providers should record `sourceMode: "compatibil
 
 New bundled audio code should use the session host or native capability dispatch instead of adding new globals, private stem-state reads, direct analyser ownership, or plugin-specific handshakes. Existing legacy paths remain supported through named compatibility bridges until their migration notes and removal gates are satisfied.
 
+## Playback Control Plane
+
+The playback slice promotes `playback` as a core-owned command domain implemented by [static/capabilities/playback.js](../static/capabilities/playback.js). The public command surface is `inspect`, `start`, `pause`, `resume`, `stop`, `seek`, `set-loop`, `clear-loop`, `register-requester`, and `register-observer`. The domain emits `playback:*` lifecycle events for requests, loading, ready/start/pause/resume/seek/stop/end, route transitions, loop changes, failures/degraded states, superseded sessions, and compatibility bridge hits.
+
+`static/app.js` remains the transport data plane. It registers a private playback adapter that can start songs, pause/resume/stop, seek, and manage loops, but the capability snapshot never exposes the `<audio>` element, JUCE player object, raw audio buffers, native route handles, samples, waveforms, recordings, local file paths, or URL payloads. Exported diagnostics use pseudonymous `target-*` ids for arrangement-scoped identity and hashed `settings-*` keys for per-song plugin settings; the local Capability Inspector may show visible title, artist, and arrangement labels for the active song.
+
+Legacy playback surfaces remain supported during migration and are attributed through bridges such as `playback.window-play-song`, `playback.song-events`, `playback.window-slopsmith-transport`, `playback.loop-api`, and native route handoff records. Fresh audible `start` commands require `authorization: "user-action"`; background requesters may inspect or control an existing session, but user-priority pause/stop decisions block lower-priority automation until a user action resumes or starts a new session.
+
 ## Capability Roles
 
 Use capability declarations for provider/requester/observer relationships:
@@ -126,7 +134,7 @@ Core domains include review metadata in diagnostics:
 - `active`: wired to current Slopsmith behavior and expected to work as an integration point.
 - `diagnostic`: support/inspection-only runtime surfaces.
 
-PR1 includes only the delivered domains listed in [capability-roadmap.md](capability-roadmap.md): `pipeline`, `diagnostics`, and `library`. The follow-up audio graph/session slice promotes `audio-mix`, `audio-input`, `audio-monitoring`, and a coordinated `stems` surface. Playback, backend routes, app UI, settings, visualization, note-detection, and other hardware-facing domains remain documented in the roadmap and safety matrix until their own host workflow/provider slice exists.
+PR1 includes only the delivered domains listed in [capability-roadmap.md](capability-roadmap.md): `pipeline`, `diagnostics`, and `library`. The follow-up audio graph/session slice promotes `audio-mix`, `audio-input`, `audio-monitoring`, and a coordinated `stems` surface. The playback slice promotes `playback` as an active transport control plane. Backend routes, app UI, settings, visualization, note-detection, and other hardware-facing domains remain documented in the roadmap and safety matrix until their own host workflow/provider slice exists.
 
 Capability metadata is versioned by the `capability-pipelines.v1` standard. Invalid roles, commands, operations, requests, observes, emits, events, owner kinds, compatibility modes, ownership policies, safety classes, or version fields are excluded from the capability graph and surfaced through `capability_validation_warnings`; legacy plugin fields continue to load through their existing app paths. Plugins that declare a future `capability-pipelines` version are reported through `capability_unsupported_versions` and their runtime handlers are marked incompatible.
 
@@ -174,13 +182,13 @@ The compatibility ownership vocabulary remains:
 - `privileged`: command execution needs an explicit enforcement plan before shipping.
 - `diagnostic-only`: read-only support and inspector surfaces.
 
-Dispatch results use explicit outcomes: `handled`, `transformed`, `denied`, `failed`, `degraded`, `short-circuited`, `overridden`, `no-owner`, `no-handler`, `unsupported-command`, `incompatible`, `incompatible-version`, `unavailable`, `provider-selection-required`, `user-action-required`, and `stopped`. No-owner, no-handler, unsupported-command, incompatible, incompatible-version, provider-selection-required, and user-action-required decisions are recorded in diagnostics so support bundles explain why nothing happened.
+Dispatch results use explicit outcomes: `handled`, `transformed`, `denied`, `failed`, `degraded`, `short-circuited`, `overridden`, `no-owner`, `no-handler`, `no-target`, `unsupported-command`, `incompatible`, `incompatible-version`, `unavailable`, `provider-selection-required`, `user-action-required`, `stale`, `cancelled`, and `stopped`. No-owner, no-handler, no-target, unsupported-command, incompatible, incompatible-version, provider-selection-required, user-action-required, stale, and cancelled decisions are recorded in diagnostics so support bundles explain why nothing happened.
 
 ## Deferred Core Adapters
 
-Playback, UI placement, settings contributions, visualization, and note-detection are real Slopsmith surfaces, but they are not PR1 capability contracts. Audio mixer/session domains are active as of the audio graph/session slice; plugins should keep using current documented APIs for non-audio areas until the corresponding domain PR ships the host workflow, command/event contract, compatibility shims, diagnostics fields, and tests.
+UI placement, settings contributions, visualization, and note-detection are real Slopsmith surfaces, but they are not PR1 capability contracts. Audio mixer/session domains are active as of the audio graph/session slice, and playback is active as of the playback control-plane slice; plugins should keep using current documented APIs for remaining areas until the corresponding domain PR ships the host workflow, command/event contract, compatibility shims, diagnostics fields, and tests.
 
-The library provider workflow is the PR1 core adapter and is implemented natively as the `library` capability module. Provider refresh, selection, and sync run through `library` owner commands; backend provider registration remains the way providers enter the library registry, and the browser module turns that registry into provider participants. The app event bus continues to dispatch local `window.slopsmith` events for legacy listeners, but PR1 does not mirror playback, navigation, note, visualization, route, or highway events into capability domains.
+The library provider workflow is the PR1 core adapter and is implemented natively as the `library` capability module. Provider refresh, selection, and sync run through `library` owner commands; backend provider registration remains the way providers enter the library registry, and the browser module turns that registry into provider participants. The app event bus continues to dispatch local `window.slopsmith` events for legacy listeners; playback now mirrors song transport, route, seek, and loop lifecycle into `playback`, while navigation, note, visualization, route-only, and highway rendering surfaces remain outside capability domains until their own slices land.
 
 The direct `window.highway` object remains the renderer data plane. Per-frame reads such as notes, chords, beats, and renderer hooks should not be moved behind asynchronous capability commands until there is a dedicated chart/render facade.
 

@@ -83,13 +83,15 @@ def test_capability_runtime_overrides_do_not_mask_claims():
     set_enabled = source[source.index("function setParticipantEnabled("):source.index("function registerParticipants(")]
     reserved = source[source.index("const RESERVED_FUTURE_DOMAINS"):source.index("const RUNTIME_DOMAIN_DEFAULTS")]
 
-    assert "['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stopped'].includes(decision.outcome)" in source
+    assert "['denied', 'failed', 'short-circuited', 'handled', 'degraded', 'overridden', 'no-owner', 'no-handler', 'no-target', 'unsupported-command', 'incompatible', 'incompatible-version', 'unavailable', 'provider-selection-required', 'user-action-required', 'stale', 'cancelled', 'stopped'].includes(decision.outcome)" in source
     assert "if (entry.type !== 'manual') return false;" in source
     assert "type: 'manual'" in source
     assert "_remember(userOverrides" not in set_enabled
     assert "'audio-monitoring'" not in reserved
     assert "'audio-mix'" not in reserved
     assert "'audio-input'" not in reserved
+    assert "'playback'" not in reserved
+    assert "playback:" in source
     assert "'backend.routes'" in reserved
     assert "'backend.routes':" not in source
 
@@ -99,9 +101,10 @@ def test_deferred_runtime_domains_remain_reserved_not_bridged():
     reserved = capability_source[capability_source.index("const RESERVED_FUTURE_DOMAINS"):capability_source.index("const RUNTIME_DOMAIN_DEFAULTS")]
     review = capability_source[capability_source.index("const CORE_DOMAIN_REVIEW"):capability_source.index("const EXPECTED_COMPATIBILITY_SHIMS")]
 
-    for token in ["'playback'", "'ui.navigation'", "'note-detection'", "'visualization'"]:
+    for token in ["'ui.navigation'", "'note-detection'", "'visualization'"]:
         assert token in reserved
         assert token not in review
+    assert "playback:" in review
     assert "chartT: _chartTime(audioT)" not in capability_source
     assert "loop: _loopSnapshot()" not in capability_source
 

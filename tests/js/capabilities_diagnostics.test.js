@@ -50,7 +50,7 @@ test('diagnostics export expected compatibility shim surfaces', () => {
     assert.equal(expected.some(entry => entry.capability === 'jobs'), false);
 });
 
-test('diagnostics exclude deferred and documentation-only future core domains', () => {
+test('diagnostics include active playback but exclude deferred and documentation-only future core domains', () => {
     const window = loadCapabilities();
     const api = window.slopsmith.capabilities;
     api.registerParticipant('playback_probe', {
@@ -71,8 +71,12 @@ test('diagnostics exclude deferred and documentation-only future core domains', 
     api.registerCompatibilityShim({ shimId: 'deferred:viz', source: 'highway_3d', capability: 'visualization', legacySurface: 'highway.setRenderer', status: 'used', hit: true });
     api.registerCompatibilityShim({ shimId: 'deferred:routes', source: 'legacy_routes_plugin', capability: 'backend.routes', legacySurface: 'routes', status: 'used', hit: true });
     const pipelines = api.snapshotDiagnostics().pipelines;
+    const playback = pipelines.find(entry => entry.name === 'playback');
+    assert.ok(playback, 'playback should be part of the active runtime graph when participants register');
+    assert.equal(playback.review.lifecycle, 'active');
+
     const futureDomains = [
-        'playback', 'ui.navigation', 'ui.plugin-screens', 'settings', 'visualization',
+        'ui.navigation', 'ui.plugin-screens', 'settings', 'visualization',
         'note-detection', 'backend.routes', 'ui.player-controls',
         'ui.player-panels', 'ui.player-overlays', 'plugins', 'jobs', 'midi-control',
         'tempo-clock',

@@ -469,7 +469,7 @@ function _handleLibArrowNav(e) {
             // match the click delegate; `playSong` handles decoding
             // internally so decoding here would double-decode and
             // throw `URIError` on filenames containing `%`.
-            playSong(currentTarget.dataset.play);
+            playSong(currentTarget.dataset.play, undefined, { bridge: false });
         } else if (currentTarget.classList.contains('artist-header') ||
                    currentTarget.classList.contains('album-header')) {
             // Header row → toggle the parent open/closed and re-derive
@@ -3915,6 +3915,13 @@ window.jucePlayer = jucePlayer;
         const url = songAudio.url;
         const wasPlaying = isPlaying;
         const pos = audio.currentTime || 0;
+        window.slopsmith?.playback?.recordRouteChange?.({
+            routeKind: 'desktop-native',
+            state: 'switching',
+            preservedTime: true,
+            safeReason: 'desktop audio engine became active',
+            requesterId: 'core.juce-route',
+        });
         // Mark a reroute in progress so the <audio> 'play'/'pause' listeners
         // suppress their song:play / song:pause emissions: the migration is
         // transparent — playback genuinely continues — so plugin state and
@@ -3942,6 +3949,13 @@ window.jucePlayer = jucePlayer;
                     if (!audio.src) { audio.src = url; audio.load(); }
                     try { await audio.play(); } catch (_) { /* ignore */ }
                 }
+                window.slopsmith?.playback?.recordRouteChange?.({
+                    routeKind: 'browser-media',
+                    state: 'degraded',
+                    preservedTime: true,
+                    safeReason: 'desktop audio route rejected track; kept browser media route',
+                    requesterId: 'core.juce-route',
+                });
                 return 'rejected';
             }
             if (_isStale(songAudio)) return 'stale';
@@ -3989,6 +4003,13 @@ window.jucePlayer = jucePlayer;
                 if (typeof apply === 'function') await apply();
             } catch (_) { /* best-effort */ }
             console.log('[juce-reroute] HTML5 → JUCE @', pos.toFixed(2), 's playing=', wasPlaying);
+            window.slopsmith?.playback?.recordRouteChange?.({
+                routeKind: 'desktop-native',
+                state: 'active',
+                preservedTime: true,
+                safeReason: 'desktop audio route active',
+                requesterId: 'core.juce-route',
+            });
             return 'switched';
         } catch (err) {
             // Path lookup, JSON parse, or a JUCE IPC call threw partway through.
@@ -4000,6 +4021,13 @@ window.jucePlayer = jucePlayer;
                 if (!audio.src) { audio.src = url; audio.load(); }
                 try { await audio.play(); } catch (_) { /* ignore */ }
             }
+            window.slopsmith?.playback?.recordRouteChange?.({
+                routeKind: 'browser-media',
+                state: 'degraded',
+                preservedTime: true,
+                safeReason: 'desktop audio route failed; kept browser media route',
+                requesterId: 'core.juce-route',
+            });
             throw err;
         } finally {
             // Clearing audio.src above dispatches a 'pause' event in a later
@@ -4019,6 +4047,13 @@ window.jucePlayer = jucePlayer;
         const url = songAudio.url;
         const wasPlaying = isPlaying;
         const pos = (window.jucePlayer ? jucePlayer.currentTime : 0) || 0;
+        window.slopsmith?.playback?.recordRouteChange?.({
+            routeKind: 'browser-media',
+            state: 'switching',
+            preservedTime: true,
+            safeReason: 'desktop audio engine stopped',
+            requesterId: 'core.juce-route',
+        });
         // Mark a reroute in progress (refcount) so the <audio> 'play' listener
         // suppresses its song:play emission — the migration is transparent and
         // playback genuinely continues, so plugin state must not flip. Held
@@ -4106,6 +4141,13 @@ window.jucePlayer = jucePlayer;
             if (typeof apply === 'function') await apply();
         } catch (_) { /* best-effort */ }
         console.log('[juce-reroute] JUCE → HTML5 @', pos.toFixed(2), 's playing=', wasPlaying);
+        window.slopsmith?.playback?.recordRouteChange?.({
+            routeKind: 'browser-media',
+            state: 'active',
+            preservedTime: true,
+            safeReason: 'browser media route active',
+            requesterId: 'core.juce-route',
+        });
     }
 
     async function _reevaluateJuceRouting() {
@@ -4363,6 +4405,45 @@ function _songEventPayload() {
         perfNow: performance.now(),
     };
 }
+
+function _markPlaybackPaused() {
+    isPlaying = false;
+    setPlayButtonState(false);
+    if (window.slopsmith) {
+        window.slopsmith.isPlaying = false;
+        window.slopsmith.emit('song:pause', _songEventPayload());
+    }
+}
+
+function _markPlaybackResumed() {
+    isPlaying = true;
+    setPlayButtonState(true);
+    if (window.slopsmith) {
+        window.slopsmith.isPlaying = true;
+        const payload = _songEventPayload();
+        window.slopsmith.emit('song:play', payload);
+        window.slopsmith.emit('song:resume', payload);
+    }
+}
+
+function _emitPlaybackStopped(time, screen = 'playback-command') {
+    if (window.slopsmith) window.slopsmith.emit('song:stop', { time: time || 0, screen });
+}
+
+function _waitForSongReady(expectedSeekGen, timeoutMs = 10000) {
+    if (!window.slopsmith || typeof window.slopsmith.on !== 'function') return Promise.resolve(false);
+    return new Promise(resolve => {
+        let timer = null;
+        const done = value => {
+            if (timer !== null) clearTimeout(timer);
+            window.slopsmith.off('song:ready', onReady);
+            resolve(value);
+        };
+        const onReady = () => done(expectedSeekGen == null || expectedSeekGen === _audioSeekGen);
+        window.slopsmith.on('song:ready', onReady);
+        timer = setTimeout(() => done(false), timeoutMs);
+    });
+}
 // Serializes seeks so concurrent callers (e.g. user ⏪ during a loop wrap)
 // don't interleave their from/to reads — each call captures `from` only
 // once the previous seek + emit have completed. The generation token
@@ -4485,15 +4566,19 @@ window.slopsmith = Object.assign(_slopsmithBus, {
     // method bodies resolve them lexically; `getLoop` reads the live
     // loopA/loopB bindings at call time.
     seek(seconds, reason, options) {
+        _recordPlaybackBridge('playback.window-slopsmith-transport', 'window.slopsmith.seek', reason || 'plugin-command');
         return _audioSeek(seconds, reason || 'plugin-command');
     },
     setLoop(a, b, options) {
-        return setLoop(a, b);
+        _recordPlaybackBridge('playback.loop-api', 'window.slopsmith.setLoop', options && options.reason || 'plugin-command');
+        return setLoop(a, b, options);
     },
     clearLoop(options) {
-        clearLoop();
+        _recordPlaybackBridge('playback.loop-api', 'window.slopsmith.clearLoop', options && options.reason || 'plugin-command');
+        clearLoop(options);
     },
     getLoop(options) {
+        _recordPlaybackBridge('playback.loop-api', 'window.slopsmith.getLoop', options && options.reason || 'plugin-command');
         return { loopA, loopB };
     },
 });
@@ -4504,6 +4589,153 @@ if (_slopsmithExisting && _slopsmithExisting !== window.slopsmith) {
         }
     }
 }
+
+function _playbackApi() {
+    return window.slopsmith && window.slopsmith.playback && window.slopsmith.playback.version === 1
+        ? window.slopsmith.playback
+        : null;
+}
+
+function _recordPlaybackBridge(bridgeId, legacySurface, reason) {
+    const playback = _playbackApi();
+    if (!playback || typeof playback.recordBridgeHit !== 'function') return;
+    playback.recordBridgeHit({
+        bridgeId,
+        legacySurface,
+        source: 'core.app',
+        reason: reason || 'legacy playback surface used',
+    });
+}
+
+function _currentPlaybackSnapshot() {
+    const song = window.slopsmith && window.slopsmith.currentSong || null;
+    const time = _audioTime();
+    return {
+        currentTime: Number.isFinite(time) ? time : null,
+        mediaTime: Number.isFinite(time) ? time : null,
+        chartTime: (typeof highway !== 'undefined' && highway && typeof highway.getTime === 'function') ? highway.getTime() : null,
+        duration: Number.isFinite(_audioDuration()) ? _audioDuration() : (song && song.duration) || null,
+        playbackRate: window._juceMode ? (window.jucePlayer && window.jucePlayer._speed || 1) : audio.playbackRate,
+        isPlaying,
+        readiness: song ? 'ready' : 'idle',
+        routeKind: window._juceMode ? 'desktop-native' : 'browser-media',
+        routeState: song || audio.src || window._juceAudioUrl ? 'active' : 'unavailable',
+        loopA,
+        loopB,
+        loop: loopA !== null && loopB !== null ? { startTime: loopA, endTime: loopB, enabled: true, state: 'active' } : { enabled: false, state: 'inactive' },
+        currentSong: song ? {
+            targetId: song.filename ? `target-${String(song.filename).length}-${String(song.arrangementIndex ?? song.arrangement ?? '').length}` : undefined,
+            sourceKind: song.format || 'local',
+            format: song.format || 'unknown',
+            arrangementRef: song.arrangementIndex != null ? `arrangement-${song.arrangementIndex}` : song.arrangement,
+            localDisplay: {
+                title: song.title,
+                artist: song.artist,
+                arrangement: song.arrangementSmartName || song.arrangement,
+            },
+        } : null,
+    };
+}
+
+function _installPlaybackTransportAdapter() {
+    const playback = _playbackApi();
+    if (!playback || typeof playback.registerTransportAdapter !== 'function') return;
+    playback.registerTransportAdapter({
+        inspect() {
+            return _currentPlaybackSnapshot();
+        },
+        async start(args) {
+            const target = args && args.target || {};
+            const filename = target.filename || target.id || target.songKey || (target.localDisplay && target.localDisplay.filename) || currentFilename;
+            if (!filename) throw new Error('No playback filename available');
+            // playSong() and the highway WS decodeURIComponent the filename, so a
+            // raw name with a literal '%' (e.g. "Song 50%.psarc") would throw
+            // URIError. Normalize to the encoded form playSong expects: pass it
+            // through if it already decodes cleanly, otherwise encode it.
+            let playbackFilename = filename;
+            try { decodeURIComponent(playbackFilename); }
+            catch (_) { playbackFilename = encodeURIComponent(filename); }
+            const shouldSeekStart = Number.isFinite(Number(args && args.startTime));
+            const expectedSeekGen = _audioSeekGen + 1;
+            const ready = shouldSeekStart ? _waitForSongReady(expectedSeekGen) : null;
+            await playSong(playbackFilename, args && args.arrangement, { bridge: false });
+            const becameReady = ready ? await ready : true;
+            if (shouldSeekStart && !becameReady) {
+                throw new Error('Playback did not become ready before applying startTime');
+            }
+            if (shouldSeekStart) {
+                await _audioSeek(Number(args.startTime), 'playback-start');
+            }
+            return _currentPlaybackSnapshot();
+        },
+        async pause() {
+            const wasPlaying = isPlaying;
+            if (!window._juceMode && wasPlaying) {
+                isPlaying = false;
+                window.slopsmith.isPlaying = false;
+                audio.pause();
+                _markPlaybackPaused();
+            } else {
+                if (window._juceMode) await jucePlayer.pause();
+                else audio.pause();
+                if (wasPlaying) _markPlaybackPaused();
+                else { isPlaying = false; window.slopsmith.isPlaying = false; setPlayButtonState(false); }
+            }
+            return _currentPlaybackSnapshot();
+        },
+        async resume() {
+            if (window._juceMode) {
+                const started = await jucePlayer.play();
+                if (!started) return { unavailable: true, reason: 'desktop backing transport unavailable' };
+                _markPlaybackResumed();
+            } else {
+                await audio.play();
+                isPlaying = true;
+                window.slopsmith.isPlaying = true;
+                setPlayButtonState(true);
+            }
+            return _currentPlaybackSnapshot();
+        },
+        async stop() {
+            const stopTime = _audioTime();
+            const hadPlayableSong = !!audio.src || !!window._juceAudioUrl || isPlaying;
+            const wasPlaying = isPlaying;
+            if (window._juceMode) await jucePlayer.stop().catch(() => {});
+            if (!window._juceMode && wasPlaying) {
+                isPlaying = false;
+                window.slopsmith.isPlaying = false;
+                audio.pause();
+                _markPlaybackPaused();
+            } else {
+                // HTML5 only. In JUCE mode jucePlayer.stop() already stopped the
+                // engine; the audio.pause() shim would just queue a redundant
+                // jucePlayer.pause() and a duplicate (or, when not playing,
+                // spurious) song:pause.
+                if (!window._juceMode) audio.pause();
+                if (wasPlaying) _markPlaybackPaused();
+                else { isPlaying = false; window.slopsmith.isPlaying = false; setPlayButtonState(false); }
+            }
+            if (hadPlayableSong) _emitPlaybackStopped(stopTime);
+            return _currentPlaybackSnapshot();
+        },
+        seek({ time, reason }) {
+            const seconds = Number(time);
+            if (!Number.isFinite(seconds) || seconds < 0) {
+                throw new Error(`Invalid seek time: ${time}`);
+            }
+            return _audioSeek(seconds, reason || 'playback-command');
+        },
+        setLoop({ startTime, endTime }) {
+            return setLoop(startTime, endTime, { emitTransportEvent: false });
+        },
+        clearLoop() {
+            clearLoop({ emitTransportEvent: false });
+            return _currentPlaybackSnapshot();
+        },
+    });
+}
+
+_installPlaybackTransportAdapter();
 
 // Initialise volume from persisted preference (matches lefty / invertHighway /
 // renderScale / showLyrics convention). The mixer popover (audio-mixer.js)
@@ -4589,8 +4821,11 @@ audio.addEventListener('pause', () => {
 // Abort controller for cancelling pending requests when entering player
 let artAbortController = null;
 
-async function playSong(filename, arrangement) {
+async function playSong(filename, arrangement, options) {
     console.log('playSong called:', filename);
+    if (!options || options.bridge !== false) {
+        _recordPlaybackBridge('playback.window-play-song', 'window.playSong', 'legacy playSong entry point used');
+    }
     window.slopsmith.emit('song:loading', { filename, arrangement: arrangement ?? null });
 
     // Cancel any pending art/metadata requests
@@ -5460,7 +5695,12 @@ function setLoopEnd() {
     updateLoopUI();
 }
 
-function clearLoop() {
+function clearLoop(options) {
+    const { emitTransportEvent = true } = options || {};
+    // playSong() clears the loop on every song load, so only signal a
+    // loop-cleared transport event when a loop was actually active —
+    // otherwise every song switch emits a spurious playback:loop-cleared.
+    const hadLoop = loopA !== null || loopB !== null;
     loopA = null;
     loopB = null;
     document.getElementById('btn-loop-a').className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition';
@@ -5469,6 +5709,13 @@ function clearLoop() {
     document.getElementById('btn-loop-save').classList.add('hidden');
     document.getElementById('loop-label').textContent = '';
     document.getElementById('saved-loops').value = '';
+    if (hadLoop && emitTransportEvent && typeof window !== 'undefined') {
+        window.slopsmith?.playback?.transportEvent?.('loop-cleared', {
+            requesterId: 'core.loop',
+            reason: 'app loop cleared',
+            loop: { enabled: false, state: 'inactive' },
+        });
+    }
 }
 
 // Resync #saved-loops + #btn-loop-delete with the currently-active
@@ -5504,7 +5751,8 @@ function _syncSavedLoopSelection() {
 // (JUCE clamp / HTML5 snap > 50ms from A). On false, loopA/loopB are NOT
 // committed and the UI is not painted — the prior loop (if any) stays
 // active. Throws on invalid inputs.
-async function setLoop(a, b) {
+async function setLoop(a, b, options) {
+    const { emitTransportEvent = true } = options || {};
     const aNum = Number(a);
     const bNum = Number(b);
     if (!Number.isFinite(aNum) || !Number.isFinite(bNum) || bNum <= aNum) {
@@ -5525,6 +5773,9 @@ async function setLoop(a, b) {
     // the dropdown can stay on a stale selection and deleteSelectedLoop
     // would target the wrong record.
     _syncSavedLoopSelection();
+    if (emitTransportEvent && typeof window !== 'undefined') {
+        window.slopsmith?.playback?.transportEvent?.('loop-set', { requesterId: 'core.loop', loopA, loopB, loop: { startTime: loopA, endTime: loopB, enabled: true, state: 'active' } });
+    }
     return true;
 }
 
@@ -6597,7 +6848,7 @@ async function syncLibrarySong(providerId, songId, options = {}) {
     if (!providerId || !songId) return;
     const currentState = _librarySyncState(providerId, songId);
     if (currentState && currentState.status === 'synced' && currentState.localFilename) {
-        if (playWhenReady) playSong(encodeURIComponent(currentState.localFilename));
+        if (playWhenReady) playSong(encodeURIComponent(currentState.localFilename), undefined, { bridge: false });
         return currentState.result || { filename: currentState.localFilename };
     }
     if (currentState && currentState.status === 'syncing') return null;
@@ -6627,7 +6878,7 @@ async function syncLibrarySong(providerId, songId, options = {}) {
         _tuningNames = null;
         _libEpoch++;
         await loadLibrary(0);
-        if (playWhenReady && localFilename) playSong(encodeURIComponent(localFilename));
+        if (playWhenReady && localFilename) playSong(encodeURIComponent(localFilename), undefined, { bridge: false });
         return data;
     } catch (error) {
         _setLibrarySyncState(providerId, songId, { status: 'error', message: error.message || 'Unknown error' });
@@ -6706,7 +6957,7 @@ document.addEventListener('click', e => {
     const card = e.target.closest('[data-play]');
     if (card && !e.target.closest('button')) {
         _setLibSelection(card, { focus: false });
-        playSong(card.dataset.play);
+        playSong(card.dataset.play, undefined, { bridge: false });
     }
 });
 

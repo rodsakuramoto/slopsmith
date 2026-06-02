@@ -299,10 +299,58 @@ The Stems plugin remains the provider/owner of actual stem playback state. `core
 }
 ```
 
+## Playback Requester And Observer
+
+Plugins that need to inspect or coordinate song transport should declare `playback` requester/observer intent and use the capability dispatch surface instead of wrapping `window.playSong` or scraping the `<audio>` element. Raw media handles stay private to core; diagnostics expose only pseudonymous targets, sanitized timing, route, loop, requester, observer, and recent outcome summaries.
+
+```json
+{
+  "id": "practice_hud",
+  "name": "Practice HUD",
+  "standards": ["capability-pipelines.v1"],
+  "capabilities": {
+    "playback": {
+      "roles": ["requester", "observer"],
+      "requests": ["inspect", "pause", "resume", "seek", "set-loop", "clear-loop"],
+      "observes": ["ready", "started", "paused", "resumed", "seeking", "seeked", "stopped", "loop-set", "loop-cleared"],
+      "mode": "active",
+      "compatibility": "shim-allowed",
+      "ownership": "requester-only",
+      "safety": "safe",
+      "version": 1
+    }
+  }
+}
+```
+
+Fresh audible starts require a user action. Background plugins should call `inspect` first and attach to an existing compatible session; if a plugin needs to offer a play/start action, wire it to a visible user gesture and pass `authorization: "user-action"`.
+
+```js
+const api = window.slopsmith.capabilities;
+
+const state = await api.dispatch({
+  capability: 'playback',
+  command: 'inspect',
+  source: 'practice_hud',
+  args: {},
+});
+
+if (state.status !== 'idle') {
+  await api.dispatch({
+    capability: 'playback',
+    command: 'seek',
+    source: 'practice_hud',
+    args: { time: 42.0, reason: 'practice segment jump' },
+  });
+}
+```
+
+During migration, legacy uses of `window.playSong`, `song:*` events, `window.slopsmith.seek`, and loop helpers remain available and are recorded as playback bridge hits. Treat bridge hits as migration telemetry: native capability requests should eventually cover normal plugin workflows so unexpected legacy hits disappear from diagnostics.
+
 ## Future Expansion Domains
 
 Some domain names are reserved for expected future contracts, but they are not registered in the runtime graph yet. For example, `ui.player-panels` is documented as a likely panel-host surface, but Slopsmith does not currently expose a capability command for panel contributions. See [capability-roadmap.md](capability-roadmap.md) for the PR1 domain set and deferred-domain checklist.
 
-Plugins should not declare future expansion domains until the corresponding host workflow ships. For PR1 integrations, prefer active domains such as `library`; after the audio graph/session slice, audio participants may also declare `audio-mix`, `audio-input`, `audio-monitoring`, or `stems` intent matching the recipes above.
+Plugins should not declare future expansion domains until the corresponding host workflow ships. For current integrations, prefer active domains such as `library`, `playback`, `audio-mix`, `audio-input`, `audio-monitoring`, or `stems` intent matching the recipes above.
 
 Invalid capability metadata is excluded from the capability graph, but legacy manifest fields still load through their existing app paths. The `library` workflow is native in PR1 and does not use compatibility shim metadata. Unsupported `capability-pipelines` versions are reported as incompatible and their runtime handlers must not execute.

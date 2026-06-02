@@ -1466,6 +1466,60 @@
         catch (_) { return null; }
     }
 
+    function playbackSnapshot() {
+        const api = window.slopsmith && window.slopsmith.playback;
+        if (!api || typeof api.snapshot !== 'function') return null;
+        try { return api.snapshot({ exportMode: 'local-inspector' }); }
+        catch (_) { return null; }
+    }
+
+    function playbackSupportPanel(playbackData) {
+        if (!playbackData || !playbackData.state) return '';
+        const state = playbackData.state || {};
+        const session = state.sessionId || 'unknown';
+        const target = state.target || {};
+        const display = target.localDisplay || {};
+        const media = state.media || {};
+        const route = state.route || media.route || {};
+        const loop = state.loop || media.loop || {};
+        const participants = Array.isArray(playbackData.participants) ? playbackData.participants : [];
+        const bridges = Array.isArray(playbackData.bridges) ? playbackData.bridges : [];
+        const recentOutcomes = playbackData.history && playbackData.history.current && Array.isArray(playbackData.history.current.recentOutcomes)
+            ? playbackData.history.current.recentOutcomes.slice(-6) : [];
+        const recentEvents = playbackData.history && playbackData.history.current && Array.isArray(playbackData.history.current.lifecycleEvents)
+            ? playbackData.history.current.lifecycleEvents.slice(-6) : [];
+        const bridgeHits = bridges.reduce((sum, bridge) => sum + Number(bridge.hitCount || 0), 0);
+        const label = [display.title, display.artist].filter(Boolean).join(' - ') || target.targetId || 'none';
+        const timeLabel = media.currentTime == null ? 'unknown' : `${Number(media.currentTime).toFixed(2)}s`;
+        const durationLabel = media.duration == null ? 'unknown' : `${Number(media.duration).toFixed(2)}s`;
+        return `<section class="mb-4 rounded-lg border border-gray-800 bg-dark-900/40 p-4" data-playback-support>
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <h3 class="text-sm font-semibold text-white">Playback</h3>
+                    <p class="mt-1 text-xs text-gray-500">Transport session, route, loop, requester, bridge, and recent outcome state from the playback host.</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    ${pill(`state: ${state.state || 'unknown'}`, state.state === 'playing' || state.state === 'ready' ? 'clean' : (state.state === 'failed' || state.state === 'unavailable' ? 'conflict' : 'muted'))}
+                    ${pill(`route: ${route.routeKind || 'unknown'}`, route.state === 'active' ? 'clean' : (route.state === 'degraded' ? 'warning' : 'muted'))}
+                    ${pill(loop && loop.enabled ? 'loop: active' : 'loop: inactive', loop && loop.enabled ? 'used' : 'muted')}
+                    ${pill(`${participants.length} participant${participants.length === 1 ? '' : 's'}`, participants.length ? 'info' : 'muted')}
+                    ${pill(`${bridgeHits} bridge hit${bridgeHits === 1 ? '' : 's'}`, bridgeHits ? 'used' : 'muted')}
+                </div>
+            </div>
+            <div class="mt-3 grid gap-2 text-xs text-gray-400 md:grid-cols-2">
+                <div data-playback-session>Session: ${text(session)}</div>
+                <div data-playback-target>Target: ${text(label)}</div>
+                <div data-playback-time>Time: ${text(timeLabel)} / ${text(durationLabel)}</div>
+                <div data-playback-loop>Loop: ${loop && loop.enabled ? `${text(loop.startTime)}-${text(loop.endTime)} (${text(loop.state || 'active')})` : 'none'}</div>
+                <div data-playback-route>Route: ${text(route.routeKind || 'unknown')} (${text(route.state || 'unknown')})${route.safeReason ? ` - ${text(route.safeReason)}` : ''}</div>
+                <div data-playback-participants>Participants: ${participants.map(participant => text(participant.requesterId || participant.observerId || participant.role || 'unknown')).join(', ') || 'none'}</div>
+                <div data-playback-bridges>Bridges: ${bridges.map(bridge => `${text(bridge.bridgeId)}:${text(bridge.hitCount || 0)}`).join(', ') || 'none'}</div>
+                <div data-playback-outcomes>Outcomes: ${recentOutcomes.map(outcome => `${text(outcome.operation)}:${text(outcome.status || outcome.outcome)}`).join(', ') || 'none'}</div>
+                <div data-playback-events class="md:col-span-2">Events: ${recentEvents.map(event => `${text(event.event)}:${text(event.state)}`).join(', ') || 'none'}</div>
+            </div>
+        </section>`;
+    }
+
     function audioDomainSupportPanel(audioData) {
         if (!audioData || !audioData.domains) return '';
         const mix = audioData.domains['audio-mix'] || {};
@@ -1587,8 +1641,9 @@
         const compatibilityShims = Array.isArray(data.compatibilityShims) ? data.compatibilityShims : [];
         if (summary) summary.innerHTML = summaryDashboard(data, pipelines, compatibilityShims);
         destroyActiveGraphs();
+        const playbackPanel = playbackSupportPanel(playbackSnapshot());
         const audioPanel = audioDomainSupportPanel(audioSessionSnapshot());
-        content.innerHTML = audioPanel + (selected
+        content.innerHTML = playbackPanel + audioPanel + (selected
             ? visible.map(pipeline => domainGraphView(pipeline, shimsByCapability.get(pipeline.name) || [], expectedShimsByCapability.get(pipeline.name) || [])).join('')
             : groupedPipelines(visible).map(entry => pipelineGroupSection(entry, shimsByCapability, expectedShimsByCapability, { defaultExpanded: false })).join(''))
             || '<div class="text-gray-500 text-sm">No capability domains registered.</div>';

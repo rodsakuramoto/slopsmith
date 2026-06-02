@@ -13,6 +13,7 @@ Core domains also have a review scope. **Active contract** domains are wired to 
 | audio-input | provider-coordinator | sensitive | inspect, list-sources, register-source, unregister-source, select-source, open-source, close-source | source.enumerate, source.describe, source.open, source.close | Source/device identity is redacted or pseudonymized per diagnostics snapshot. Inspect/list/select are prompt-free; `source.enumerate` runs only when explicitly requested; `open-source` is the permission boundary and records denied/unavailable/failed/incompatible/no-owner/no-handler outcomes without exposing live handles, buffers, samples, or raw device labels. |
 | audio-monitoring | provider-coordinator | sensitive | inspect, list-providers, register-provider, unregister-provider, select-provider, start, stop, set-direct-monitor | monitoring.start, monitoring.stop, monitoring.status, monitoring.set-direct-monitor | Inspect/list/select/status are prompt-free. Fresh monitoring start requires explicit user action; background requesters may only attach to an active compatible session. Outcomes distinguish handled, stopped, denied, unavailable, degraded, failed, no-owner, no-handler, unsupported-command, incompatible, incompatible-version, provider-selection-required, and user-action-required. Diagnostics redact raw device labels, hardware ids, paths, secrets, live handles, buffers, samples, waveforms, and recordings. |
 | stems | coordinator plus plugin provider | safe | inspect, mute, restore | stem.get-state, stem.apply-automation, stem.restore-automation | Core coordinates claims/overrides; the active Stems provider owns actual stem state/playback. |
+| playback | exclusive-owner | safe | inspect, start, pause, resume, stop, seek, set-loop, clear-loop, register-requester, register-observer | none | Core owns the transport control plane while `app.js` keeps raw media handles private. Fresh audible starts require explicit user action. Diagnostics expose pseudonymous targets, sanitized route/timing/loop state, requester/observer summaries, bridge hits, bounded recent outcomes, and no audio elements, native handles, decoded buffers, samples, waveforms, or recordings. |
 
 Privileged commands are roadmap-only until they have: a visible user confirmation path, diagnostics redaction rules, failure recovery, and tests that prove disabled or incompatible participants cannot execute handlers.
 
@@ -22,7 +23,6 @@ These domains are expected future capability contracts, not current runtime grap
 
 | Domain | Expected Ownership Policy | Expected Safety Class | Candidate Commands | Review Gate |
 |--------|---------------------------|-----------------------|--------------------|-------------|
-| playback | exclusive-owner | safe | play, pause, stop, seek, snapshot, audio-element, loop-set, loop-clear, loop-get | Needs focused transport command/event tests and legacy shim accounting. |
 | ui.navigation | exclusive-owner | safe | register-contribution, mount, unmount, set-visible, reorder-by-policy, navigate, inspect | Needs a UI host PR with contribution placement and route/screen semantics. |
 | ui.plugin-screens | exclusive-owner | safe | register-contribution, mount, unmount, set-visible, reorder-by-policy, inspect | Needs a screen host PR with mount/unmount and visibility policy. |
 | settings | exclusive-owner | sensitive | register-contribution, mount, unmount, set-visible, reorder-by-policy, inspect | Needs redaction rules and a migration story for settings metadata. |
@@ -38,3 +38,5 @@ These domains are expected future capability contracts, not current runtime grap
 | tempo-clock | multi-provider | safe | register, inspect | Needs a concrete provider and consumer workflow. |
 
 Planned domains should also stay out of the runtime graph until Slopsmith ships the corresponding user-facing workflows.
+
+When promoting a planned domain, use [capability-review-preflight.md](capability-review-preflight.md) before opening the PR. The preflight captures recurring review requirements for identity, redaction, outcome propagation, diagnostics freshness, schema consistency, and teardown.

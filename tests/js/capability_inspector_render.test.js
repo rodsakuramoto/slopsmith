@@ -28,7 +28,7 @@ function makeElement(id) {
     return element;
 }
 
-function loadInspector(snapshot) {
+function loadInspector(snapshot, options = {}) {
     class CustomEvent {
         constructor(type, init = {}) {
             this.type = type;
@@ -62,6 +62,9 @@ function loadInspector(snapshot) {
             capabilities: {
                 snapshotDiagnostics: () => (typeof snapshot === 'function' ? snapshot() : snapshot),
             },
+            playback: options.playbackSnapshot ? {
+                snapshot: () => options.playbackSnapshot,
+            } : undefined,
         },
         navigator: { clipboard: { writeText: async () => {} } },
         document: {
@@ -78,6 +81,38 @@ function loadInspector(snapshot) {
     vm.runInContext(fs.readFileSync(INSPECTOR_JS, 'utf8'), context, { filename: INSPECTOR_JS });
     return { window, elements };
 }
+
+test('capability inspector renders playback session route loop bridges and outcomes', () => {
+    const snapshot = {
+        pipelines: [{ name: 'playback', review: { lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Core playback facade.' }, participants: [{ pluginId: 'core', roles: ['owner'], commands: ['inspect'], events: ['ready'], runtime: true, availability: 'available' }], conflicts: [] }],
+        participants: [{ pluginId: 'core' }],
+        compatibilityShims: [],
+        expectedCompatibilityShims: [],
+    };
+    const playbackSnapshot = {
+        schema: 'slopsmith.playback.diagnostics.v1',
+        state: {
+            sessionId: 'playback-1',
+            state: 'playing',
+            target: { targetId: 'target-abc', localDisplay: { title: 'Song', artist: 'Artist', arrangement: 'Lead' } },
+            media: { currentTime: 12.5, duration: 90, route: { routeKind: 'browser-media', state: 'active' }, loop: { enabled: true, startTime: 10, endTime: 20, state: 'active' } },
+            route: { routeKind: 'browser-media', state: 'active', safeReason: 'browser media route active' },
+            loop: { enabled: true, startTime: 10, endTime: 20, state: 'active' },
+        },
+        participants: [{ requesterId: 'plugin.practice' }, { observerId: 'plugin.hud' }],
+        bridges: [{ bridgeId: 'playback.window-play-song', hitCount: 2 }],
+        history: { current: { recentOutcomes: [{ operation: 'seek', status: 'completed' }], lifecycleEvents: [{ event: 'playback:seeked', state: 'playing' }] } },
+    };
+    const { elements } = loadInspector(snapshot, { playbackSnapshot });
+    const content = elements.get('capability-inspector-content').innerHTML;
+
+    assert.match(content, /data-playback-support/);
+    assert.match(content, /Session: playback-1/);
+    assert.match(content, /Target: Song - Artist/);
+    assert.match(content, /Route: browser-media \(active\)/);
+    assert.match(content, /playback\.window-play-song:2/);
+    assert.match(content, /seek:completed/);
+});
 
 test('capability inspector renders shims inside their capability domain', () => {
     const snapshot = {

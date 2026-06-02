@@ -31,8 +31,10 @@ function extractFunction(src, signature) {
 
 function buildSandbox() {
     const seekCalls = [];
+    const transportEvents = [];
     const sandbox = {
         seekCalls,
+        transportEvents,
         // Mutable state (declared as `var` in eval prelude so it lives on
         // the sandbox global and the extracted functions can read/write).
         // The actual values are set below.
@@ -66,6 +68,13 @@ function buildSandbox() {
         // updateLoopUI references formatTime for the label; we don't
         // assert on the label text in these tests, so a stub is enough.
         formatTime: (s) => String(s),
+        window: {
+            slopsmith: {
+                playback: {
+                    transportEvent: (...args) => transportEvents.push(args),
+                },
+            },
+        },
     };
     vm.createContext(sandbox);
     return sandbox;
@@ -77,7 +86,7 @@ function loadFunctions(sandbox, src) {
     const code = `
         var loopA = null;
         var loopB = null;
-        ${extractFunction(src, 'function clearLoop()')}
+        ${extractFunction(src, 'function clearLoop(')}
         ${extractFunction(src, 'function _syncSavedLoopSelection()')}
         ${extractFunction(src, 'async function setLoop(')}
         ${extractFunction(src, 'function updateLoopUI()')}
@@ -180,6 +189,26 @@ test('clearLoop resets loopA/loopB to null', async () => {
     const { loopA, loopB } = sandbox.__getLoop();
     assert.equal(loopA, null);
     assert.equal(loopB, null);
+});
+
+test('loop helpers emit transport snapshots by default and can suppress adapter echoes', async () => {
+    const src = fs.readFileSync(APP_JS, 'utf8');
+    const sandbox = buildSandbox();
+    loadFunctions(sandbox, src);
+
+    await sandbox.__setLoop(5, 10);
+    sandbox.__clearLoop();
+
+    assert.equal(sandbox.transportEvents.length, 2);
+    assert.equal(sandbox.transportEvents[0][0], 'loop-set');
+    assert.equal(JSON.stringify(sandbox.transportEvents[0][1].loop), JSON.stringify({ startTime: 5, endTime: 10, enabled: true, state: 'active' }));
+    assert.equal(sandbox.transportEvents[1][0], 'loop-cleared');
+    assert.equal(JSON.stringify(sandbox.transportEvents[1][1].loop), JSON.stringify({ enabled: false, state: 'inactive' }));
+
+    sandbox.transportEvents.length = 0;
+    await sandbox.__setLoop(7, 11, { emitTransportEvent: false });
+    sandbox.__clearLoop({ emitTransportEvent: false });
+    assert.equal(sandbox.transportEvents.length, 0);
 });
 
 test('window.slopsmith API surface declares setLoop/clearLoop/getLoop', () => {
