@@ -3308,6 +3308,15 @@ function createHighway() {
         },
         getNotes() { return notes; },
         getChords() { return chords; },
+        // Difficulty-filtered variants of getNotes()/getChords(). Returns the
+        // master-difficulty-filtered arrays when the current song has phrase-level
+        // data (i.e. the mastery slider is active). For songs with a single
+        // difficulty level the slider is disabled and _filteredNotes is null —
+        // these fall through to the raw arrays, the same as getNotes()/getChords().
+        // Plugins that score or analyse only the notes the player is currently
+        // expected to play should prefer these over getNotes()/getChords(). Read-only.
+        getFilteredNotes()  { return _filteredNotes  !== null ? _filteredNotes  : notes;  },
+        getFilteredChords() { return _filteredChords !== null ? _filteredChords : chords; },
         // Live reference to the chord-template lookup table —
         // `getChords()[i].id` is an index into this array. Each
         // template carries `{ name, fingers, frets }`:
