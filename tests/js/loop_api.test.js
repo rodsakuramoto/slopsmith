@@ -16,7 +16,18 @@ const APP_JS = path.join(__dirname, '..', '..', 'static', 'app.js');
 function extractFunction(src, signature) {
     const start = src.indexOf(signature);
     if (start === -1) throw new Error(`extractFunction: '${signature}' not found in app.js`);
-    const openBrace = src.indexOf('{', start);
+    let scan = start + signature.length;
+    if (src[scan] === '(') {
+        let parenDepth = 1;
+        scan++;
+        while (scan < src.length && parenDepth > 0) {
+            const ch = src[scan];
+            if (ch === '(') parenDepth++;
+            else if (ch === ')') parenDepth--;
+            scan++;
+        }
+    }
+    const openBrace = src.indexOf('{', scan);
     let depth = 1;
     let i = openBrace + 1;
     while (i < src.length && depth > 0) {
@@ -31,9 +42,11 @@ function extractFunction(src, signature) {
 
 function buildSandbox() {
     const seekCalls = [];
+    const sectionPracticeModeCalls = [];
     const transportEvents = [];
     const sandbox = {
         seekCalls,
+        sectionPracticeModeCalls,
         transportEvents,
         // Mutable state (declared as `var` in eval prelude so it lives on
         // the sandbox global and the extracted functions can read/write).
@@ -86,6 +99,14 @@ function loadFunctions(sandbox, src) {
     const code = `
         var loopA = null;
         var loopB = null;
+        var _loopMutationGen = 0;
+        var _sectionPracticeSelected = -1;
+        var _sectionPracticeWholeSection = false;
+        var _sectionPracticeSavedPartIndex = 0;
+        function _setSectionPracticeMode(on, opts) {
+            sectionPracticeModeCalls.push({ on, opts: opts || {} });
+        }
+        function _updateSectionPracticeHighlight(ct) {}
         ${extractFunction(src, 'function clearLoop(')}
         ${extractFunction(src, 'function _syncSavedLoopSelection()')}
         ${extractFunction(src, 'async function setLoop(')}
@@ -189,6 +210,10 @@ test('clearLoop resets loopA/loopB to null', async () => {
     const { loopA, loopB } = sandbox.__getLoop();
     assert.equal(loopA, null);
     assert.equal(loopB, null);
+    assert.equal(sandbox.sectionPracticeModeCalls.length, 1);
+    assert.equal(sandbox.sectionPracticeModeCalls[0].on, false);
+    // Field-wise: vm-context objects break deepStrictEqual across realms.
+    assert.equal(sandbox.sectionPracticeModeCalls[0].opts.skipClearLoop, true);
 });
 
 test('loop helpers emit transport snapshots by default and can suppress adapter echoes', async () => {

@@ -16,14 +16,25 @@ const vm = require('node:vm');
 
 const APP_JS = path.join(__dirname, '..', '..', 'static', 'app.js');
 
-// Pull the source of `async function startCountIn() { ... }` by finding
-// the declaration and brace-matching to the closing brace. Brittle by
-// design: if the function gets renamed or restructured, the test fails
-// loudly with "function not found" rather than passing on stale code.
+// Pull a function body by declaration prefix (e.g. `async function startCountIn`)
+// and brace-matching to the closing brace. Skips an optional `( ... )` param
+// list so `startCountIn(opts = {})` and `startCountIn()` both match the same
+// prefix. Brittle by design: rename/restructure fails loudly, not silently.
 function extractFunction(src, signature) {
     const start = src.indexOf(signature);
     if (start === -1) throw new Error(`extractFunction: '${signature}' not found in app.js`);
-    const openBrace = src.indexOf('{', start);
+    let scan = start + signature.length;
+    if (src[scan] === '(') {
+        let parenDepth = 1;
+        scan++;
+        while (scan < src.length && parenDepth > 0) {
+            const ch = src[scan];
+            if (ch === '(') parenDepth++;
+            else if (ch === ')') parenDepth--;
+            scan++;
+        }
+    }
+    const openBrace = src.indexOf('{', scan);
     let depth = 1;
     let i = openBrace + 1;
     while (i < src.length && depth > 0) {
@@ -104,7 +115,7 @@ function buildSandbox() {
 
 test('loop:restart fires once when wrap path runs', async () => {
     const src = fs.readFileSync(APP_JS, 'utf8');
-    const startCountInSrc = extractFunction(src, 'async function startCountIn()');
+    const startCountInSrc = extractFunction(src, 'async function startCountIn');
 
     // Sanity check: the change under test is present at all. Catches
     // accidental revert before we even run the behavior assertion.
@@ -156,7 +167,7 @@ test('loop:restart aborts when seek lands far from loopA (JUCE rollback)', async
     // wrap handler must abort instead of running beginCount on the wrong
     // position and emitting a misleading loop:restart.
     const src = fs.readFileSync(APP_JS, 'utf8');
-    const startCountInSrc = extractFunction(src, 'async function startCountIn()');
+    const startCountInSrc = extractFunction(src, 'async function startCountIn');
 
     const sandbox = buildSandbox();
     // Override _audioSeek to mimic JUCE rollback: completed but to=from,
@@ -192,7 +203,7 @@ test('count-in cancellation token bails delayed callbacks (rewindStep + tick)', 
     // of timer cancellation is out of scope for the static extractor; this
     // verifies the contract is wired into the source.
     const src = fs.readFileSync(APP_JS, 'utf8');
-    const fn = extractFunction(src, 'async function startCountIn()');
+    const fn = extractFunction(src, 'async function startCountIn');
     // Captures gen at entry
     assert.match(fn, /const gen = _countInGen/, 'startCountIn must capture _countInGen at entry');
     // Each delayed callback bails on mismatch
@@ -204,26 +215,29 @@ test('count-in cancellation token bails delayed callbacks (rewindStep + tick)', 
 });
 
 test('loop:restart fires after highway.setTime, before beginCount', () => {
-    // Source-order assertion: the emit must sit between the chartTime
-    // reset and beginCount() so plugins capture the wrap at the same
-    // moment chartTime jumps back, not after the count-in. The argument
-    // to highway.setTime can be `loopA` or `r.to` (post-seek verified
-    // position, when the caller has it) — both are valid.
+    // Source-order assertion on the A-B wrap path only. Section-practice
+    // `opts.immediate` also emits loop:restart but is a separate entry path;
+    // the wrap handler lives inside the `_audioSeek(loopA, 'loop-wrap')` then.
     const src = fs.readFileSync(APP_JS, 'utf8');
-    const fn = extractFunction(src, 'async function startCountIn()');
-    // Grab the LAST highway.setTime in startCountIn — the rewindStep
-    // animation also calls setTime each frame, but the one we care about
-    // is the post-seek call right before the loop:restart emit.
-    const setTimeMatches = [...fn.matchAll(/highway\.setTime\(\s*[^)]+\)/g)];
-    const setTimeIdx = setTimeMatches.length ? setTimeMatches[setTimeMatches.length - 1].index : -1;
-    const emitIdx = fn.search(/window\.slopsmith\.emit\(\s*['"]loop:restart['"]/);
-    // Match the *call* `beginCount(...)`, not the inner `function beginCount()`
-    // declaration that's hoisted alongside it inside startCountIn.
-    const beginCallMatch = fn.match(/(?<!function\s)\bbeginCount\s*\(/);
-    const beginCallIdx = beginCallMatch ? beginCallMatch.index : -1;
-    assert.ok(setTimeIdx !== -1, 'highway.setTime call not found');
-    assert.ok(emitIdx !== -1, 'loop:restart emit not found');
-    assert.ok(beginCallIdx !== -1, 'beginCount() call not found');
-    assert.ok(setTimeIdx < emitIdx, 'emit must come after highway.setTime');
-    assert.ok(emitIdx < beginCallIdx, 'emit must come before beginCount()');
+    const fn = extractFunction(src, 'async function startCountIn');
+    const wrapMarker = "_audioSeek(loopA, 'loop-wrap')";
+    const wrapStart = fn.indexOf(wrapMarker);
+    assert.ok(wrapStart !== -1, 'loop-wrap _audioSeek call not found in startCountIn');
+    const wrapSlice = fn.slice(wrapStart);
+
+    const setTimeMatches = [...wrapSlice.matchAll(/highway\.setTime\(\s*[^)]+\)/g)];
+    const setTimeIdx = setTimeMatches.length
+        ? wrapStart + setTimeMatches[setTimeMatches.length - 1].index
+        : -1;
+    const emitRel = wrapSlice.search(/window\.slopsmith\.emit\(\s*['"]loop:restart['"]/);
+    const emitIdx = emitRel === -1 ? -1 : wrapStart + emitRel;
+    const afterEmit = emitIdx === -1 ? '' : fn.slice(emitIdx);
+    const beginCallMatch = afterEmit.match(/(?<!function\s)\bbeginCount\s*\(/);
+    const beginCallIdx = beginCallMatch ? emitIdx + beginCallMatch.index : -1;
+
+    assert.ok(setTimeIdx !== -1, 'post-seek highway.setTime not found on wrap path');
+    assert.ok(emitIdx !== -1, 'loop:restart emit not found on wrap path');
+    assert.ok(beginCallIdx !== -1, 'beginCount() call not found after wrap emit');
+    assert.ok(setTimeIdx < emitIdx, 'wrap emit must come after highway.setTime');
+    assert.ok(emitIdx < beginCallIdx, 'wrap emit must come before beginCount()');
 });

@@ -32,7 +32,209 @@ html { scroll-behavior: smooth; }
    the bottom controls bar would silently sit underneath the canvas
    and become click-through invisible.
    Folds in the fix from byrongamatos/slopsmith#99. */
-#player-controls { position: relative; z-index: 10; }
+#player-controls { position: relative; z-index: 10; margin-top: auto; }
+
+#section-practice-bar {
+    flex: 0 0 100%;
+    width: 100%;
+    max-width: 100%;
+    order: -1;
+    pointer-events: auto !important;
+    padding: 4px 0 8px;
+    margin: 0 0 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    min-height: 28px;
+    background: rgba(12, 12, 22, 0.98);
+}
+
+#section-practice-bar.section-practice-bar--hidden {
+    display: none !important;
+}
+
+#section-practice-bar.section-practice-bar--mode-on {
+    display: flex !important;
+}
+
+.section-practice-mode-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+    flex-shrink: 0;
+    font-size: 11px;
+    color: #9ca3af;
+}
+
+.section-practice-mode-wrap input[type="checkbox"] {
+    accent-color: #4080e0;
+}
+
+.section-practice-mode-text {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.section-practice-mode-wrap:has(input:checked) .section-practice-mode-text {
+    color: #93c5fd;
+}
+
+.section-practice-controls-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+    width: 100%;
+}
+
+.section-practice-chips-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+}
+
+.section-practice-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+    width: 100%;
+    min-width: 0;
+}
+
+.section-practice-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #6b7280;
+    flex-shrink: 0;
+}
+
+.section-practice-scroll {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.section-practice-chip {
+    font-size: 11px;
+    line-height: 1.2;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: #d1d5db;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+    flex-shrink: 0;
+}
+
+.section-practice-chip:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.section-practice-chip.section-practice-chip--intro:not(.is-selected):not(.is-playing) {
+    background: rgba(96, 165, 250, 0.1);
+    border-color: rgba(96, 165, 250, 0.28);
+    color: #93c5fd;
+}
+
+.section-practice-chip.section-practice-chip--verse:not(.is-selected):not(.is-playing) {
+    background: rgba(52, 211, 153, 0.1);
+    border-color: rgba(52, 211, 153, 0.28);
+    color: #6ee7b7;
+}
+
+.section-practice-chip.section-practice-chip--chorus:not(.is-selected):not(.is-playing) {
+    background: rgba(251, 191, 36, 0.1);
+    border-color: rgba(251, 191, 36, 0.3);
+    color: #fcd34d;
+}
+
+.section-practice-chip.section-practice-chip--bridge:not(.is-selected):not(.is-playing) {
+    background: rgba(167, 139, 250, 0.1);
+    border-color: rgba(167, 139, 250, 0.3);
+    color: #c4b5fd;
+}
+
+.section-practice-chip.section-practice-chip--solo:not(.is-selected):not(.is-playing) {
+    background: rgba(244, 114, 182, 0.1);
+    border-color: rgba(244, 114, 182, 0.3);
+    color: #f9a8d4;
+}
+
+.section-practice-chip.section-practice-chip--riff:not(.is-selected):not(.is-playing) {
+    background: rgba(163, 230, 53, 0.12);
+    border-color: rgba(163, 230, 53, 0.3);
+    color: #bef264;
+}
+
+.section-practice-chip.section-practice-chip--outro:not(.is-selected):not(.is-playing) {
+    background: rgba(148, 163, 184, 0.12);
+    border-color: rgba(148, 163, 184, 0.32);
+    color: #cbd5e1;
+}
+
+.section-practice-chip.is-playing {
+    border-color: rgba(64, 128, 224, 0.55);
+    box-shadow: 0 0 0 1px rgba(64, 128, 224, 0.25);
+}
+
+.section-practice-chip.is-selected {
+    background: rgba(64, 128, 224, 0.22);
+    border-color: rgba(96, 165, 250, 0.55);
+    color: #e0f2fe;
+}
+
+.section-practice-chip.is-playing.is-selected {
+    background: rgba(64, 128, 224, 0.32);
+}
+
+.section-practice-piece-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+}
+
+.section-practice-piece-label {
+    font-size: 11px;
+    color: #9ca3af;
+    min-width: 5.5rem;
+    flex-shrink: 0;
+}
+
+.section-practice-whole-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: #9ca3af;
+    cursor: pointer;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.section-practice-whole-wrap input[type="checkbox"] {
+    accent-color: #4080e0;
+}
+
+.section-practice-whole-text {
+    font-weight: 500;
+}
 
 .button-icon-svg {
     width: 14px;
