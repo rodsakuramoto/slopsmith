@@ -264,6 +264,53 @@ def test_progress_callback_terminates_at_done(tmp_path: Path, monkeypatch):
     assert stages.index("extracting") < stages.index("packing") < stages.index("done")
 
 
+def test_split_during_conversion_uses_decoded_wav_without_packing_it(
+    tmp_path: Path, monkeypatch
+):
+    _require_fixture()
+    _apply_pony_stubs(monkeypatch)
+    observed = {}
+
+    def _stub_wem_to_wav(_wem_path, out_wav: Path) -> None:
+        out_wav.parent.mkdir(parents=True, exist_ok=True)
+        out_wav.write_bytes(b"RIFF" + b"\x00" * 256)
+
+    def _stub_encode_ogg(_wav_path: Path, _out_ogg: Path) -> None:
+        raise AssertionError("split_stems should not pre-encode stems/full.ogg")
+
+    def _stub_split(source_dir: Path, _model: str, _progress_cb, _base_frac,
+                    _span_frac, *, transcribe_lyrics=None,
+                    separation_audio: Path | None = None) -> None:
+        assert separation_audio is not None
+        observed["suffix"] = separation_audio.suffix
+        observed["bytes"] = separation_audio.read_bytes()
+        observed["full_ogg_exists"] = (source_dir / "stems" / "full.ogg").exists()
+        vocals = source_dir / "stems" / "vocals.ogg"
+        vocals.write_bytes(b"OggS" + b"\x00" * 256)
+        sloppak_convert._rewrite_stems_manifest(
+            source_dir,
+            [{"id": "vocals", "file": "stems/vocals.ogg", "default": "on"}],
+            stem_separation={"engine": "demucs", "model": "test", "version": "1.0.0"},
+        )
+
+    monkeypatch.setattr(sloppak_convert, "_wem_to_wav", _stub_wem_to_wav)
+    monkeypatch.setattr(sloppak_convert, "_encode_ogg", _stub_encode_ogg)
+    monkeypatch.setattr(sloppak_convert, "_split_in_dir", _stub_split)
+
+    out = tmp_path / "split.sloppak"
+    convert_psarc_to_sloppak(FIXTURE, out, split_stems=True)
+
+    assert observed == {
+        "suffix": ".wav",
+        "bytes": b"RIFF" + b"\x00" * 256,
+        "full_ogg_exists": False,
+    }
+    with zipfile.ZipFile(out) as zf:
+        assert "stems/vocals.ogg" in zf.namelist()
+        assert "stems/full.ogg" not in zf.namelist()
+        assert "full.wav" not in zf.namelist()
+
+
 # ── Atomic-write contract (issue topkoa/slopsmith-plugin-sloppak-converter#25) ─
 
 

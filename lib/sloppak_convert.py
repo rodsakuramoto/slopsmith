@@ -74,21 +74,27 @@ def _arrangement_id(name: str, used: set[str]) -> str:
     return candidate
 
 
-def _wem_to_ogg(wem_path: str, out_ogg: Path) -> None:
+def _wem_to_wav(wem_path: str, out_wav: Path) -> None:
     vgmstream = _vgmstream_cmd()
-    ffmpeg = _ffmpeg_cmd()
     if not vgmstream:
         raise RuntimeError("vgmstream-cli not found on PATH")
+
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([vgmstream, "-o", str(out_wav), wem_path], capture_output=True)
+    if r.returncode != 0 or not out_wav.exists() or out_wav.stat().st_size < 100:
+        raise RuntimeError(
+            f"vgmstream-cli failed: {r.stderr.decode(errors='replace')}"
+        )
+
+
+def _wem_to_ogg(wem_path: str, out_ogg: Path) -> None:
+    ffmpeg = _ffmpeg_cmd()
     if not ffmpeg:
         raise RuntimeError("ffmpeg not found on PATH")
 
     with tempfile.TemporaryDirectory(prefix="s2p_wem_") as td:
         wav = Path(td) / "full.wav"
-        r = subprocess.run([vgmstream, "-o", str(wav), wem_path], capture_output=True)
-        if r.returncode != 0 or not wav.exists() or wav.stat().st_size < 100:
-            raise RuntimeError(
-                f"vgmstream-cli failed: {r.stderr.decode(errors='replace')}"
-            )
+        _wem_to_wav(wem_path, wav)
         out_ogg.parent.mkdir(parents=True, exist_ok=True)
         r2 = _ffmpeg_wav_to_ogg(ffmpeg, wav, out_ogg)
         if r2.returncode != 0 or not out_ogg.exists() or out_ogg.stat().st_size < 100:
@@ -368,8 +374,15 @@ def convert_psarc_to_sloppak(
     out_path: Path,
     as_dir: bool = False,
     progress_cb: ProgressCB = None,
+    split_stems: bool = False,
+    stem_model: str = "htdemucs_6s",
+    transcribe_lyrics: bool | None = None,
 ) -> Path:
-    """Convert a PSARC to a .sloppak (single-stem). Returns the output path."""
+    """Convert a PSARC to a .sloppak. Returns the output path.
+
+    When `split_stems` is true, separate the decoded WEM WAV before packing
+    so the separator never receives the lossy `stems/full.ogg` derivative.
+    """
     _progress(progress_cb, 0.02, "extracting", f"Unpacking {psarc_path.name}")
     tmp_extract = Path(tempfile.mkdtemp(prefix="s2p_extract_"))
     work_dir = Path(tempfile.mkdtemp(prefix="s2p_work_"))
@@ -423,11 +436,18 @@ def convert_psarc_to_sloppak(
                 "capo": arr.capo,
             })
 
-        _progress(progress_cb, 0.35, "extracting", "Converting audio (WEM → OGG)")
+        _progress(progress_cb, 0.35, "extracting", "Converting audio")
         wems = find_wem_files(str(tmp_extract))
         if not wems:
             raise RuntimeError("no WEM audio found in PSARC")
-        _wem_to_ogg(wems[0], work_dir / "stems" / "full.ogg")
+        full_ogg = work_dir / "stems" / "full.ogg"
+        full_wav = None
+        if split_stems:
+            full_wav = work_dir / "full.wav"
+            _wem_to_wav(wems[0], full_wav)
+            full_ogg.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            _wem_to_ogg(wems[0], full_ogg)
 
         stems_manifest = [{"id": "full", "file": "stems/full.ogg", "default": "on"}]
 
@@ -479,7 +499,15 @@ def convert_psarc_to_sloppak(
             encoding="utf-8",
         )
 
-        _progress(progress_cb, 0.85, "packing", "Writing output")
+        if full_wav is not None:
+            _split_in_dir(
+                work_dir, stem_model, progress_cb, 0.45, 0.45,
+                transcribe_lyrics=transcribe_lyrics,
+                separation_audio=full_wav,
+            )
+            full_wav.unlink(missing_ok=True)
+
+        _progress(progress_cb, 0.95 if split_stems else 0.85, "packing", "Writing output")
         # Atomic write: build the output at a sibling `.tmp` path first,
         # then move/rename onto `out_path`. Without this, a kill mid-write
         # leaves a partial / truncated `.sloppak` (or worse, a half-deleted
@@ -723,7 +751,7 @@ def _get_pitch_config() -> dict:
     }
 
 
-def _run_demucs_remote(full_ogg: Path, out_dir: Path, model: str) -> Path:
+def _run_demucs_remote(audio_path: Path, out_dir: Path, model: str) -> Path:
     """Run stem separation via remote demucs server."""
     import json
     import requests
@@ -734,10 +762,11 @@ def _run_demucs_remote(full_ogg: Path, out_dir: Path, model: str) -> Path:
 
     # Upload the audio file — request all stems the model can produce
     stem_list = "drums,bass,vocals,other,guitar,piano"
-    with open(full_ogg, "rb") as f:
+    content_type = "audio/wav" if audio_path.suffix.lower() == ".wav" else "audio/ogg"
+    with open(audio_path, "rb") as f:
         resp = requests.post(
             f"{server_url}/separate",
-            files={"file": (full_ogg.name, f, "audio/ogg")},
+            files={"file": (audio_path.name, f, content_type)},
             params={"model": model, "stems": stem_list},
             timeout=600,
         )
@@ -779,7 +808,7 @@ def _run_demucs_remote(full_ogg: Path, out_dir: Path, model: str) -> Path:
     return result_dir
 
 
-def _run_demucs(full_ogg: Path, out_dir: Path, model: str) -> Path:
+def _run_demucs(audio_path: Path, out_dir: Path, model: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     config_dir = env.get("CONFIG_DIR", "/config")
@@ -876,7 +905,7 @@ def _run_demucs(full_ogg: Path, out_dir: Path, model: str) -> Path:
         "runpy.run_module('demucs.__main__', run_name='__main__', alter_sys=True)\n"
     )
     cmd = [sys.executable, "-c", bootstrap, json.dumps(extra_paths),
-           "-n", model, "-o", str(out_dir), str(full_ogg)]
+           "-n", model, "-o", str(out_dir), str(audio_path)]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         # demucs writes loader errors to stdout, not stderr -- include both
@@ -887,7 +916,7 @@ def _run_demucs(full_ogg: Path, out_dir: Path, model: str) -> Path:
         raise RuntimeError(
             f"demucs exited with code {r.returncode}: " + tail
         )
-    track_stem = full_ogg.stem
+    track_stem = audio_path.stem
     result_dir = out_dir / model / track_stem
     if not result_dir.exists():
         candidates = list((out_dir / model).iterdir()) if (out_dir / model).exists() else []
@@ -899,7 +928,9 @@ def _run_demucs(full_ogg: Path, out_dir: Path, model: str) -> Path:
 
 
 def _encode_ogg(wav_path: Path, ogg_path: Path) -> None:
-    ffmpeg = _ffmpeg_cmd() or "ffmpeg"
+    ffmpeg = _ffmpeg_cmd()
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg not found on PATH")
     ogg_path.parent.mkdir(parents=True, exist_ok=True)
     r = _ffmpeg_wav_to_ogg(ffmpeg, wav_path, ogg_path)
     if r.returncode != 0 or not ogg_path.exists():
@@ -1514,12 +1545,17 @@ def _split_in_dir(
     base_frac: float,
     span_frac: float,
     transcribe_lyrics: bool | None = None,
+    separation_audio: Path | None = None,
 ) -> None:
     full_ogg = source_dir / "stems" / "full.ogg"
-    if not full_ogg.exists():
-        raise FileNotFoundError(
-            f"{full_ogg} not found — run PSARC conversion first or add stems/full.ogg."
-        )
+    if separation_audio is None:
+        if not full_ogg.exists():
+            raise FileNotFoundError(
+                f"{full_ogg} not found - run PSARC conversion first or add stems/full.ogg."
+            )
+        separation_audio = full_ogg
+    elif not separation_audio.exists():
+        raise FileNotFoundError(f"{separation_audio} not found.")
 
     # Try remote demucs server first, fall back to local
     remote_url = _get_demucs_server_url()
@@ -1549,15 +1585,15 @@ def _split_in_dir(
     with tempfile.TemporaryDirectory(prefix="s2p_split_") as td:
         if use_remote:
             try:
-                result_dir = _run_demucs_remote(full_ogg, Path(td), model)
+                result_dir = _run_demucs_remote(separation_audio, Path(td), model)
             except Exception as e:
                 log.warning("Demucs remote failed (%s), falling back to local", e)
                 if demucs_available():
-                    result_dir = _run_demucs(full_ogg, Path(td), model)
+                    result_dir = _run_demucs(separation_audio, Path(td), model)
                 else:
                     raise RuntimeError(f"Remote demucs failed and local demucs not available: {e}")
         else:
-            result_dir = _run_demucs(full_ogg, Path(td), model)
+            result_dir = _run_demucs(separation_audio, Path(td), model)
 
         _progress(progress_cb, base_frac + split_span * 0.85, "splitting",
                   "Encoding split stems")
@@ -1580,12 +1616,10 @@ def _split_in_dir(
     produced.sort(key=_order_key)
 
     # Optional WhisperX transcription + pitch extraction — runs after
-    # stems are encoded but before `full.ogg` is removed (the order
-    # doesn't strictly matter for the vocals stem, which is
-    # independent, but keeping `full.ogg` around through the
-    # transcription call gives a fallback input if a future variant
-    # ever needs the mixed track). Wrapped internally so failures
-    # don't break the split. The `enabled` argument controls only
+    # stems are encoded but before an existing `full.ogg` is removed.
+    # Conversion-time splitting may provide a lossless WAV directly,
+    # so `full.ogg` is optional in that path. Wrapped internally so
+    # failures don't break the split. The `enabled` argument controls only
     # WhisperX; _maybe_transcribe_lyrics still attempts pitch
     # extraction on existing lyrics when wx is off but pitch is on.
     if needs_post_split:

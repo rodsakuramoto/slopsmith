@@ -496,6 +496,21 @@ def test_ffmpeg_wav_to_ogg_does_not_retry_on_unrelated_error(tmp_path, monkeypat
     assert len(cmds) == 1  # no retry
 
 
+def test_encode_ogg_raises_runtime_error_when_ffmpeg_missing(tmp_path, monkeypatch):
+    wav = tmp_path / "in.wav"
+    wav.write_bytes(b"\x00" * 200)
+    out_ogg = tmp_path / "out.ogg"
+    monkeypatch.setattr(sloppak_convert, "_ffmpeg_cmd", lambda: None)
+    monkeypatch.setattr(
+        sloppak_convert,
+        "_ffmpeg_wav_to_ogg",
+        lambda *args, **kwargs: pytest.fail("_ffmpeg_wav_to_ogg should not run"),
+    )
+
+    with pytest.raises(RuntimeError, match="ffmpeg not found on PATH"):
+        sloppak_convert._encode_ogg(wav, out_ogg)
+
+
 # ── cleanup_stale_temp_dirs (issue topkoa/slopsmith-plugin-sloppak-converter#24) ─
 
 
@@ -741,6 +756,87 @@ def test_stem_separation_constants_are_stable():
     break to consumers / remote caches."""
     assert sloppak_convert.STEM_SEPARATION_ENGINE == "demucs"
     assert sloppak_convert.STEM_SEPARATION_SCHEMA_VERSION == "1.0.0"
+
+
+def test_split_in_dir_prefers_explicit_lossless_audio(tmp_path, monkeypatch):
+    stems_dir = tmp_path / "stems"
+    lossless_wav = tmp_path / "full.wav"
+    lossless_wav.write_bytes(b"RIFF" + b"\x00" * 256)
+    _write_minimal_manifest(tmp_path)
+    observed = {}
+
+    def _stub_remote(audio_path, out_dir, model):
+        observed["audio_path"] = audio_path
+        observed["model"] = model
+        result_dir = out_dir / "remote_stems"
+        result_dir.mkdir()
+        (result_dir / "vocals.wav").write_bytes(b"RIFF" + b"\x00" * 256)
+        return result_dir
+
+    def _stub_encode(_wav_path, out_ogg):
+        # Mirror the real _encode_ogg, which mkdirs the parent before writing —
+        # _split_in_dir relies on that and does not create stems/ itself.
+        out_ogg.parent.mkdir(parents=True, exist_ok=True)
+        out_ogg.write_bytes(b"OggS" + b"\x00" * 256)
+
+    monkeypatch.setattr(sloppak_convert, "_get_demucs_server_url",
+                        lambda: "http://separator.test")
+    monkeypatch.setattr(sloppak_convert, "_get_whisperx_config",
+                        lambda: {"enabled": False})
+    monkeypatch.setattr(sloppak_convert, "_get_pitch_config",
+                        lambda: {"enabled": False})
+    monkeypatch.setattr(sloppak_convert, "_run_demucs_remote", _stub_remote)
+    monkeypatch.setattr(sloppak_convert, "_encode_ogg", _stub_encode)
+
+    sloppak_convert._split_in_dir(
+        tmp_path, "test-model", None, 0.0, 1.0,
+        separation_audio=lossless_wav,
+    )
+
+    assert observed == {"audio_path": lossless_wav, "model": "test-model"}
+    assert (stems_dir / "vocals.ogg").is_file()
+    assert not (stems_dir / "full.ogg").exists()
+
+
+def test_run_demucs_remote_uploads_wav_with_wav_content_type(tmp_path, monkeypatch):
+    audio_path = tmp_path / "full.wav"
+    audio_path.write_bytes(b"RIFF" + b"\x00" * 256)
+    observed = {}
+
+    class _Response:
+        status_code = 200
+        content = b"RIFF" + b"\x00" * 256
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"stems": {"vocals": "/download/job/vocals.wav"}}
+
+    def _stub_post(url, *, files, params, timeout):
+        filename, file_obj, content_type = files["file"]
+        observed["url"] = url
+        observed["filename"] = filename
+        observed["content_type"] = content_type
+        observed["content"] = file_obj.read()
+        return _Response()
+
+    import requests
+    monkeypatch.setattr(sloppak_convert, "_get_demucs_server_url",
+                        lambda: "http://separator.test")
+    monkeypatch.setattr(requests, "post", _stub_post)
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: _Response())
+
+    result_dir = sloppak_convert._run_demucs_remote(
+        audio_path, tmp_path / "out", "test-model",
+    )
+
+    assert observed == {
+        "url": "http://separator.test/separate",
+        "filename": "full.wav",
+        "content_type": "audio/wav",
+        "content": b"RIFF" + b"\x00" * 256,
+    }
+    assert (result_dir / "vocals.wav").is_file()
 
 
 # ── _maybe_extract_pitch ────────────────────────────────────────────────────
