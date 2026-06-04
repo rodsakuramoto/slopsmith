@@ -316,6 +316,19 @@
     const FOCUS_D = 600 * K;
     const CAM_LERP_BASE = 0.02;
 
+    // Zoom-dependent framing — height (h*) and depth (dist*) multipliers
+    // applied to cam.position. Interpolated by `dist`:
+    //   NEAR = tight view (nut position, span<=4 -> dist~=93*K): lower/closer.
+    //   FAR  = wide view (midpoint fret 1<->20 -> dist~=141*K): higher/pulled back
+    //          to fit the whole neck.
+    // Outside this range the values clamp at the endpoints.
+    const CAM_FRAME_DIST_NEAR = 93 * K;
+    const CAM_FRAME_DIST_FAR  = 141 * K;
+    const CAM_FRAME_H_NEAR = 0.75;
+    const CAM_FRAME_H_FAR  = 1.20;
+    const CAM_FRAME_D_NEAR = 0.50;
+    const CAM_FRAME_D_FAR  = 0.60;
+
     // Camera-X targeting (issue #34). The visible AHEAD = 4.0 s window is
     // far too coarse for picking where the camera should sit — a single
     // 17th-fret bend 2.5 s away yanks tgtX several frets even though the
@@ -367,7 +380,8 @@
     // ── 3D preview: lookahead fret bounds + smoothed focal X / span ─────────
     /** User-selectable via `cameraMode`. Legacy `classic` in storage maps to `steady`. */
     const CAMERA_MODE_IDS = ['steady', 'lookahead'];
-    const CAM_LOOKAHEAD_SEC = 3.0;
+    const CAM_LOOKAHEAD_SEC = 3.0;       // fallback when no beats/measures are available
+    const CAM_LOOKAHEAD_MEASURES = 9;    // lookahead window = N measures ahead
     const CAM_FOCUS_BLEND_RATE = 0.7;
     const CAM_FRET_EDGE_BLEND = 0.1;
     const DEFAULT_LOOKAHEAD_FRET_SPAN = 4;
@@ -2065,6 +2079,11 @@
         // the same fret for the following measure, then allow it again).
         let _fretLabelAllowed = new Set();
         let _fretLabelNotesRef = null;
+        // Cache of measure-start times (beats with measure !== -1), rebuilt when
+        // the beats array changes. Drives the camera lookahead window
+        // (CAM_LOOKAHEAD_MEASURES measures instead of a fixed number of seconds).
+        let _measureStarts = [];
+        let _measureStartsRef = null;
         // Frame-level dedup: tracks which (40ms-rounded-time, fret) pairs have already
         // rendered a label this frame so that multiple strings at the same fret/onset
         // (arpeggio chords, synthetic chords) never produce stacked duplicate labels.
@@ -6296,8 +6315,30 @@
         }
 
         /* ── Lookahead fret bounds + smooth camera ───────────────────────── */
+        // End time of the lookahead window = start of the measure that is
+        // CAM_LOOKAHEAD_MEASURES measures ahead of the current one. Uses the
+        // _measureStarts cache (times of beats with measure !== -1). With no
+        // beats it falls back to CAM_LOOKAHEAD_SEC seconds. Past the last known
+        // measure it extrapolates using the average measure duration.
+        function lookaheadEndTime(now) {
+            const ms = _measureStarts;
+            if (!ms || ms.length === 0) return now + CAM_LOOKAHEAD_SEC;
+            // Binary search: lo = first index with ms[lo] > now.
+            let lo = 0, hi = ms.length;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (ms[mid] <= now) lo = mid + 1; else hi = mid; }
+            const curIdx = lo - 1;                       // current measure (-1 if before the first)
+            const targetIdx = curIdx + CAM_LOOKAHEAD_MEASURES;
+            if (targetIdx >= 0 && targetIdx < ms.length) return ms[targetIdx];
+            // Past the last measure: extrapolate using the average measure duration.
+            if (ms.length >= 2) {
+                const avg = (ms[ms.length - 1] - ms[0]) / (ms.length - 1);
+                if (avg > 0) return ms[ms.length - 1] + (targetIdx - (ms.length - 1)) * avg;
+            }
+            return now + CAM_LOOKAHEAD_SEC;
+        }
+
         function lookaheadComputeFretBounds(now, anchors, notes, chords) {
-            const tEnd = now + CAM_LOOKAHEAD_SEC;
+            const tEnd = lookaheadEndTime(now);
             let minF = 99;
             let maxF = 0;
             let any = false;
@@ -7584,6 +7625,20 @@
             if (notes !== _fretLabelNotesRef) {
                 _fretLabelAllowed = _buildFretLabelSet(notes, chords, beats);
                 _fretLabelNotesRef = notes;
+            }
+            // Rebuild the measure-start time cache whenever beats change. Only
+            // beats that begin a measure carry measure >= 0; intra-measure beats
+            // (measure === -1) are skipped. Drives the lookahead window.
+            if (beats !== _measureStartsRef) {
+                _measureStartsRef = beats;
+                const _ms = [];
+                if (beats) {
+                    for (let _bi = 0; _bi < beats.length; _bi++) {
+                        const _b = beats[_bi];
+                        if (_b && Number.isFinite(_b.measure) && _b.measure >= 0) _ms.push(_b.time);
+                    }
+                }
+                _measureStarts = _ms;
             }
             const sections = bundle.sections;
             const anchors = bundle.anchors;
@@ -11282,12 +11337,38 @@
         function camUpdate(bundle) {
             const bpm = computeBPM(bundle.beats, bundle.currentTime);
             const lerp = CAM_LERP_BASE * Math.max(bpm, 60) / 120;
+
+            // ── DEBUG: manual camera test (remove after tuning) ──────────────
+            // In the browser console:
+            //   window.h3dCamDebug = { forceFrets: [1, 20], hMul: 1.20, dMul: 0.60 };
+            // forceFrets pins the target at the midpoint between the two frets
+            // (reproduces the wide view without needing a song with that spread).
+            // Omitting hMul/dMul uses the zoom-based interpolation (CAM_FRAME_*).
+            // shoulderMul tweaks the lateral offset. Disable: window.h3dCamDebug = null;
+            const _dbg = window.h3dCamDebug || null;
+            if (_dbg && Array.isArray(_dbg.forceFrets)) {
+                const lo = _dbg.forceFrets[0], hi = _dbg.forceFrets[1];
+                tgtX = lookaheadTargetWorldX(lo, hi);
+                tgtDist = (camBaseDistU(hi - lo + 1) + camLowFretPullbackU(lo)) * K;
+            }
+
             curX += (tgtX - curX) * lerp;
             curDist += (tgtDist - curDist) * lerp;
             const dist = curDist * aspectScale;
             const h = CAM_H_BASE * (dist / CAM_DIST_BASE);
-            const shoulderOffset = (_leftyCached ? -1 : 1) * 20 * K;
-            cam.position.set(curX + shoulderOffset, h * 0.95, dist * 0.75);
+
+            // Zoom-interpolated framing multipliers: tight (NEAR) -> lower/closer;
+            // wide (FAR, fret 1<->20) -> higher/pulled back.
+            const _zt = Math.max(0, Math.min(1,
+                (dist - CAM_FRAME_DIST_NEAR) / (CAM_FRAME_DIST_FAR - CAM_FRAME_DIST_NEAR)));
+            const _hMulBase = CAM_FRAME_H_NEAR + (CAM_FRAME_H_FAR - CAM_FRAME_H_NEAR) * _zt;
+            const _dMulBase = CAM_FRAME_D_NEAR + (CAM_FRAME_D_FAR - CAM_FRAME_D_NEAR) * _zt;
+
+            const _hMul = (_dbg && _dbg.hMul != null) ? _dbg.hMul : _hMulBase;
+            const _dMul = (_dbg && _dbg.dMul != null) ? _dbg.dMul : _dMulBase;
+            const _shMul = (_dbg && _dbg.shoulderMul != null) ? _dbg.shoulderMul : 1;
+            const shoulderOffset = (_leftyCached ? -1 : 1) * 15 * K * _shMul;
+            cam.position.set(curX + shoulderOffset, h * _hMul, dist * _dMul);
 
             // Self-correcting look-at Y: project the fretboard's near-edge centre
             // to NDC space. If it drifts toward the frame edge, nudge tgtLookY
