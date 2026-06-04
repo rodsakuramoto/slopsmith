@@ -6233,7 +6233,11 @@
             const addDot = (x, y) => {
                 const d = new T.Mesh(dg, dm);
                 d.position.set(x, y, dotZBack);
-                d.renderOrder = -120;
+                // Above the dynamic lane (1) and its dividers (2) so the
+                // translucent blue lane no longer paints over and hides the
+                // inlay; still well below strings (703) / wires (704) / notes,
+                // so those keep drawing on top of the inlay.
+                d.renderOrder = 3;
                 fretG.add(d);
             };
             for (const f of DOTS) {

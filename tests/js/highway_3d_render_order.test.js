@@ -71,6 +71,16 @@ test('fret dividers use renderOrder 2', () => {
     );
 });
 
+test('fret inlay dots use renderOrder 3, above lane (1) and dividers (2)', () => {
+    // The translucent lane would otherwise paint over and hide the inlay.
+    // The dots must draw after the lane/dividers but stay below strings (703).
+    assert.match(
+        src(),
+        /d\.renderOrder\s*=\s*3\s*;/,
+        'fret inlay dots must use renderOrder = 3 so the lane no longer hides them',
+    );
+});
+
 test('string-line glows use renderOrder 7, above sus-rails (4/5)', () => {
     // The in-lane string glow lines sit at 7 — above sus-rail bloom (4) and
     // core (5) so the glow is visible, but below chord fill (chordBaseRO-4,
