@@ -85,13 +85,16 @@ test('string-line glows use renderOrder 7, above sus-rails (4/5)', () => {
 test('board-projection frame mesh uses renderOrder 14', () => {
     // The fretboard projection plane sits above string glows (7) but below
     // chord fill (min 44). Value 14 keeps it sandwiched cleanly.
+    // Anchor to the board-projection pool (projMeshArr = activePalette.map(...))
+    // so the assertion only passes when THAT block seeds renderOrder = 14 —
+    // not any unrelated renderOrder = 14 elsewhere in the source.
+    const boardProjRO = /projMeshArr\s*=\s*activePalette\.map\b[\s\S]{0,1200}?m\.renderOrder\s*=\s*14\s*;/;
     assert.match(
         src(),
-        /pSusRail\b[\s\S]{0,400}?m\.renderOrder\s*=\s*5\s*;|m\.renderOrder\s*=\s*14\s*;/,
-        'board-projection pool must seed meshes with renderOrder = 14',
+        boardProjRO,
+        'board-projection pool (projMeshArr) must seed meshes with renderOrder = 14',
     );
-    // More targeted: the board projection pool assignment
-    const boardMatch = src().match(/m\.renderOrder\s*=\s*14\s*;/);
+    const boardMatch = src().match(boardProjRO);
     assert.ok(boardMatch, 'board projection mesh must be assigned renderOrder = 14');
 });
 
