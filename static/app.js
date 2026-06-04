@@ -4887,9 +4887,7 @@ async function playSong(filename, arrangement, options) {
     window._clearJuceRerouteMemo?.();
     isPlaying = false;
     setPlayButtonState(false);
-    document.getElementById('speed-slider').value = 100;
-    handleSliderInput(document.getElementById('speed-slider'));
-    document.getElementById('speed-label').textContent = '1.0x';
+    _resetPlaybackSpeedForNewSong();
     clearLoop();
     _resetSectionPracticeLog();
     _hideSectionPracticeBar();
@@ -5131,6 +5129,28 @@ function setSpeed(v) {
     }
     const speedLabel = document.getElementById('speed-label');
     if (speedLabel) speedLabel.textContent = rate.toFixed(2) + 'x';
+    handleSliderInput(speedSlider);
+}
+
+function _resetPlaybackSpeedForNewSong() {
+    // Reset the *actual* playback rate to 1x, not just the visible slider/label
+    // (slopsmith#615). The HTML5 <audio> element and the desktop JUCE/backing
+    // engine each retain their own rate, and which one drives the next song
+    // isn't decided until later in the load, so reset all paths unconditionally.
+    // Every setter is idempotent and optional-chained, so this is safe in web
+    // and desktop builds alike — no need to branch on window._juceMode.
+    const speedSlider = document.getElementById('speed-slider');
+    if (speedSlider) speedSlider.value = 100;
+    audio.playbackRate = 1;
+    window.jucePlayer?.setRate?.(1);
+    const juceAudio = window.slopsmithDesktop?.audio;
+    Promise.resolve()
+        .then(() => juceAudio?.setBackingSpeed?.(1))
+        .then(() => juceAudio?.setBackingPreservePitch?.(true))
+        .catch(err => console.warn('[resetSpeed] backing speed/preserve-pitch failed:', err));
+    // Mirror setSpeed's UI side-effects (label text + slider fill styling).
+    const speedLabel = document.getElementById('speed-label');
+    if (speedLabel) speedLabel.textContent = (1).toFixed(2) + 'x';
     handleSliderInput(speedSlider);
 }
 // Master-difficulty slider (slopsmith#48). Persists partial via
