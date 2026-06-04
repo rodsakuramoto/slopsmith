@@ -310,7 +310,7 @@
     const N_RAD = 1.5 * K;
     const SW = 2 * K, SH = 1.5 * K;
 
-    const CAM_H_BASE = 180 * K;
+    const CAM_H_BASE = 190 * K;
     const CAM_DIST_BASE = 240 * K;
     const REF_ASPECT = 16 / 9;
     const FOCUS_D = 600 * K;
@@ -326,7 +326,7 @@
     const CAM_FRAME_DIST_FAR  = 141 * K;
     const CAM_FRAME_H_NEAR = 0.75;
     const CAM_FRAME_H_FAR  = 1.20;
-    const CAM_FRAME_D_NEAR = 0.525;
+    const CAM_FRAME_D_NEAR = 0.55;
     const CAM_FRAME_D_FAR  = 0.60;
 
     // Camera-X targeting (issue #34). The visible AHEAD = 4.0 s window is
