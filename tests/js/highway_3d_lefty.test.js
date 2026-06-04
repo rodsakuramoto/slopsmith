@@ -71,7 +71,7 @@ test('draw(bundle) handles lefty changes by flipping camera X state and rebuildi
 test('camera shoulder offset follows the cached lefty orientation', () => {
     assert.match(
         src(SCREEN_JS),
-        /const\s+shoulderOffset\s*=\s*\(\s*_leftyCached\s*\?\s*-1\s*:\s*1\s*\)\s*\*\s*20\s*\*\s*K\s*;[\s\S]*?cam\.position\.set\(\s*curX\s*\+\s*shoulderOffset/,
+        /const\s+shoulderOffset\s*=\s*\(\s*_leftyCached\s*\?\s*-1\s*:\s*1\s*\)\s*\*\s*15\s*\*\s*K\s*;[\s\S]*?cam\.position\.set\(\s*curX\s*\+\s*shoulderOffset/,
         'camera shoulder offset must flip with _leftyCached',
     );
 });
