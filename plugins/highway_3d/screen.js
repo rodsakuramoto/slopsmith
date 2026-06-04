@@ -11338,20 +11338,6 @@
             const bpm = computeBPM(bundle.beats, bundle.currentTime);
             const lerp = CAM_LERP_BASE * Math.max(bpm, 60) / 120;
 
-            // ── DEBUG: manual camera test (remove after tuning) ──────────────
-            // In the browser console:
-            //   window.h3dCamDebug = { forceFrets: [1, 20], hMul: 1.20, dMul: 0.60 };
-            // forceFrets pins the target at the midpoint between the two frets
-            // (reproduces the wide view without needing a song with that spread).
-            // Omitting hMul/dMul uses the zoom-based interpolation (CAM_FRAME_*).
-            // shoulderMul tweaks the lateral offset. Disable: window.h3dCamDebug = null;
-            const _dbg = window.h3dCamDebug || null;
-            if (_dbg && Array.isArray(_dbg.forceFrets)) {
-                const lo = _dbg.forceFrets[0], hi = _dbg.forceFrets[1];
-                tgtX = lookaheadTargetWorldX(lo, hi);
-                tgtDist = (camBaseDistU(hi - lo + 1) + camLowFretPullbackU(lo)) * K;
-            }
-
             curX += (tgtX - curX) * lerp;
             curDist += (tgtDist - curDist) * lerp;
             const dist = curDist * aspectScale;
@@ -11361,13 +11347,9 @@
             // wide (FAR, fret 1<->20) -> higher/pulled back.
             const _zt = Math.max(0, Math.min(1,
                 (dist - CAM_FRAME_DIST_NEAR) / (CAM_FRAME_DIST_FAR - CAM_FRAME_DIST_NEAR)));
-            const _hMulBase = CAM_FRAME_H_NEAR + (CAM_FRAME_H_FAR - CAM_FRAME_H_NEAR) * _zt;
-            const _dMulBase = CAM_FRAME_D_NEAR + (CAM_FRAME_D_FAR - CAM_FRAME_D_NEAR) * _zt;
-
-            const _hMul = (_dbg && _dbg.hMul != null) ? _dbg.hMul : _hMulBase;
-            const _dMul = (_dbg && _dbg.dMul != null) ? _dbg.dMul : _dMulBase;
-            const _shMul = (_dbg && _dbg.shoulderMul != null) ? _dbg.shoulderMul : 1;
-            const shoulderOffset = (_leftyCached ? -1 : 1) * 15 * K * _shMul;
+            const _hMul = CAM_FRAME_H_NEAR + (CAM_FRAME_H_FAR - CAM_FRAME_H_NEAR) * _zt;
+            const _dMul = CAM_FRAME_D_NEAR + (CAM_FRAME_D_FAR - CAM_FRAME_D_NEAR) * _zt;
+            const shoulderOffset = (_leftyCached ? -1 : 1) * 15 * K;
             cam.position.set(curX + shoulderOffset, h * _hMul, dist * _dMul);
 
             // Self-correcting look-at Y: project the fretboard's near-edge centre
