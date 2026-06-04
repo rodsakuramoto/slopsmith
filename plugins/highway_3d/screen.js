@@ -11349,7 +11349,7 @@
                 (dist - CAM_FRAME_DIST_NEAR) / (CAM_FRAME_DIST_FAR - CAM_FRAME_DIST_NEAR)));
             const _hMul = CAM_FRAME_H_NEAR + (CAM_FRAME_H_FAR - CAM_FRAME_H_NEAR) * _zt;
             const _dMul = CAM_FRAME_D_NEAR + (CAM_FRAME_D_FAR - CAM_FRAME_D_NEAR) * _zt;
-            const shoulderOffset = (_leftyCached ? -1 : 1) * 14 * K;
+            const shoulderOffset = (_leftyCached ? -1 : 1) * 13 * K;
             cam.position.set(curX + shoulderOffset, h * _hMul, dist * _dMul);
 
             // Self-correcting look-at Y: project the fretboard's near-edge centre
