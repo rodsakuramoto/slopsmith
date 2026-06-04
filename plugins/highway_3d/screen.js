@@ -325,7 +325,7 @@
     const CAM_FRAME_DIST_NEAR = 93 * K;
     const CAM_FRAME_DIST_FAR  = 141 * K;
     const CAM_FRAME_H_NEAR = 0.75;
-    const CAM_FRAME_H_FAR  = 1.20;
+    const CAM_FRAME_H_FAR  = 1.00;
     const CAM_FRAME_D_NEAR = 0.575;
     const CAM_FRAME_D_FAR  = 0.60;
 
