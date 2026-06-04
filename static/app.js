@@ -4836,6 +4836,145 @@ audio.addEventListener('pause', () => {
     window.slopsmith.emit('song:pause', _songEventPayload());
 });
 
+// Screen Wake Lock — keep the display awake while a song is playing so the
+// OS screensaver doesn't kick in during windowed-mode playback (only audio +
+// the highway animation are active, so the input-idle timer otherwise fires).
+// Engaged only while playing (acquire on play/resume, release on
+// pause/ended/stop) per issue #686. In a plain browser this uses the W3C
+// Screen Wake Lock API; inside slopsmith-desktop (Electron) navigator.wakeLock
+// is unreliable, so we also drive the native powerSaveBlocker bridge when it
+// is exposed — both calls are best-effort and degrade silently elsewhere.
+let _screenWakeLock = null;
+let _wakeLockPending = false;
+// Desired state: true while a song should be keeping the screen awake. This is
+// the source of truth that survives the async gap of navigator.wakeLock.request
+// — set synchronously by acquire/release so an in-flight request that resolves
+// after playback already stopped can release itself instead of leaking a lock.
+let _wakeLockWanted = false;
+// Set when an acquire is requested while one is already in flight (e.g. a quick
+// hide→show during the first request); the in-flight request retries once on
+// settle so a transient NotAllowedError doesn't leave the song unprotected.
+let _wakeLockRetry = false;
+// Last value handed to the desktop bridge. This is the value we *requested*,
+// not one confirmed by the IPC round trip: the Electron main-process side
+// effect (powerSaveBlocker start/stop) happens when the message is received,
+// before its promise resolves, so deduping on the requested value lets opposite
+// transitions (true↔false) always go through promptly while still suppressing
+// redundant repeats (e.g. the synchronous song:play + song:resume pair). A
+// rejected/throwing call invalidates the marker (the side effect never landed)
+// so the next song:* / visibilitychange retries — without an inline re-sync,
+// which would tight-loop on a persistently failing bridge.
+// Last value handed to the bridge: false (off) / true (on) / null (unknown —
+// a call failed, so the real blocker state can't be assumed). null never equals
+// a boolean `want`, so the next sync always re-sends and recovers.
+let _desktopAwakeReq = false;
+// Monotonic id of the most recent bridge call, so a stale (out-of-order)
+// rejection from a superseded call can be ignored rather than corrupting the
+// marker — a boolean alone can't tell "my request failed" from "an older
+// same-valued request failed after a newer one already succeeded".
+let _desktopAwakeGen = 0;
+// Drive the native slopsmith-desktop blocker to exactly (wanted && visible),
+// mirroring the browser wake lock which is only held while the page is visible.
+// Gating on visibility stops a minimized Electron window from keeping the whole
+// display awake. No-op in a plain browser; isolated from the wakeLock path so a
+// flaky bridge can't abort it.
+function _syncDesktopBridge() {
+    const want = _wakeLockWanted && document.visibilityState === 'visible';
+    if (want === _desktopAwakeReq) return; // already requested this value
+    const bridge = window.slopsmithDesktop?.power?.setScreenAwake;
+    if (typeof bridge !== 'function') return; // plain browser — nothing to sync
+    _desktopAwakeReq = want;
+    const gen = ++_desktopAwakeGen;
+    let r;
+    try {
+        r = bridge(want);
+    } catch (e) {
+        console.debug('desktop wake bridge failed:', e?.name || e);
+        if (gen === _desktopAwakeGen) _desktopAwakeReq = null; // unknown — force a re-send next event
+        return;
+    }
+    if (r && typeof r.then === 'function') {
+        r.catch((e) => {
+            console.debug('desktop wake bridge rejected:', e);
+            // The IPC didn't take effect; we can't assume which state the blocker
+            // is in (a prior call may also have failed), so mark it unknown and
+            // let the next song:* / visibilitychange re-send. Only if this is
+            // still the latest request — a stale rejection from a superseded call
+            // must not clobber a newer request's marker.
+            if (gen === _desktopAwakeGen) _desktopAwakeReq = null;
+        });
+    }
+}
+async function _acquireWakeLock() {
+    _wakeLockWanted = true;
+    _syncDesktopBridge();
+    if (_screenWakeLock) return; // already held — nothing to do
+    // A request is already in flight (song:play and song:resume fire
+    // synchronously from the audio 'play' listener, and visibilitychange can
+    // re-enter): don't issue a duplicate, but remember to retry on settle so a
+    // visibility bounce during the request can't strand us without a lock.
+    if (_wakeLockPending) { _wakeLockRetry = true; return; }
+    if (!navigator.wakeLock?.request) return;
+    _wakeLockPending = true;
+    _wakeLockRetry = false;
+    try {
+        const sentinel = await navigator.wakeLock.request('screen');
+        if (!_wakeLockWanted) {
+            // Playback stopped while the request was in flight — release the
+            // just-granted lock immediately rather than holding it stale.
+            try { await sentinel.release(); } catch (e) { /* already released */ }
+            return;
+        }
+        _screenWakeLock = sentinel;
+        sentinel.addEventListener('release', () => {
+            _screenWakeLock = null;
+            // The UA auto-releases on tab hide, but may also release for its own
+            // reasons (power policy) while the page stays visible. Re-acquire if
+            // a song is still playing and we're visible — the visibilitychange
+            // handler covers the hidden→visible case.
+            if (_wakeLockWanted && document.visibilityState === 'visible') {
+                _acquireWakeLock();
+            }
+        });
+    } catch (e) {
+        // NotAllowedError (page hidden / no user activation) or unsupported.
+        console.debug('wakeLock request failed:', e?.name || e);
+    } finally {
+        _wakeLockPending = false;
+        // A re-acquire arrived while the request was in flight (typically a
+        // hide→show bounce). If we still want the lock, are visible, and didn't
+        // get one (the request raced a hidden window and rejected), try once
+        // more now that the page state has settled. Bounded: only fires when a
+        // bounce actually occurred, so a permanently-denied request can't loop.
+        if (_wakeLockRetry && _wakeLockWanted && !_screenWakeLock
+            && document.visibilityState === 'visible') {
+            _wakeLockRetry = false;
+            _acquireWakeLock();
+        }
+    }
+}
+async function _releaseWakeLock() {
+    _wakeLockWanted = false;
+    _syncDesktopBridge();
+    if (!_screenWakeLock) return;
+    try { await _screenWakeLock.release(); } catch (e) { /* already released */ }
+    _screenWakeLock = null;
+}
+window.slopsmith.on('song:play', _acquireWakeLock);
+window.slopsmith.on('song:resume', _acquireWakeLock);
+window.slopsmith.on('song:pause', _releaseWakeLock);
+window.slopsmith.on('song:ended', _releaseWakeLock);
+window.slopsmith.on('song:stop', _releaseWakeLock);
+// A screen wake lock is auto-released whenever the page is hidden; re-sync the
+// desktop bridge (off while hidden) and re-acquire the browser lock when we
+// become visible again if a song is still playing.
+document.addEventListener('visibilitychange', () => {
+    _syncDesktopBridge();
+    if (document.visibilityState === 'visible' && _wakeLockWanted) {
+        _acquireWakeLock();
+    }
+});
+
 // Abort controller for cancelling pending requests when entering player
 let artAbortController = null;
 

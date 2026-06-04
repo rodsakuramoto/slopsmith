@@ -187,6 +187,8 @@ sudo systemctl restart apache2
 
 > **Note:** If Slopsmith is running on a different server, replace `localhost:8000` with the appropriate URL or IP address (e.g., `http://192.168.1.100:8000` or `http://slopsmith.internal:8000`).
 >
+> **Screensaver during playback:** Slopsmith holds a [Screen Wake Lock](https://developer.mozilla.org/en-US/docs/Web/API/Screen_Wake_Lock_API) while a song plays so the display/screensaver doesn't kick in mid-song. The browser Wake Lock API is **secure-context only**, so this works on `localhost`, over HTTPS, and in the desktop app — but **not** over plain HTTP to a LAN IP (e.g. `http://192.168.1.100:8000`), where browsers don't expose the API. For screensaver suppression on a remote browser, front Slopsmith with HTTPS (e.g. via the reverse-proxy setup above plus TLS) or use the desktop app, which keeps the display awake natively.
+>
 > **Important:** Even though the app entrypoint is proxied at `/slopsmith`, Slopsmith currently uses absolute frontend paths (for example `/static/...` and `/api/...`). That is why the config also proxies `/api`, `/static`, `/ws`, and `/audio` at the virtual-host root. These root routes will be exposed and can conflict with an existing site that already uses the same paths.
 >
 > Slopsmith is not fully base-path aware yet, so it cannot be cleanly nested entirely under `/slopsmith` without additional rewriting or app changes. If you need to avoid route collisions, use a dedicated subdomain (for example `slopsmith.your-domain`) as the cleanest option.
