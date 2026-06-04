@@ -2599,18 +2599,19 @@
         // Low-overdraw sustain rendering (DEFAULT since perf profiling on
         // dense palm-mute / fret-hand-mute passages). Those sections are GPU
         // fill-bound: the transparent sustain trails/rails stack many blended
-        // fragments. The trail/ribbon OUTLINE layer and the additive rail
-        // bloom halo were the two biggest fill contributors, and dropping them
-        // measurably lifts FPS (≈7.5→5.9 ms ren.render() p50, ~107→134 fps in
-        // a pinned A/B loop) with a visual change the maintainer judged worth
-        // it. The trail/rail CORES still draw, so sustains stay clearly
-        // visible. Opt back into the full-quality look (outline + bloom) per
-        // browser, no rebuild needed:
-        //   localStorage.h3d_full_sus = '1'   // restore outline + bloom
+        // fragments. Profiling (pinned A/B loop) showed ren.render() p50 at
+        // ~7.5 ms vs ~5.9 ms with all the sustain extras off. The additive
+        // rail bloom halo (wide gaussian planes, additive blending) is the
+        // single most expensive per-pixel contributor, so the lean default
+        // drops ONLY the bloom. The trail/ribbon white OUTLINE (mSusOutline,
+        // with hit/miss colour) is kept — it's a thin, cheap layer and gives
+        // tails their border, so it's worth the small fill cost. Opt back into
+        // the full look (re-enable the rail bloom) per browser, no rebuild:
+        //   localStorage.h3d_full_sus = '1'   // re-enable rail bloom halo
         //   delete localStorage.h3d_full_sus  // back to lean default
         // Read once per frame at the top of update() so the flag takes effect
-        // live. The supporting pools/materials are kept intact (still pinned
-        // by the bloom unit tests and used by the opt-out path).
+        // live. The bloom pool/material/gaussian texture are kept intact
+        // (still pinned by the bloom unit tests and used by the opt-out path).
         let _leanSus = true;
 
         // Lifecycle flags
@@ -7272,9 +7273,10 @@
         /* ── Per-frame rendering ─────────────────────────────────────────── */
         function update(bundle) {
             pbBeg(0);
-            // Lean sustain rendering is the default (see declaration above);
-            // the full-quality outline+bloom look is an opt-out. Cheap
-            // per-frame read so the console flag takes effect live.
+            // Lean sustain rendering is the default (see declaration above):
+            // the trail/ribbon outline always draws; only the additive rail
+            // bloom halo is dropped. The full look (with bloom) is an opt-out.
+            // Cheap per-frame read so the console flag takes effect live.
             try {
                 _leanSus = localStorage.getItem('h3d_full_sus') !== '1';
             } catch (_) { _leanSus = true; }
@@ -10775,13 +10777,11 @@
                             const _ro = Math.max(47.999, Math.round(700 + Math.min(0, zCenter) / K) - 2) - 0.001;
                             for (let i = 0; i < offsets.length; i++) {
                                 const xOff = xCenter + offsets[i];
-                                if (!_leanSus) {
-                                    const trOut = pSusOutline.get();
-                                    trOut.material = _susOlMat;
-                                    trOut.renderOrder = _ro;
-                                    trOut.position.set(xOff, y, zCenter);
-                                    trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
-                                }
+                                const trOut = pSusOutline.get();
+                                trOut.material = _susOlMat;
+                                trOut.renderOrder = _ro;
+                                trOut.position.set(xOff, y, zCenter);
+                                trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
                                 const tr = pSus.get();
                                 tr.material = _ndState ? mGlow[s] : mSus[s];
                                 tr.renderOrder = _ro + 0.0005;
@@ -10802,19 +10802,17 @@
                             const _ribRO = Math.max(47.999, Math.round(700 - _ribDt * 200) - 2) - 0.001;
                             for (let si = 0; si < offsets.length; si++) {
                                 const strandX = x + offsets[si];
-                                if (!_leanSus) {
-                                    const olMesh = pSusRibbonOl.get();
-                                    olMesh.renderOrder = _ribRO;
-                                    olMesh.scale.set(1, 1, 1);
-                                    olMesh.rotation.set(0, 0, 0);
-                                    olMesh.position.set(0, 0, 0);
-                                    olMesh.material = _susOlMat;
-                                    slideRibbonUpdatePositions(
-                                        olMesh.geometry, strandX,
-                                        tw + 0.4 * K, th + 0.4 * K,
-                                        y, sliceDur, susStart, now, n, slideSt,
-                                    );
-                                }
+                                const olMesh = pSusRibbonOl.get();
+                                olMesh.renderOrder = _ribRO;
+                                olMesh.scale.set(1, 1, 1);
+                                olMesh.rotation.set(0, 0, 0);
+                                olMesh.position.set(0, 0, 0);
+                                olMesh.material = _susOlMat;
+                                slideRibbonUpdatePositions(
+                                    olMesh.geometry, strandX,
+                                    tw + 0.4 * K, th + 0.4 * K,
+                                    y, sliceDur, susStart, now, n, slideSt,
+                                );
                                 const body = pSusRibbon.get();
                                 body.renderOrder = _ribRO + 0.0005;
                                 body.scale.set(1, 1, 1);
