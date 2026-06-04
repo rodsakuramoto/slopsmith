@@ -42,8 +42,8 @@
     // for the palette-preview swatches — keep them in sync.
     const PALETTES = {
         default: [
-            0xff2828, 0xffd400, 0x2080ff, 0xff8020,
-            0x30d040, 0xa040ff, 0xff6bd5, 0x6bffe6,
+            0xe61f26, 0xecd234, 0x1096e6, 0xf18313,
+            0x3fc413, 0xb518d9, 0xff6bd5, 0x6bffe6,
         ],
         neon: [
             0xff0030, 0xffe800, 0x0080ff, 0xff8030,
@@ -195,13 +195,13 @@
     // switch ~BEHIND seconds before the XML <anchor time="…"/>.
     const HWY_LANE_TIME_SLICES = 96;
     /** Odd columns (1st/3rd/…) darker teal; even columns brighter blue. */
-    const HWY_LANE_STRIPE_ODD_HEX  = 0x3d739e;
-    const HWY_LANE_STRIPE_EVEN_HEX = 0x62a5d8;
+    const HWY_LANE_STRIPE_ODD_HEX  = 0x103B5C;
+    const HWY_LANE_STRIPE_EVEN_HEX = 0x08283C;
     /** Lane quad alpha: base + highwayIntensity * scale (readable on dark floor). */
-    const HWY_LANE_STRIPE_OP_BASE = 0.12;
-    const HWY_LANE_STRIPE_OP_INT  = 0.24;
-    /** Note travel speed. Tuned to Rocksmith's default note feel via play tests (PR #303). */
-    const TS = 150 * K;
+    const HWY_LANE_STRIPE_OP_BASE = 1.0;
+    const HWY_LANE_STRIPE_OP_INT  = 0;
+    /** Note travel speed. */
+    const TS = 230 * K;
     /** Match `nextNoteByString` onset to this note (float + chart rounding; avoids ghost / glow flicker). */
     const NEXT_ON_STRING_T_EPS = 0.06;
     /**
@@ -258,7 +258,7 @@
     }
 
     // Shorter, flatter notes (joel style)
-    const NW = 5 * K, NH = 3 * K, ND = 0.5 * K;
+    const NW = 5 * K, NH = 3 * K, ND = 0.25 * K;
     // Sustain-trail X offset for fretted notes. Module-scoped + frozen
     // so the hot path's `offsets.length` loop sees a stable singleton
     // reference. The standalone-open-string path builds a fresh pair
@@ -374,7 +374,6 @@
     /** Schmitt: avoid lock↔dynamic flicker when lookahead maxF jitters at the 12th fret. */
     const LOOKAHEAD_LOCK_RELEASE_MAXF = 13;
     const LOOKAHEAD_LOCK_ENGAGE_MAXF = 10;
-
     // Note: we deliberately do NOT scale the camUpdate lerp speed with
     // cameraSmoothing. Smoothing widens the hysteresis dead zones so the
     // camera stays put through small/repetitive shifts; but when a shift
@@ -1912,6 +1911,9 @@
         let ambLight = null, dirLight = null;
         let fretG = null, tuningLblG = null, noteG = null, beatG = null, lblG = null;
         let gNote = null, gSus = null, gBeat = null, gTapChevron = null;
+        // Per-string gradient gem geometries (index 0..5). Built in initScene
+        // from sampled colour PNGs; each carries a per-vertex colour attribute.
+        let gNoteGrad = [];
         let mStr = [], mGlow = [], mSus = [], mStrHitOutline = [], mAccentOutline = [], mAccentCore = [], mAccentHaloNear = [], mAccentHaloMid = [], mAccentHaloFar = [];
         // Pre-built accent-halo shell descriptors per string. Populated after
         // mAccentHaloFar/Mid/Near are materialised; consumed in drawNote()'s
@@ -1990,6 +1992,36 @@
         let pSusRail = null, gSusRail = null, mSusRailBase = null;
         let pSusRailBloom = null, gSusRailBloom = null, mSusRailBloomBase = null, _bloomGaussTex = null;
         let pTechPlane = null, gTechPlane = null;
+
+        // ── InstancedMesh for PM/FH X markers ────────────────────────────────
+        // Replaces pTechPlane pool entries for PM and FH mute techniques,
+        // collapsing O(visible-muted-notes) draw calls to 2 per type.
+        // pTechPlane pool is still used for H/P triangles, harmonics and bends.
+        let imPMTech = null, imFHTech = null;
+        let _imGPMTech = null, _imGFHTech = null; // cloned geometries (own instanceAlpha attr)
+        let _imPMTechMat = null, _imFHTechMat = null;
+        const IM_TECH_CAP = 256;
+        const _imPMTechAlphaArr = new Float32Array(IM_TECH_CAP);
+        const _imFHTechAlphaArr = new Float32Array(IM_TECH_CAP);
+        let _imPMTechCount = 0, _imFHTechCount = 0;
+
+        // ── InstancedMesh for chord strum indicators ──────────────────────────
+        // Replaces pPMXFill, pMuteXLines, pFHXFill, pFHXLines pools.
+        // Fixed renderOrder per type — no per-instance sort needed.
+        let imPMXFill = null, imPMXLines = null, imFHXFill = null, imFHXLines = null;
+        let _imPMXFillMat = null, _imPMXLinesMat = null;
+        let _imFHXFillMat = null, _imFHXLinesMat = null;
+        const IM_STRUM_CAP = 64;
+        const _imPMXFillAlphaArr  = new Float32Array(IM_STRUM_CAP);
+        const _imPMXLinesAlphaArr = new Float32Array(IM_STRUM_CAP);
+        const _imFHXFillAlphaArr  = new Float32Array(IM_STRUM_CAP);
+        const _imFHXLinesAlphaArr = new Float32Array(IM_STRUM_CAP);
+        let _imPMXFillCount = 0, _imPMXLinesCount = 0, _imFHXFillCount = 0, _imFHXLinesCount = 0;
+
+        // Temporaries for InstancedMesh matrix composition — allocated once in
+        // initScene() after Three.js loads, reused every frame without allocation.
+        let _imM4 = null, _imPos = null, _imSca = null, _imQ = null, _imAZ = null, _imColor = null;
+
         let _diagPrev             = null;
         let _diagPrevOpacity      = 0;
         let _diagPrevStartOpacity = 0;
@@ -2026,6 +2058,17 @@
         let _mergeCacheChordsRef = null;
         let _mergeCacheHsRef = null;
         let _mergeCacheTplRef = null;
+
+        // Fret connector-label visibility cache: tracks which (time, fret)
+        // pairs may show their indicator number per the measure-skip rule
+        // (show only the first note with a given fret in a measure; suppress
+        // the same fret for the following measure, then allow it again).
+        let _fretLabelAllowed = new Set();
+        let _fretLabelNotesRef = null;
+        // Frame-level dedup: tracks which (40ms-rounded-time, fret) pairs have already
+        // rendered a label this frame so that multiple strings at the same fret/onset
+        // (arpeggio chords, synthetic chords) never produce stacked duplicate labels.
+        const _frameLabeledKeys = new Set();
 
         let _arpGhostInferRefHs = null;
         let _arpGhostInferRefNotes = null;
@@ -2295,6 +2338,10 @@
         // place — without this the layer stays at its built-in opacity
         // until the next palette change rebuilds buildBoard().
         let stringLineGlows = [];
+        // One LineBasicMaterial per fret wire (index = fret 0..NFRETS).
+        // Updated each frame to gold when inside the active anchor range,
+        // gray otherwise. Reset to [] on every buildBoard() rebuild.
+        let fretWireMats = [];
         /** Nut + headstock 3D subtree; visibility toggled from settings without rebuild. */
         let nutHeadstockGroup = null;
         /** Left edge X of drawable string meshes; updated in buildBoard() at nut / fret junction. */
@@ -2532,6 +2579,39 @@
         let _lookaheadCamPrevNow = null;
         let _lookaheadLowBonusU = 0;
         let _lookaheadHiNeckLatch = false;
+
+        // ── Sub-frame clock smoothing ─────────────────────────────────────
+        // bundle.currentTime is the browser's audio.currentTime, which only
+        // refreshes every ~20–23 ms — coarser than a 60/144 Hz rAF frame. Fed
+        // straight into note Z-positions it makes the whole highway step in
+        // micro-jumps (1–2 static frames, then a jump), most visible as a
+        // "stutter" across a dense wall of repeated chords even when FPS is
+        // steady. smoothNow() interpolates forward with performance.now()
+        // between distinct audio samples (mirroring core highway.js
+        // getTime()), tracking the observed playback rate so the speed slider
+        // stays accurate, and falls back to the raw value on pause / seek /
+        // stall so the scroll never drifts against silent audio.
+        let _clkAudioT = NaN;   // last distinct bundle.currentTime sample
+        let _clkPerf = NaN;     // performance.now() when that sample arrived
+        let _clkRate = 1;       // observed chart-seconds per real-second
+        let _frameNow = 0;      // smoothed time for THIS frame (update → camUpdate)
+
+        // Low-overdraw sustain rendering (DEFAULT since perf profiling on
+        // dense palm-mute / fret-hand-mute passages). Those sections are GPU
+        // fill-bound: the transparent sustain trails/rails stack many blended
+        // fragments. The trail/ribbon OUTLINE layer and the additive rail
+        // bloom halo were the two biggest fill contributors, and dropping them
+        // measurably lifts FPS (≈7.5→5.9 ms ren.render() p50, ~107→134 fps in
+        // a pinned A/B loop) with a visual change the maintainer judged worth
+        // it. The trail/rail CORES still draw, so sustains stay clearly
+        // visible. Opt back into the full-quality look (outline + bloom) per
+        // browser, no rebuild needed:
+        //   localStorage.h3d_full_sus = '1'   // restore outline + bloom
+        //   delete localStorage.h3d_full_sus  // back to lean default
+        // Read once per frame at the top of update() so the flag takes effect
+        // live. The supporting pools/materials are kept intact (still pinned
+        // by the bloom unit tests and used by the opt-out path).
+        let _leanSus = true;
 
         // Lifecycle flags
         let _isReady = false;
@@ -3237,7 +3317,7 @@
         })();
         let pbBeg, pbEnd, pbReportTick;
         if (_perfBench) {
-            const _PB_NAMES = ['frame', 'state', 'next', 'mat', 'noteDraw', 'chordDraw'];
+            const _PB_NAMES = ['frame', 'state', 'next', 'mat', 'noteDraw', 'chordDraw', 'render'];
             const _pbStart = new Float64Array(_PB_NAMES.length);
             const _pbAcc = _PB_NAMES.map(() => []);
             const _PB_REPORT_MS = 5000;
@@ -4297,6 +4377,39 @@
 
             // Rectangular note geometry
             gNote = new T.BoxGeometry(NW, NH, ND);
+            // Per-string vertical gradient gems — colours sampled from the
+            // rocksmith colour PNGs (top highlight → deeper bottom). Each gradient
+            // string gets its own BoxGeometry clone carrying a per-vertex colour
+            // attribute; the gem core swaps to gNoteGrad[s] in drawNote while its
+            // material (mStr[s]) is white + vertexColors:true so the gradient
+            // shows pure. Strings 6/7 have no entry and fall back to flat gNote.
+            const _GEM_GRADIENTS = [
+                [0xec0816, 0xbd0400], // 0 red
+                [0xefd20b, 0xceaa00], // 1 yellow
+                [0x0b93e9, 0x0e69b2], // 2 blue
+                [0xf77b0b, 0xdb5808], // 3 orange
+                [0x37c40b, 0x139305], // 4 green
+                [0xaf10db, 0x8907af], // 5 violet
+            ];
+            gNoteGrad = _GEM_GRADIENTS.map(([topHex, botHex]) => {
+                const g = new T.BoxGeometry(NW, NH, ND);
+                const _pos = g.attributes.position;
+                const _colors = new Float32Array(_pos.count * 3);
+                const _topCol = new T.Color(topHex);
+                const _botCol = new T.Color(botHex);
+                const _tmpCol = new T.Color();
+                const _halfH = NH / 2;
+                for (let i = 0; i < _pos.count; i++) {
+                    const t = (_pos.getY(i) + _halfH) / (2 * _halfH); // 0 bottom..1 top
+                    _tmpCol.copy(_botCol).lerp(_topCol, t);
+                    _colors[i * 3] = _tmpCol.r;
+                    _colors[i * 3 + 1] = _tmpCol.g;
+                    _colors[i * 3 + 2] = _tmpCol.b;
+                }
+                g.setAttribute('color', new T.BufferAttribute(_colors, 3));
+                _ownedSharedGeos.push(g);
+                return g;
+            });
 
             /** Filled ring matching flying-note outline (1.1) minus core (1.0); hollow centre. */
             function mkGhostFrameGeometry() {
@@ -4355,10 +4468,13 @@
             const centerOffset = -0.5 * (gTapChevron.boundingBox.max.y + gTapChevron.boundingBox.min.y);
             gTapChevron.translate(0, centerOffset, 0);
 
-            // String materials: emissive so they glow when lit
-            mStr = activePalette.map(c => new T.MeshStandardMaterial({
-                color: c, emissive: c, emissiveIntensity: 0.002,
-                transparent: true, opacity: 0.4, roughness: 1,
+            // String materials. Strings 0..5 use a per-vertex gradient (color is
+            // white so the gradient baked into gNoteGrad[s] shows pure); strings
+            // 6/7 keep a flat colour (vertexColors:false ignores the attribute).
+            mStr = activePalette.map((c, i) => new T.MeshBasicMaterial({
+                color: i < 6 ? 0xffffff : c,
+                vertexColors: i < 6,
+                transparent: true, opacity: 1.0,
             }));
             mGlow = activePalette.map(c => new T.MeshLambertMaterial({
                 color: 0xffffff, emissive: c, emissiveIntensity: 1.5,
@@ -4369,7 +4485,9 @@
                 color: c, transparent: true, opacity: 0.35,
             }));
             mWhiteOutline = new T.MeshLambertMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.6, transparent: true, opacity: 1.0, depthWrite: false });
-            mStrHitOutline = activePalette.map(c => new T.MeshLambertMaterial({
+            const _outlineColors = [0xFF5552, 0xFFF352, 0x31CAFF, 0xFFAE31, 0x84FF42, 0xE639FF];
+            const _outlinePalette = activePalette.map((c, i) => _outlineColors[i] ?? c);
+            mStrHitOutline = _outlinePalette.map(c => new T.MeshLambertMaterial({
                 color: c, emissive: c, emissiveIntensity: 1.0,
                 transparent: true, opacity: 1.0, depthWrite: false,
             }));
@@ -4608,14 +4726,14 @@
             });
             pSusRail = pool(noteG, () => {
                 const m = new T.Mesh(gSusRail, mSusRailBase.clone());
-                m.renderOrder = 11;
+                m.renderOrder = 5; // below strings (7) so strings render on top
                 return m;
             });
 
             // Bloom glow for chord sustain rails — wider plane with a gaussian
             // falloff texture (bright centre → transparent edges in X direction)
             // and additive blending, so it brightens whatever is behind it.
-            // renderOrder 10 places it behind the core rail (11).
+            // renderOrder 4 places it behind the core rail (5).
             _bloomGaussTex = _makeGaussTex(T);
             gSusRailBloom = new T.PlaneGeometry(1, 1);
             gSusRailBloom.rotateX(-Math.PI / 2);
@@ -4629,7 +4747,7 @@
             });
             pSusRailBloom = pool(noteG, () => {
                 const m = new T.Mesh(gSusRailBloom, mSusRailBloomBase.clone());
-                m.renderOrder = 10;
+                m.renderOrder = 4; // below strings (7) so strings render on top
                 return m;
             });
 
@@ -4645,6 +4763,67 @@
                 return m;
             });
 
+            // ── InstancedMesh temporaries ──────────────────────────────────────
+            _imM4    = new T.Matrix4();
+            _imPos   = new T.Vector3();
+            _imSca   = new T.Vector3();
+            _imQ     = new T.Quaternion();
+            _imAZ    = new T.Vector3(0, 0, 1);
+            _imColor = new T.Color();
+
+            // ── Shared ShaderMaterial templates ───────────────────────────────
+            // Vertex shader used by PM-X and FH-X on individual note gems.
+            // Three.js injects `USE_INSTANCING` + `instanceMatrix` attribute
+            // into the prefix when an InstancedMesh uses a ShaderMaterial.
+            const _imTechVert = [
+                'attribute float instanceAlpha;',
+                'varying float vAlpha;',
+                'varying vec2 vUv;',
+                'void main() {',
+                '    vUv = uv;',
+                '    vAlpha = instanceAlpha;',
+                '    vec4 pos = vec4(position, 1.0);',
+                '    #ifdef USE_INSTANCING',
+                '    pos = instanceMatrix * pos;',
+                '    #endif',
+                '    gl_Position = projectionMatrix * modelViewMatrix * pos;',
+                '}',
+            ].join('\n');
+            const _imTechFrag = [
+                'uniform sampler2D map;',
+                'varying float vAlpha;',
+                'varying vec2 vUv;',
+                'void main() {',
+                '    vec4 t = texture2D(map, vUv);',
+                '    if (t.a * vAlpha < 0.01) discard;',
+                '    gl_FragColor = vec4(t.rgb, t.a * vAlpha);',
+                '}',
+            ].join('\n');
+
+            // ── PM / FH tech marker InstancedMeshes ───────────────────────────
+            // Each IM gets a geometry clone so instanceAlpha is a separate buffer.
+            const _mkTechIM = (spriteMat, alphaArr) => {
+                const geo = gTechPlane.clone();
+                const alphaAttr = new T.InstancedBufferAttribute(alphaArr, 1);
+                alphaAttr.setUsage(T.DynamicDrawUsage);
+                geo.setAttribute('instanceAlpha', alphaAttr);
+                const mat = new T.ShaderMaterial({
+                    uniforms: { map: { value: spriteMat.map } },
+                    vertexShader: _imTechVert,
+                    fragmentShader: _imTechFrag,
+                    transparent: true, depthTest: false, depthWrite: false, side: T.DoubleSide,
+                });
+                const im = new T.InstancedMesh(geo, mat, IM_TECH_CAP);
+                im.instanceMatrix.setUsage(T.DynamicDrawUsage);
+                im.frustumCulled = false;
+                im.count = 0;
+                noteG.add(im);
+                return { im, geo, mat };
+            };
+            { const r = _mkTechIM(palmMuteXSpriteMat(),    _imPMTechAlphaArr);
+              imPMTech = r.im; _imGPMTech = r.geo; _imPMTechMat = r.mat; imPMTech.renderOrder = 702; }
+            { const r = _mkTechIM(fretHandMuteXSpriteMat(), _imFHTechAlphaArr);
+              imFHTech = r.im; _imGFHTech = r.geo; _imFHTechMat = r.mat; imFHTech.renderOrder = 700; }
 
             // Dynamic fret number labels (heat-coloured, updated each frame)
             pFretLbl = pool(lblG, () => new T.Sprite(txtMat('0', '#888', false, 'fretRow')));
@@ -4688,7 +4867,7 @@
             // Vertical fret dividers within active lane
             const gLaneDivider = new T.BoxGeometry(0.15 * K, 0.15 * K, 1);
             mLaneDivider = new T.MeshBasicMaterial({
-                color: 0xffffff, transparent: true, opacity: 0.08, fog: false, depthWrite: false,
+                color: 0x46DDE6, transparent: true, opacity: 1.00, fog: false, depthWrite: false,
             });
             mLaneDividerArp = new T.MeshBasicMaterial({
                 color: ARPEGGIO_RIM_BLUE_HEX,
@@ -4813,18 +4992,42 @@
                 gPMXFill.setAttribute('position', new T.BufferAttribute(pos, 3));
                 gPMXFill.setIndex(new T.BufferAttribute(idx, 1));
             }
-            pPMXFill = pool(noteG, () => new T.Mesh(
-                gPMXFill,
-                new T.MeshBasicMaterial({
-                    color: 0x000000,
-                    transparent: true,
-                    opacity: 1.0,
-                    depthWrite: false,
-                    depthTest: false,
-                    fog: false,
-                    side: T.DoubleSide,
-                }),
-            ));
+            // PM fill — InstancedMesh (black, varying alpha per chord).
+            {
+                const _imFillVert = [
+                    'attribute float instanceAlpha;',
+                    'varying float vAlpha;',
+                    'void main() {',
+                    '    vAlpha = instanceAlpha;',
+                    '    vec4 pos = vec4(position, 1.0);',
+                    '    #ifdef USE_INSTANCING',
+                    '    pos = instanceMatrix * pos;',
+                    '    #endif',
+                    '    gl_Position = projectionMatrix * modelViewMatrix * pos;',
+                    '}',
+                ].join('\n');
+                const _imFillFrag = [
+                    'varying float vAlpha;',
+                    'void main() {',
+                    '    if (vAlpha <= 0.0) discard;',
+                    '    gl_FragColor = vec4(0.0, 0.0, 0.0, vAlpha);',
+                    '}',
+                ].join('\n');
+                const alphaAttr = new T.InstancedBufferAttribute(_imPMXFillAlphaArr, 1);
+                alphaAttr.setUsage(T.DynamicDrawUsage);
+                gPMXFill.setAttribute('instanceAlpha', alphaAttr);
+                _imPMXFillMat = new T.ShaderMaterial({
+                    vertexShader: _imFillVert, fragmentShader: _imFillFrag,
+                    transparent: true, depthTest: false, depthWrite: false,
+                    fog: false, side: T.DoubleSide,
+                });
+                imPMXFill = new T.InstancedMesh(gPMXFill, _imPMXFillMat, IM_STRUM_CAP);
+                imPMXFill.instanceMatrix.setUsage(T.DynamicDrawUsage);
+                imPMXFill.frustumCulled = false;
+                imPMXFill.renderOrder = 10.5;
+                imPMXFill.count = 0;
+                noteG.add(imPMXFill);
+            }
 
             // FH (frethand mute) strum X fill — 5 regions: 4 corner quadrants + centre diamond.
             // 12 vertices, 10 triangles. L/R wings stop at fx=±0.50 (no solid lateral blocks).
@@ -4869,18 +5072,42 @@
                 gFHXFill.setAttribute('position', new T.BufferAttribute(pos, 3));
                 gFHXFill.setIndex(new T.BufferAttribute(idx, 1));
             }
-            pFHXFill = pool(noteG, () => new T.Mesh(
-                gFHXFill,
-                new T.MeshBasicMaterial({
-                    color: 0x000000,
-                    transparent: true,
-                    opacity: 1.0,
-                    depthWrite: false,
-                    depthTest: false,
-                    fog: false,
-                    side: T.DoubleSide,
-                }),
-            ));
+            // FH fill — InstancedMesh (black, varying alpha per chord).
+            {
+                const _imFillVert = [
+                    'attribute float instanceAlpha;',
+                    'varying float vAlpha;',
+                    'void main() {',
+                    '    vAlpha = instanceAlpha;',
+                    '    vec4 pos = vec4(position, 1.0);',
+                    '    #ifdef USE_INSTANCING',
+                    '    pos = instanceMatrix * pos;',
+                    '    #endif',
+                    '    gl_Position = projectionMatrix * modelViewMatrix * pos;',
+                    '}',
+                ].join('\n');
+                const _imFillFrag = [
+                    'varying float vAlpha;',
+                    'void main() {',
+                    '    if (vAlpha <= 0.0) discard;',
+                    '    gl_FragColor = vec4(0.0, 0.0, 0.0, vAlpha);',
+                    '}',
+                ].join('\n');
+                const alphaAttr = new T.InstancedBufferAttribute(_imFHXFillAlphaArr, 1);
+                alphaAttr.setUsage(T.DynamicDrawUsage);
+                gFHXFill.setAttribute('instanceAlpha', alphaAttr);
+                _imFHXFillMat = new T.ShaderMaterial({
+                    vertexShader: _imFillVert, fragmentShader: _imFillFrag,
+                    transparent: true, depthTest: false, depthWrite: false,
+                    fog: false, side: T.DoubleSide,
+                });
+                imFHXFill = new T.InstancedMesh(gFHXFill, _imFHXFillMat, IM_STRUM_CAP);
+                imFHXFill.instanceMatrix.setUsage(T.DynamicDrawUsage);
+                imFHXFill.frustumCulled = false;
+                imFHXFill.renderOrder = 10.5;
+                imFHXFill.count = 0;
+                noteG.add(imFHXFill);
+            }
 
             // PM X lines — 8 segments baked as thin quads in ±1 normalised space.
             // Scale the pool mesh by (innerW*0.5, -innerH*0.5, ...) per chord;
@@ -4917,18 +5144,56 @@
                 gPMXLines.setAttribute('position', new T.BufferAttribute(pos, 3));
                 gPMXLines.setIndex(new T.BufferAttribute(idx, 1));
             }
-            pMuteXLines = pool(noteG, () => new T.Mesh(
-                gPMXLines,
-                new T.MeshBasicMaterial({
-                    color: 0xffffff,
-                    transparent: true,
-                    opacity: 1.0,
-                    depthWrite: false,
-                    depthTest: false,
-                    fog: false,
-                    side: T.DoubleSide,
-                }),
-            ));
+            // PM lines — InstancedMesh (varying color + alpha per chord).
+            // instanceColor (THREE built-in) carries baseRimHex per instance;
+            // instanceAlpha carries the per-chord opacity.
+            {
+                const _imLinesVert = [
+                    'attribute float instanceAlpha;',
+                    'varying float vAlpha;',
+                    'varying vec3 vColor;',
+                    'void main() {',
+                    '    vAlpha = instanceAlpha;',
+                    '    #ifdef USE_INSTANCING_COLOR',
+                    '    vColor = instanceColor;',
+                    '    #else',
+                    '    vColor = vec3(1.0);',
+                    '    #endif',
+                    '    vec4 pos = vec4(position, 1.0);',
+                    '    #ifdef USE_INSTANCING',
+                    '    pos = instanceMatrix * pos;',
+                    '    #endif',
+                    '    gl_Position = projectionMatrix * modelViewMatrix * pos;',
+                    '}',
+                ].join('\n');
+                const _imLinesFrag = [
+                    'varying float vAlpha;',
+                    'varying vec3 vColor;',
+                    'void main() {',
+                    '    if (vAlpha <= 0.0) discard;',
+                    '    gl_FragColor = vec4(vColor, vAlpha);',
+                    '}',
+                ].join('\n');
+                const alphaAttr = new T.InstancedBufferAttribute(_imPMXLinesAlphaArr, 1);
+                alphaAttr.setUsage(T.DynamicDrawUsage);
+                gPMXLines.setAttribute('instanceAlpha', alphaAttr);
+                _imPMXLinesMat = new T.ShaderMaterial({
+                    vertexShader: _imLinesVert, fragmentShader: _imLinesFrag,
+                    transparent: true, depthTest: false, depthWrite: false,
+                    fog: false, side: T.DoubleSide,
+                });
+                imPMXLines = new T.InstancedMesh(gPMXLines, _imPMXLinesMat, IM_STRUM_CAP);
+                imPMXLines.instanceMatrix.setUsage(T.DynamicDrawUsage);
+                imPMXLines.frustumCulled = false;
+                imPMXLines.renderOrder = 11;
+                // Eagerly initialise instanceColor so USE_INSTANCING_COLOR is
+                // defined when the shader is compiled on the first draw.
+                _imColor.set(1, 1, 1);
+                imPMXLines.setColorAt(0, _imColor);
+                imPMXLines.instanceColor.setUsage(T.DynamicDrawUsage);
+                imPMXLines.count = 0;
+                noteG.add(imPMXLines);
+            }
 
             // FH X lines — same scheme, 8 segments from the FH_XLINES pattern
             if (!gFHXLines) {
@@ -4963,16 +5228,84 @@
                 gFHXLines.setAttribute('position', new T.BufferAttribute(pos, 3));
                 gFHXLines.setIndex(new T.BufferAttribute(idx, 1));
             }
+            // FH lines — InstancedMesh (varying color + alpha per chord).
+            {
+                const _imLinesVert = [
+                    'attribute float instanceAlpha;',
+                    'varying float vAlpha;',
+                    'varying vec3 vColor;',
+                    'void main() {',
+                    '    vAlpha = instanceAlpha;',
+                    '    #ifdef USE_INSTANCING_COLOR',
+                    '    vColor = instanceColor;',
+                    '    #else',
+                    '    vColor = vec3(1.0);',
+                    '    #endif',
+                    '    vec4 pos = vec4(position, 1.0);',
+                    '    #ifdef USE_INSTANCING',
+                    '    pos = instanceMatrix * pos;',
+                    '    #endif',
+                    '    gl_Position = projectionMatrix * modelViewMatrix * pos;',
+                    '}',
+                ].join('\n');
+                const _imLinesFrag = [
+                    'varying float vAlpha;',
+                    'varying vec3 vColor;',
+                    'void main() {',
+                    '    if (vAlpha <= 0.0) discard;',
+                    '    gl_FragColor = vec4(vColor, vAlpha);',
+                    '}',
+                ].join('\n');
+                const alphaAttr = new T.InstancedBufferAttribute(_imFHXLinesAlphaArr, 1);
+                alphaAttr.setUsage(T.DynamicDrawUsage);
+                gFHXLines.setAttribute('instanceAlpha', alphaAttr);
+                _imFHXLinesMat = new T.ShaderMaterial({
+                    vertexShader: _imLinesVert, fragmentShader: _imLinesFrag,
+                    transparent: true, depthTest: false, depthWrite: false,
+                    fog: false, side: T.DoubleSide,
+                });
+                imFHXLines = new T.InstancedMesh(gFHXLines, _imFHXLinesMat, IM_STRUM_CAP);
+                imFHXLines.instanceMatrix.setUsage(T.DynamicDrawUsage);
+                imFHXLines.frustumCulled = false;
+                imFHXLines.renderOrder = 11;
+                _imColor.set(1, 1, 1);
+                imFHXLines.setColorAt(0, _imColor);
+                imFHXLines.instanceColor.setUsage(T.DynamicDrawUsage);
+                imFHXLines.count = 0;
+                noteG.add(imFHXLines);
+            }
+
+            // Pool-based strum-indicator replacements.  The IM approach above uses
+            // a fixed renderOrder per mesh type, which lets far-chord X marks overdraw
+            // gems/frames of nearer chords.  Pools give per-chord Z-proportional RO.
+            // Geometries are shared with the (now empty) IMs — MeshBasicMaterial
+            // ignores the instanceAlpha / instanceColor attributes on the geometry.
+            pPMXFill = pool(noteG, () => new T.Mesh(
+                gPMXFill,
+                new T.MeshBasicMaterial({
+                    color: 0x000000, transparent: true, opacity: 1,
+                    depthWrite: false, depthTest: false, fog: false, side: T.DoubleSide,
+                }),
+            ));
+            pFHXFill = pool(noteG, () => new T.Mesh(
+                gFHXFill,
+                new T.MeshBasicMaterial({
+                    color: 0x000000, transparent: true, opacity: 1,
+                    depthWrite: false, depthTest: false, fog: false, side: T.DoubleSide,
+                }),
+            ));
+            pMuteXLines = pool(noteG, () => new T.Mesh(
+                gPMXLines,
+                new T.MeshBasicMaterial({
+                    color: 0xffffff, transparent: true, opacity: 1,
+                    depthWrite: false, depthTest: false, fog: false, side: T.DoubleSide,
+                }),
+            ));
             pFHXLines = pool(noteG, () => new T.Mesh(
                 gFHXLines,
                 new T.MeshBasicMaterial({
-                    color: 0xffffff,
-                    transparent: true,
-                    opacity: 1.0,
-                    depthWrite: false,
-                    depthTest: false,
-                    fog: false,
-                    side: T.DoubleSide,
+                    color: 0xffffff, transparent: true, opacity: 1,
+                    depthWrite: false, depthTest: false, fog: false, side: T.DoubleSide,
                 }),
             ));
 
@@ -5002,13 +5335,13 @@
             // Per-note fret number below note with connector line
             pNoteFretLabel = pool(lblG, () => {
                 const _nfl = new T.Sprite(txtMat('0', FRET_LABEL_GOLD_HEX, false, 'noteFret').clone());
-                // fog=false: same as pFretColMarker — opacity fade-in handles appearance.
                 _nfl.material.fog = false;
+                _nfl.material.depthTest = false;
                 return _nfl;
             });
             pConnectorLine = pool(noteG, () => new T.Line(
                 new T.BufferGeometry().setFromPoints([new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0)]),
-                new T.LineBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.5 }),
+                new T.LineBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.5, depthTest: false }),
             ));
             pDropLine = pool(noteG, () => new T.Line(
                 new T.BufferGeometry().setFromPoints([new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0)]),
@@ -5070,10 +5403,6 @@
             pBarreLine.warm(_WARM_CHORD);
             pArpBracket.warm(_WARM_CHORD);
             pHaloBar.warm(_WARM_CHORD);
-            pPMXFill.warm(_WARM_CHORD);
-            pFHXFill.warm(_WARM_CHORD);
-            pMuteXLines.warm(_WARM_CHORD);
-            pFHXLines.warm(_WARM_CHORD);
             pFretLbl.warm(_WARM_LANE);
             pLane.warm(_WARM_LANE * 2);  // anchor-driven lanes × time slices
             pLaneDivider.warm(_WARM_LANE);
@@ -5424,7 +5753,14 @@
         function _applyPaletteToMaterials() {
             for (let s = 0; s < activePalette.length; s++) {
                 const c = activePalette[s];
-                if (mStr[s]) { mStr[s].color.setHex(c); mStr[s].emissive.setHex(c); }
+                if (mStr[s]) {
+                    // Gradient strings (0..5) keep a white base so the per-vertex
+                    // colours in gNoteGrad[s] show pure; only flat strings (6/7)
+                    // take the palette colour. mStr is MeshBasicMaterial (no
+                    // emissive) — guard the legacy emissive retint.
+                    if (s >= 6) mStr[s].color.setHex(c);
+                    if (mStr[s].emissive) mStr[s].emissive.setHex(c);
+                }
                 if (mGlow[s]) mGlow[s].emissive.setHex(c);
                 if (mSus[s]) mSus[s].color.setHex(c);
                 if (mStrHitOutline[s]) {
@@ -5642,6 +5978,8 @@
             }
             stringLines = [];
             stringLineGlows = [];
+            for (const m of fretWireMats) m?.dispose?.();
+            fretWireMats = [];
 
             const board = boardSpanX();
             const bw = board.width + 4 * K;
@@ -5679,7 +6017,7 @@
                 const pts = [new T.Vector3(boardStringStartX, sY(s), 0), new T.Vector3(stringEndX, sY(s), 0)];
                 const g = new T.BufferGeometry().setFromPoints(pts);
                 const line = new T.Line(g, new T.LineBasicMaterial({ color: activePalette[s], transparent: true, opacity: lineGlowOp }));
-                line.renderOrder = 7; // below sus rails (10/11), below chord fill (10)
+                line.renderOrder = 7; // above sus rails (4/5), below chord fill (10)
                 fretG.add(line);
                 stringLineGlows.push(line);
             }
@@ -5695,7 +6033,7 @@
                     transparent: true, opacity: _vibrancyIdleOp, roughness: 1,
                 });
                 const mesh = new T.Mesh(g, mat);
-                mesh.renderOrder = 7; // below sus rails (10/11), below chord fill (10)
+                mesh.renderOrder = 703; // above chord frames ([48,698]) and note gems ([50,700]); below technique labels (1000)
                 mesh.position.set(boardStringStartX + strSpan * 0.5, sY(s), 0);
                 fretG.add(mesh);
                 stringLines.push(mesh);
@@ -5825,29 +6163,45 @@
                 fretG.add(nutHeadstockGroup);
             }
 
-            // Fret wires
+            // Fret wires — BoxGeometry bars matching string thickness (STR_THICK)
+            // renderOrder 704: above string mesh (703) so fret wires draw on top
+            // of the strings, matching a real guitar where metal fret bars sit
+            // above the strings on the neck.
+            // BoxGeometry (not T.Line): WebGL ignores linewidth > 1px on almost all
+            // platforms, so Line objects always render as hairlines.  Using the same
+            // STR_THICK × STR_THICK cross-section as the string BoxGeometry gives the
+            // wires a visible, matching thickness.
+            // depthTest: false: required because string BoxGeometry (MeshStandard,
+            // depthWrite:true) writes depth at Z=+STR_THICK/2; wires at Z=0 would
+            // fail the depth test at string pixels despite higher renderOrder.
+            // Colors are updated each frame by the fretWireMats loop in update():
+            //   default  → gray  0x666688, opacity 0.4
+            //   in-anchor→ gold  0xD8A636, opacity 0.8  (same as FRET_LABEL_GOLD_HEX)
             const yTop = Math.max(sY(0), sY(nStr - 1));
             const yBottom = Math.min(sY(0), sY(nStr - 1));
+            const wireH = (yTop + S_GAP * 0.3) - (yBottom - S_GAP * 0.3);
+            const wireMidY = (yTop + yBottom) / 2;
             for (let f = 0; f <= NFRETS; f++) {
                 const x = xFret(f);
-                const isMain = DOTS.includes(f);
-                const g = new T.BufferGeometry().setFromPoints([
-                    new T.Vector3(x, yBottom - S_GAP * 0.3, 0),
-                    new T.Vector3(x, yTop + S_GAP * 0.3, 0),
-                ]);
-                fretG.add(new T.Line(g, new T.LineBasicMaterial({
-                    color: isMain ? 0xbbbbff : 0x666688,
-                    transparent: true,
-                    opacity: isMain ? 0.8 : 0.4,
-                })));
+                const g = new T.BoxGeometry(STR_THICK, wireH, STR_THICK);
+                const mat = new T.MeshBasicMaterial({
+                    color: 0x666688, transparent: true, opacity: 0.4,
+                    depthTest: false,
+                });
+                const fw = new T.Mesh(g, mat);
+                fw.position.set(x, wireMidY, 0);
+                fw.renderOrder = 704;
+                fretG.add(fw);
+                fretWireMats[f] = mat;
             }
 
-            // Fret dots — translucent + depthWrite:false so spheres don't steal the
-            // depth buffer from the transparent string meshes (which would clip the
-            // strings where geometry overlaps). Slight negative Z recessed under the
+            // Fret dots — flat circles (CircleGeometry) lying in the XY plane and
+            // facing +Z so they always appear as perfect circles from the camera.
+            // depthWrite:false so they don't steal the depth buffer from the
+            // transparent string meshes. Slight negative Z recessed under the
             // string plane. Radius 10% below the former 1.5*K dots.
             const dotRZ = (1.5 * K * 0.9);
-            const dg = new T.SphereGeometry(dotRZ, 8, 6);
+            const dg = new T.CircleGeometry(dotRZ, 64);
             const dm = new T.MeshBasicMaterial({
                 color: 0x556677,
                 transparent: true,
@@ -6836,9 +7190,94 @@
             return ftSide / (0.15 * K);
         }
 
+        /* ── Fret-label measure-skip rule ───────────────────────────────── */
+        // For each (note_time, fret) pair across standalone notes and chord
+        // notes, determine which ones are allowed to display their fret
+        // indicator number. Rule: per fret (regardless of string), show the
+        // number only on the first note in a given measure; suppress it for
+        // the immediately following measure; then allow it again (current
+        // measure + 2).
+        // Key scheme: Math.round(t * 25) * 100 + fret  (40 ms time buckets).
+        // Using a coarse time-bucket (not exact time) ensures that a synthetic
+        // chord template whose .t differs from the corresponding standalone
+        // arpeggio note by a few ms still resolves to the same key.
+        // Only standalone notes (notesArr) populate the set; regular chord notes
+        // never show labels, and synthetic chord notes share frets/onsets with
+        // their arpeggio counterparts, so the same keys are found at lookup time.
+        // Returns a Set of numeric keys (Math.round(t*25)*100 + fret).
+        function _buildFretLabelSet(notesArr, _chordsArr, beatsArr) {
+            const events = [];
+            if (notesArr) {
+                for (let _i = 0; _i < notesArr.length; _i++) {
+                    const _n = notesArr[_i];
+                    if (_n.f > 0) events.push({ t: _n.t, f: _n.f });
+                }
+            }
+            // Chord events intentionally excluded: regular chord notes don't show
+            // fret labels; synthetic chord notes share frets with arpeggio note-stream
+            // notes already captured above, so no separate chord processing needed.
+            events.sort((a, b) => a.t - b.t);
+            const beats = beatsArr || [];
+            let beatIdx = 0;
+            let currentMeasure = 0;
+            const nextShowMeasure = new Map(); // fret → next measure where label is allowed
+            const allowed = new Set();
+            for (let _ei = 0; _ei < events.length; _ei++) {
+                const { t, f } = events[_ei];
+                // Advance beats pointer: find the current measure for time t.
+                while (beatIdx < beats.length && beats[beatIdx].time <= t + 1e-4) {
+                    if (beats[beatIdx].measure >= 0) currentMeasure = beats[beatIdx].measure;
+                    beatIdx++;
+                }
+                const nextM = nextShowMeasure.get(f) ?? 0;
+                if (currentMeasure >= nextM) {
+                    // Time-bucket key: 40 ms groups absorb timing jitter while
+                    // still distinguishing notes at different positions in the measure.
+                    allowed.add(Math.round(t * 25) * 100 + f);
+                    // Suppress this fret for the next measure; re-allow at +2.
+                    nextShowMeasure.set(f, currentMeasure + 2);
+                }
+            }
+            return allowed;
+        }
+
+        // Smoothed playback clock for this frame. Called once per frame at the
+        // top of update(); camUpdate() reads the stored _frameNow afterward so
+        // notes and camera share one clock. See the _clk* state block above.
+        function smoothNow(bundle) {
+            const raw = bundle.currentTime;
+            const p = performance.now();
+            if (raw !== _clkAudioT) {
+                // New audio sample — re-anchor and refine the rate estimate.
+                if (!Number.isNaN(_clkPerf)) {
+                    const dP = (p - _clkPerf) / 1000;
+                    if (dP > 0.001 && dP < 0.5) {
+                        const r = (raw - _clkAudioT) / dP;
+                        _clkRate = (r > 0.05 && r < 5) ? r : 1; // seek/loop → reset
+                    } else if (dP >= 0.5) {
+                        _clkRate = 1; // long gap (paused / tab inactive)
+                    }
+                }
+                _clkAudioT = raw;
+                _clkPerf = p;
+                return (_frameNow = raw);
+            }
+            // Same audio sample as last call — interpolate forward, capped so a
+            // stalled main thread or paused audio can't run the clock away.
+            const dt = (p - _clkPerf) / 1000;
+            if (dt <= 0 || dt > 0.1) return (_frameNow = raw);
+            return (_frameNow = _clkAudioT + _clkRate * dt);
+        }
+
         /* ── Per-frame rendering ─────────────────────────────────────────── */
         function update(bundle) {
             pbBeg(0);
+            // Lean sustain rendering is the default (see declaration above);
+            // the full-quality outline+bloom look is an opt-out. Cheap
+            // per-frame read so the console flag takes effect live.
+            try {
+                _leanSus = localStorage.getItem('h3d_full_sus') !== '1';
+            } catch (_) { _leanSus = true; }
             // Materialize the text-size multiplier from the user's slider.
             // textSize ∈ [0,1]; _textSizeMul ∈ [0.5, 1.5] with 0.5 ↦ 1.0×
             // so default behaviour matches what the renderer did pre-slider.
@@ -6862,7 +7301,13 @@
             if (projMeshArr) for (const m of projMeshArr) m.visible = false;
             pFretLbl.reset(); pLane.reset(); pLaneDivider.reset();
             if (pGhostFretLbl) pGhostFretLbl.reset();
-            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pArpBracket.reset(); pHaloBar.reset(); pPMXFill.reset(); pFHXFill.reset(); pMuteXLines.reset(); pFHXLines.reset();
+            pChordBox.reset(); pChordFrameFill.reset(); pChordLbl.reset(); pBarreLine.reset(); pArpBracket.reset(); pHaloBar.reset();
+            _imPMTechCount = _imFHTechCount = 0;
+            _imPMXFillCount = _imPMXLinesCount = _imFHXFillCount = _imFHXLinesCount = 0;
+            if (pPMXFill) pPMXFill.reset();
+            if (pFHXFill) pFHXFill.reset();
+            if (pMuteXLines) pMuteXLines.reset();
+            if (pFHXLines) pFHXLines.reset();
             pNoteFretLabel.reset(); pConnectorLine.reset(); pDropLine.reset();
             pFretColMarker.reset(); pSusRail.reset(); pSusRailBloom.reset(); pTechPlane.reset();
             // Clear per-frame queues in-place (avoid reallocating the array object).
@@ -6905,7 +7350,7 @@
                 ? bundle.getNoteStateProvider() != null
                 : !!_ndGetNoteState;
 
-            const now = bundle.currentTime;
+            const now = smoothNow(bundle);
             const t0 = now - BEHIND;
             const t1 = now + AHEAD;
             // With a verdict provider attached, keep notes and chord frames
@@ -7060,7 +7505,7 @@
                         for (let j = lo; j < notes.length; j++) {
                             const q = notes[j];
                             if (q.t > endT + EPS) break;
-                            if (q.s !== srcS || Math.abs(q.t - endT) >= EPS) continue;
+                            if (q.s !== srcS || q.t <= srcT || Math.abs(q.t - endT) >= EPS) continue;
                             const qSl = (Number.isFinite(q.sl) && q.sl >= 0) ? q.sl
                                       : (Number.isFinite(q.slu) && q.slu >= 0) ? q.slu : -1;
                             if (srcSl >= 0 && q.f === srcSl) { stSet.add(_noteKey(q.t, q.s)); break; } // case 1
@@ -7133,8 +7578,39 @@
                 laneRailBoundHi = _arpRailBoundHiScratch;
             }
             const beats = bundle.beats;
+            // Rebuild the fret-label visibility set whenever the chart changes.
+            if (notes !== _fretLabelNotesRef) {
+                _fretLabelAllowed = _buildFretLabelSet(notes, chords, beats);
+                _fretLabelNotesRef = notes;
+            }
             const sections = bundle.sections;
             const anchors = bundle.anchors;
+
+            // ── Fret wire anchor highlight ─────────────────────────────────
+            // Default all wires to gray; wires inside the active anchor range
+            // turn gold to match the dynamic highway lane boundary exactly.
+            // Uses laneBoundsFromAnchor() — the same helper the lane uses —
+            // so the gold fret wires on the board align with the lane edges:
+            //   dMin = fret - 1,  dMax = fret + width - 1
+            // e.g. { fret:3, width:4 } → dMin=2, dMax=6 → wires 2,3,4,5,6 gold.
+            if (fretWireMats.length) {
+                const _fwBounds = anchors && anchors.length
+                    ? anchorLaneBoundsAt(anchors, now) : null;
+                const _fwMin = _fwBounds ? _fwBounds.dMin : -1;
+                const _fwMax = _fwBounds ? _fwBounds.dMax : -1;
+                for (let _f = 0; _f <= NFRETS; _f++) {
+                    const _m = fretWireMats[_f];
+                    if (!_m) continue;
+                    if (_fwMin >= 0 && _f >= _fwMin && _f <= _fwMax) {
+                        _m.color.setHex(0xD8A636);
+                        _m.opacity = 0.8;
+                    } else {
+                        _m.color.setHex(0x666688);
+                        _m.opacity = 0.4;
+                    }
+                }
+            }
+
             const lookaheadBoundsNow = (cameraMode === 'lookahead')
                 ? lookaheadComputeFretBounds(now, anchors, notes, chords)
                 : null;
@@ -7558,6 +8034,10 @@
                     _lookaheadCamPrevNow = null;
                     _lookaheadLowBonusU = 0;
                     _lookaheadHiNeckLatch = false;
+                    // Drop the clock anchor so the new song's currentTime
+                    // re-anchors cleanly instead of measuring a bogus rate
+                    // across the seek-to-0 discontinuity.
+                    _clkAudioT = NaN; _clkPerf = NaN; _clkRate = 1;
                 }
             }
 
@@ -7671,6 +8151,9 @@
 
             pbBeg(4);
             // ── Single notes ──────────────────────────────────────────────
+            // Reset the per-frame fret-label dedup set so stacked labels from
+            // multiple strings at the same onset/fret (arpeggio, synth chord) don't repeat.
+            _frameLabeledKeys.clear();
             // Tracks which (chordId → Set<stringIndex>) pairs already had
             // brackets drawn by the note-stream loop, so the chord loop can
             // skip duplicate bracket draws for the same string.
@@ -7745,6 +8228,7 @@
                         arGhostCid != null,
                         _arpBoundsForNote,
                         _ghostPrevBuf.get(Math.round(n.t * 1e4) * 10 + n.s) ?? -Infinity,
+                        _arpBoundsForNote !== null, // showDropLine: white line for arp note-stream notes
                     );
                     if (arGhostCid != null) {
                         const _arpBounds = _arpBoundsForNote;
@@ -8105,17 +8589,12 @@
                     let chordTailHoldS = CHORD_HWY_LINGER_S;
                     let chordNextSoon = false;
                     if (cjNext && cjNext.t > ch.t + 1e-6) {
-                        const nextSig = chordShapeSignature(cjNext);
-                        const sameVoicingNext = runSig !== null && nextSig !== null && nextSig === runSig;
-                        if (sameVoicingNext) {
-                            const chordFadeWinLo = ch.t + (CHORD_HWY_LINGER_S - CHORD_HWY_FADE_S);
-                            const chordFadeWinHi = ch.t + CHORD_HWY_LINGER_S;
-                            if (cjNext.t >= chordFadeWinLo - 1e-6 && cjNext.t <= chordFadeWinHi + 1e-6) {
-                                chordNextSoon = true;
-                            }
-                        } else {
-                            chordTailHoldS = Math.min(CHORD_HWY_LINGER_S, Math.max(cjNext.t - ch.t, 1e-3));
-                        }
+                        // Clip the hold tail to the gap for both same-voicing (repeat)
+                        // and different-voicing chords. The chordTailMul instant-cut
+                        // check handles the precise zero at onset; the clipped holdS
+                        // prevents the outer gate and hwyPostHitTailFadeMul from
+                        // lingering past that point.
+                        chordTailHoldS = Math.min(CHORD_HWY_LINGER_S, Math.max(cjNext.t - ch.t, 1e-3));
                     }
                     // slopsmith#254 — engine verdicts land ~0.4 s after the
                     // chord crosses; on a fast different-voicing sequence
@@ -8224,6 +8703,30 @@
                     // suppressSynthChord: skip gems + frame but still call drawNote with
                     // skipBody=true so the board projection (fret ghost on fretboard) renders
                     // for all shape strings — shows the hand position like a chord would.
+                    // chordLinksSlide: true when any chord note has a direct sl/slu marker,
+                    // OR when the chord's sustain connects (via case-2 linkNext) to a note
+                    // in bundle.notes that has a slide.  Repeated chords matching either
+                    // condition are treated as normal chords so the player sees the gem.
+                    let chordLinksSlide = chordNotes.some(cn =>
+                        (Number.isFinite(cn.sl) && cn.sl >= 0) ||
+                        (Number.isFinite(cn.slu) && cn.slu >= 0));
+                    if (!chordLinksSlide && isRepeat && maxSus > 0 && notes) {
+                        const _EPS = NEXT_ON_STRING_T_EPS;
+                        outer: for (const cn of chordNotes) {
+                            if (!(cn.sus > 0)) continue;
+                            const _endT = ch.t + cn.sus;
+                            let _ji = lowerBoundT(notes, _endT - _EPS);
+                            for (; _ji < notes.length; _ji++) {
+                                const _q = notes[_ji];
+                                if (_q.t > _endT + _EPS) break;
+                                if (_q.s !== cn.s || Math.abs(_q.t - _endT) >= _EPS) continue;
+                                if ((Number.isFinite(_q.sl) && _q.sl >= 0) ||
+                                    (Number.isFinite(_q.slu) && _q.slu >= 0)) {
+                                    chordLinksSlide = true; break outer;
+                                }
+                            }
+                        }
+                    }
                     if (!deferChordGems || _deferFallback || suppressSynthChord) {
                         for (const cn of chordNotes) {
                             // Suppress non-first gems while an authored arpeggio frame
@@ -8254,7 +8757,7 @@
                                 now,
                                 cn.f === 0 ? chordCX : undefined,
                                 skipLabel,
-                                isRepeat || suppressSynthChord,
+                                (isRepeat && !chordLinksSlide) || suppressSynthChord,
                                 chordTailHoldS,
                                 cn.f === 0 ? laneWForOpenStrings : undefined,
                                 true,
@@ -8262,6 +8765,7 @@
                                 chordSusTrailMatchArpFrame,
                                 null,
                                 _ghostPrevBuf.get(Math.round(ch.t * 1e4) * 10 + cn.s) ?? -Infinity,
+                                chordHighwayLavenderArpVisual || suppressSynthChord || chordWireHighDensity(ch),
                             );
                             lastFretForString[cn.s] = cn.f;
                             // gate by THIS note's own sustain against the
@@ -8342,12 +8846,11 @@
                     // Chord frame-box: rim bars + interior fill gradient.
                     const chDt = chDtEarly; // already computed above for anchor selection
                     const chordTailMul = (() => {
-                        // When any next event (chord OR single note) exists, fade this
-                        // frame over exactly the gap so it reaches 0 the moment the
-                        // next event crosses the hit line — no hold, no linger overlap.
-                        if (chDt < 0 && _chNextEventT < Infinity) {
-                            const gapS = Math.max(1e-3, _chNextEventT - ch.t);
-                            return Math.max(0, 1 - (-chDt) / gapS);
+                        // When a next event (chord OR single note) has already crossed
+                        // the hit line, hide this frame immediately — no fadeout overlap
+                        // when another event is already playing.
+                        if (chDt < 0 && _chNextEventT < Infinity && now >= _chNextEventT) {
+                            return 0;
                         }
                         return hwyPostHitTailFadeMul(chDt, chordTailHoldS, chordNextSoon, chordTailFadeS);
                     })();
@@ -8530,23 +9033,34 @@
                             }
                         }
 
+                        if (chDt > 0) { // framebox only on highway, not on the fretboard
                         const repDim = isRepeat ? 0.78 : 1;
-                        const edgeOp = fade * repDim * CHORD_BOX_EDGE_ALPHA * (isRepeat ? 0.85 : 1) * chordTailMul;
+                        const edgeOp = fade * chordTailMul;
                         const thickZ = Math.max(CHORD_FRAME_RIM_Z_MIN * K, ft * CHORD_FRAME_RIM_Z_SCAL);
-                        const drawFrameBox = (px, py, sx, sy, ord) => {
+                        // Per-chord renderOrder: mirrors the note-gem Z-based scale
+                        // (_noteRO = max(50, round(700 + z/K))) minus 2, so frame edges
+                        // always render just below their own chord's gems while still
+                        // drawing above gems from further-away chords.  The old [20,21]
+                        // range sat below all note gems (50+), letting distant-chord gems
+                        // overdraw near-chord frame edges regardless of Z depth.
+                        // Sub-increments of 0.0001 for intra-chord ordering; safe for any
+                        // chord gap ≥ 0.001 s.
+                        const chordBaseRO = Math.max(48, Math.round(700 + z / K) - 2);
+                        const drawFrameBox = (px, py, sx, sy, ord, hex = rimHex, op = edgeOp) => {
                             const b = pChordBox.get();
                             b.renderOrder = ord;
-                            b.material.color.setHex(rimHex);
+                            b.material.color.setHex(hex);
                             b.position.set(px, py, z);
                             b.scale.set(sx, sy, thickZ);
                             b.rotation.set(0, 0, 0);
-                            b.material.opacity = edgeOp;
+                            b.material.opacity = op;
                         };
+                        const sideHex = isArpeggioFrame ? rimHex : 0x163137;
 
                         const innerW = Math.max(width - 2 * ftSide, width * 0.45);
                         const innerH = Math.max(height - 2 * ft, height * 0.3);
                         const fill = pChordFrameFill.get();
-                        fill.renderOrder = 10;
+                        fill.renderOrder = chordBaseRO - 4;
                         fill.rotation.set(0, 0, 0);
                         fill.position.set(cx, cY, z - 0.004 * K);
                         fill.scale.set(innerW, innerH, 1);
@@ -8557,8 +9071,7 @@
                         fill.material.map = isArpeggioFrame ? chordFrameGradTexArp : chordFrameGradTex;
                         fill.material.color.setRGB(1, 1, 1);
 
-                        // renderOrder 17/18 — above sustain trails (12/13) and rails (10/11), below note gems (50-700)
-                        drawFrameBox(cx, yBot + ft * 0.5, width, ft, 17);
+                        // renderOrder 20/21 — below sustain trails (22/23) and note gems (50+), above chord fill (10)
                         const withTopFrame = !isRepeat;
                         // Non-repeat tapers the upper side bars + draws a thin top bar;
                         // hoisted out so ySideHi can match the actual top-bar thickness
@@ -8571,9 +9084,25 @@
                         const sideH = Math.max(ySideHi - ySideLo, ft * 1.25);
                         const sideCy = ySideLo + sideH * 0.5;
 
+                        // Bottom bar: thin teal (like top bar) + dark corners on top.
+                        {
+                            const botCW = Math.min(sideH * (isRepeat ? 0.5 : 0.25), width * 0.4);
+                            drawFrameBox(cx, yBot + ftThin * 0.5, width, ftThin, chordBaseRO);
+                            drawFrameBox(cx + width * 0.5 - botCW * 0.5, yBot + ft * 0.5, botCW, ft, chordBaseRO + 0.0001, sideHex);
+                            drawFrameBox(cx - width * 0.5 + botCW * 0.5, yBot + ft * 0.5, botCW, ft, chordBaseRO + 0.0002, sideHex);
+                        }
+
                         if (isRepeat) {
-                            drawFrameBox(cx - width * 0.5 + ftSide * 0.5, sideCy, ftSide, sideH, 18);
-                            drawFrameBox(cx + width * 0.5 - ftSide * 0.5, sideCy, ftSide, sideH, 18);
+                            // Lower 30%: thick dark segment
+                            const repLoH = sideH * 0.3;
+                            const repLoCy = ySideLo + repLoH * 0.5;
+                            drawFrameBox(cx - width * 0.5 + ftSide * 0.5, repLoCy, ftSide, repLoH, chordBaseRO + 0.0001, sideHex);
+                            drawFrameBox(cx + width * 0.5 - ftSide * 0.5, repLoCy, ftSide, repLoH, chordBaseRO + 0.0001, sideHex);
+                            // Upper 70%: thin teal segment (same style as non-repeat upper)
+                            const repHiH = sideH - repLoH;
+                            const repHiCy = ySideLo + repLoH + repHiH * 0.5;
+                            drawFrameBox(cx - width * 0.5 + ftThin * 0.5, repHiCy, ftThin, repHiH, chordBaseRO + 0.0001);
+                            drawFrameBox(cx + width * 0.5 - ftThin * 0.5, repHiCy, ftThin, repHiH, chordBaseRO + 0.0001);
                         } else {
                             // Non-repeat: thick sides up to repeat-frame height, then taper to thin above.
                             const threshY = yBot + fullChordBoxH * 0.5; // top of what a repeat frame would be
@@ -8582,20 +9111,20 @@
                             const loSideH = Math.max(Math.min(threshY, ySideHi) - ySideLo, 0);
                             if (loSideH > 0) {
                                 const loCy = ySideLo + loSideH * 0.5;
-                                drawFrameBox(cx - width * 0.5 + ftSide * 0.5, loCy, ftSide, loSideH, 18);
-                                drawFrameBox(cx + width * 0.5 - ftSide * 0.5, loCy, ftSide, loSideH, 18);
+                                drawFrameBox(cx - width * 0.5 + ftSide * 0.5, loCy, ftSide, loSideH, chordBaseRO + 0.0001, sideHex);
+                                drawFrameBox(cx + width * 0.5 - ftSide * 0.5, loCy, ftSide, loSideH, chordBaseRO + 0.0001, sideHex);
                             }
 
                             // Upper thin segment (threshY → ySideHi)
                             const hiSideH = Math.max(ySideHi - threshY, 0);
                             if (hiSideH > 0) {
                                 const hiCy = threshY + hiSideH * 0.5;
-                                drawFrameBox(cx - width * 0.5 + ftThin * 0.5, hiCy, ftThin, hiSideH, 18);
-                                drawFrameBox(cx + width * 0.5 - ftThin * 0.5, hiCy, ftThin, hiSideH, 18);
+                                drawFrameBox(cx - width * 0.5 + ftThin * 0.5, hiCy, ftThin, hiSideH, chordBaseRO + 0.0001);
+                                drawFrameBox(cx + width * 0.5 - ftThin * 0.5, hiCy, ftThin, hiSideH, chordBaseRO + 0.0001);
                             }
 
                             // Top bar: thin
-                            drawFrameBox(cx, yTop - ftThin * 0.5, width, ftThin, 17);
+                            drawFrameBox(cx, yTop - ftThin * 0.5, width, ftThin, chordBaseRO);
                         }
 
                         // Accent bloom on frame edges: 4 additive shells with
@@ -8604,11 +9133,9 @@
                         //   horizontal bars (top/bottom) → expand Y only
                         //   vertical bars (left/right)   → expand X only
                         if (chordAccent && pHaloBar) {
-                            // Gradient halo: 1 mesh per bar (4 draw calls) instead of
-                            // 4 shells × 4 bars = 16. The gHaloBar geometry (built once)
-                            // bakes the additive shell sum into vertex colours. Scale Y by
-                            // (ft * EXPAND_MAX * 0.5) for horizontal bars; rotate ±90° and
-                            // scale Y by (ftSide * EXPAND_MAX * 0.5) for vertical bars.
+                            // Bloom only on the teal (thin) parts of the frame — the dark
+                            // "#163137" L-corners are deliberately left without bloom so they
+                            // remain visibly dark (same appearance as non-accent chords).
                             const haloHex = isArpeggioFrame ? ARPEGGIO_RIM_BLUE_HEX : CHORD_BOX_TEAL_HEX;
                             const EXPAND_MAX = 1.45;
                             const dynamicOp = fade * chordTailMul;
@@ -8616,23 +9143,38 @@
                                 const b = pHaloBar.get();
                                 b.material.color.setHex(haloHex);
                                 b.material.opacity = dynamicOp;
-                                b.renderOrder = 19;
+                                b.renderOrder = chordBaseRO + 0.0003;
                                 b.position.set(px, py, z - 0.001 * K);
                                 b.scale.set(scaleX, scaleY * EXPAND_MAX * 0.5, thickZ * 2.0);
                                 b.rotation.set(0, 0, rotZ);
                             };
-                            // horizontal bars — gradient expands in Y (no rotation)
-                            drawHaloBar(cx, yBot + ft * 0.5,                          width  * 0.5, ft,     0);
+                            // Bottom: center-only bloom (skip dark corner areas)
+                            const _bCW = Math.min(sideH * (isRepeat ? 0.5 : 0.25), width * 0.4);
+                            const centerBotW = width - 2 * _bCW;
+                            if (centerBotW > 0)
+                                drawHaloBar(cx, yBot + ft * 0.5, centerBotW * 0.5, ft, 0);
+                            // Top bar
                             if (withTopFrame)
-                            // Top bar is `ftThin` (see non-repeat draw block above) —
-                            // halo Y centre and scaleY follow the actual bar so the
-                            // bloom doesn't sit above the visible rim.
-                            drawHaloBar(cx, yTop - ftThin * 0.5,                       width  * 0.5, ftThin, 0);
-                            // vertical bars — gradient expands in X (rotate 90° so Y→X)
-                            drawHaloBar(cx - width * 0.5 + ftSide * 0.5, sideCy,  sideH  * 0.5, ftSide, Math.PI * 0.5);
-                            drawHaloBar(cx + width * 0.5 - ftSide * 0.5, sideCy,  sideH  * 0.5, ftSide, Math.PI * 0.5);
+                                drawHaloBar(cx, yTop - ftThin * 0.5, width * 0.5, ftThin, 0);
+                            // Lateral: bloom only on the upper thin-teal segment (skip dark lower segment)
+                            if (isRepeat) {
+                                const repLoH = sideH * 0.3;
+                                const repHiH = sideH - repLoH;
+                                if (repHiH > 0) {
+                                    const repHiCy = ySideLo + repLoH + repHiH * 0.5;
+                                    drawHaloBar(cx - width * 0.5 + ftSide * 0.5, repHiCy, repHiH * 0.5, ftSide, Math.PI * 0.5);
+                                    drawHaloBar(cx + width * 0.5 - ftSide * 0.5, repHiCy, repHiH * 0.5, ftSide, Math.PI * 0.5);
+                                }
+                            } else {
+                                const threshY = yBot + fullChordBoxH * 0.5;
+                                const hiSideH = Math.max(ySideHi - threshY, 0);
+                                if (hiSideH > 0) {
+                                    const hiCy = threshY + hiSideH * 0.5;
+                                    drawHaloBar(cx - width * 0.5 + ftSide * 0.5, hiCy, hiSideH * 0.5, ftSide, Math.PI * 0.5);
+                                    drawHaloBar(cx + width * 0.5 - ftSide * 0.5, hiCy, hiSideH * 0.5, ftSide, Math.PI * 0.5);
+                                }
+                            }
                         }
-
                         const chordName = chordTemplateLabel(bundle.chordTemplates?.[ch.id]);
                         if (chordName && firstInShapeRun && !chordWireHighDensity(ch)) {
                             const lblW = 28 * K, lblH = 9 * K;
@@ -8753,46 +9295,74 @@
                             }
                         }
 
-                        // ── Palm-mute strum indicator — X outline + dark fill ──────────
-                        // Fill: pPMXFill (1 draw call). Lines: pMuteXLines (1 draw call, all
-                        // 8 segments baked as quads in ±1 normalised space). Both meshes are
-                        // scaled to (innerW*0.5, -innerH*0.5) per chord; visible from AHEAD.
+                        // ── Chord fret numbers at the base of the highway ───────────────
+                        // Show fret number per unique fretted position for non-repeated
+                        // chords so the player can read the shape at a glance.
+                        if (!isRepeat) {
+                            const _chFretLblAlpha = Math.min(1.0, (AHEAD - chDt) / 0.35) * chordTailMul;
+                            const _seenChordFrets = new Set();
+                            for (const [, f] of chShape) {
+                                if (f <= 0 || _seenChordFrets.has(f)) continue;
+                                _seenChordFrets.add(f);
+                                const lbl = pNoteFretLabel.get();
+                                const mat = txtMat(f, FRET_LABEL_GOLD_HEX, false, 'noteFret');
+                                if (lbl.material.map !== mat.map) {
+                                    lbl.material.map = mat.map;
+                                    lbl.material.needsUpdate = true;
+                                }
+                                lbl.position.set(xFretMid(f), yMinF, z);
+                                lbl.renderOrder = chordBaseRO + 1;
+                                const _flS = 7.0 * K * (1 + 0.4 * chDt / AHEAD) * _textSizeMul * fretLabelScaleForFret(f);
+                                lbl.scale.set(_flS, _flS, 1);
+                                lbl.material.opacity = _chFretLblAlpha;
+                            }
+                        }
+
+                        // ── Palm-mute strum indicator — pool (fill + lines) ──────────────
+                        // Per-chord Z-proportional renderOrder: fill at chordBaseRO-3.5,
+                        // lines at chordBaseRO-3, frame edges at chordBaseRO.
                         if (isRepeat && chordNotes.some(cn => cn.pm)) {
-                            const pmf = pPMXFill.get();
-                            pmf.renderOrder = 10.5;
-                            pmf.rotation.set(0, 0, 0);
-                            pmf.position.set(cx, cY, z - 0.0045 * K);
-                            pmf.scale.set(innerW * 0.5, -innerH * 0.5, 1);
-                            pmf.material.opacity = edgeOp;
-
-                            const xlm = pMuteXLines.get();
-                            xlm.renderOrder = 11;
-                            xlm.material.color.setHex(baseRimHex);
-                            xlm.position.set(cx, cY, z - 0.005 * K);
-                            xlm.scale.set(innerW * 0.5, -innerH * 0.5, thickZ * 0.5);
-                            xlm.rotation.set(0, 0, 0);
-                            xlm.material.opacity = edgeOp * 0.85;
+                            if (pPMXFill) {
+                                const xf = pPMXFill.get();
+                                xf.renderOrder = chordBaseRO - 3.5;
+                                xf.material.opacity = edgeOp * CHORD_BOX_EDGE_ALPHA;
+                                xf.position.set(cx, cY, z - 0.0045 * K);
+                                xf.scale.set(innerW * 0.5, -innerH * 0.5, 1);
+                                xf.rotation.set(0, 0, 0);
+                            }
+                            if (pMuteXLines) {
+                                const xl = pMuteXLines.get();
+                                xl.renderOrder = chordBaseRO - 3;
+                                xl.material.opacity = edgeOp * 0.85;
+                                xl.material.color.setHex(baseRimHex);
+                                xl.position.set(cx, cY, z - 0.005 * K);
+                                xl.scale.set(innerW * 0.5, -innerH * 0.5, thickZ * 0.5);
+                                xl.rotation.set(0, 0, 0);
+                            }
                         }
 
-                        // ── Frethand-mute strum indicator — FH X outline + dark fill ───
-                        // Fill: pFHXFill (1 draw call). Lines: pFHXLines (1 draw call).
-                        // L/R wings stop at fx=±0.50 — no solid lateral fill blocks.
+                        // ── Frethand-mute strum indicator — pool (fill + lines) ───────────
                         if (isRepeat && chordNotes.some(cn => cn.mt || cn.fhm)) {
-                            const fhf = pFHXFill.get();
-                            fhf.renderOrder = 10.5;
-                            fhf.rotation.set(0, 0, 0);
-                            fhf.position.set(cx, cY, z - 0.0045 * K);
-                            fhf.scale.set(innerW * 0.5, -innerH * 0.5, 1);
-                            fhf.material.opacity = edgeOp;
-
-                            const xlf = pFHXLines.get();
-                            xlf.renderOrder = 11;
-                            xlf.material.color.setHex(baseRimHex);
-                            xlf.position.set(cx, cY, z - 0.005 * K);
-                            xlf.scale.set(innerW * 0.5, -innerH * 0.5, thickZ * 0.5);
-                            xlf.rotation.set(0, 0, 0);
-                            xlf.material.opacity = edgeOp * 0.85;
+                            if (pFHXFill) {
+                                const xf = pFHXFill.get();
+                                xf.renderOrder = chordBaseRO - 3.5;
+                                xf.material.opacity = edgeOp * CHORD_BOX_EDGE_ALPHA;
+                                xf.position.set(cx, cY, z - 0.0045 * K);
+                                xf.scale.set(innerW * 0.5, -innerH * 0.5, 1);
+                                xf.rotation.set(0, 0, 0);
+                            }
+                            if (pFHXLines) {
+                                const xl = pFHXLines.get();
+                                xl.renderOrder = chordBaseRO - 3;
+                                xl.material.opacity = edgeOp * 0.85;
+                                xl.material.color.setHex(baseRimHex);
+                                xl.position.set(cx, cY, z - 0.005 * K);
+                                xl.scale.set(innerW * 0.5, -innerH * 0.5, thickZ * 0.5);
+                                xl.rotation.set(0, 0, 0);
+                            }
                         }
+
+                        } // end if (chDt > 0) — framebox + PM/FH mute only on highway
 
                     }
 
@@ -8886,11 +9456,13 @@
                                     rl.position.set(_rxIn, _yBot, _zMid);
                                     rl.scale.set(_railW, 1, _railLen);
                                     // Bloom glow — wider gaussian plane, additive blending
-                                    const bl = pSusRailBloom.get();
-                                    bl.material.color.setHex(_hex);
-                                    bl.material.opacity = _op * 0.8;
-                                    bl.position.set(_rxIn, _yBot + 0.001, _zMid);
-                                    bl.scale.set(3 * K, 1, _railLen);
+                                    if (!_leanSus) {
+                                        const bl = pSusRailBloom.get();
+                                        bl.material.color.setHex(_hex);
+                                        bl.material.opacity = _op * 0.8;
+                                        bl.position.set(_rxIn, _yBot + 0.001, _zMid);
+                                        bl.scale.set(3 * K, 1, _railLen);
+                                    }
                                 }
                             }
                         }
@@ -9017,10 +9589,8 @@
 
                     {
                         const yPos = boardY + 0.03 * K;
-                        const divOp = 0.02 + highwayIntensity * 0.1;
                         const divOpArp = Math.min(0.92, 0.16 + highwayIntensity * 0.42);
-                        if (mLaneDivider && mLaneDividerArp) {
-                            mLaneDivider.opacity = divOp;
+                        if (mLaneDividerArp) {
                             mLaneDividerArp.opacity = divOpArp;
                         }
 
@@ -9190,16 +9760,24 @@
             //     happening on the playing strings just above them.
             {
                 const yBottom = Math.min(sY(0), sY(nStr - 1));
-                const anchorGold = anchorPlayedFretSpanAt(anchors, now);
+                // anchorSpan: [f0, f1] = [anchor.fret, anchor.fret + width - 1]
+                // e.g. { fret:3, width:4 } → f0=3, f1=6 → frets 3,4,5,6 gold.
+                const anchorSpan = anchorPlayedFretSpanAt(anchors, now);
                 for (let f = 1; f <= NFRETS; f++) {
+                    const isInAnchor = anchorSpan
+                        && f >= anchorSpan.f0 && f <= anchorSpan.f1;
+                    const isMainFret = DOTS.includes(f);
+                    // Rule 1: show gray label only on main frets (dot positions).
+                    // Rule 2: show gold label on any fret inside the anchor range.
+                    // Non-main frets outside the anchor range are hidden entirely.
+                    if (!isInAnchor && !isMainFret) continue;
                     const lb = pFretLbl.get();
-                    const isGold = anchorGold
-                        ? (f >= anchorGold.f0 && f <= anchorGold.f1)
-                        : activeFrets.has(f);
-                    lb.material    = txtMat(f, isGold ? FRET_LABEL_GOLD_HEX : FRET_LABEL_IDLE_HEX, false, 'fretRow');
+                    lb.material = txtMat(f,
+                        isInAnchor ? FRET_LABEL_GOLD_HEX : FRET_LABEL_IDLE_HEX,
+                        false, 'fretRow');
                     lb.position.set(xFretMid(f), yBottom - S_GAP * 1.4, 0.5 * K);
-                    lb.material.opacity = isGold ? 1.0 : 0.55;
-                    const scale = 7.0 * _textSizeMul * fretLabelScaleForFret(f);
+                    lb.material.opacity = isInAnchor ? 1.0 : 0.55;
+                    const scale = 5.95 * _textSizeMul * fretLabelScaleForFret(f);
                     lb.scale.set(scale * K, scale * K, 1);
                     lb.renderOrder = 1000;
                 }
@@ -9358,10 +9936,12 @@
                         }
                         sp.material.opacity = 0.85 * _colFadeIn;
                         sp.position.set(xFretMid(f), labelY, z);
-                        // renderOrder > beat lines (0) so the label always draws on top,
-                        // avoiding the transparent-sort artefact where the beat line
-                        // washes over the label and makes it appear in a "dimmer" colour.
-                        sp.renderOrder = 5;
+                        // Z-proportional: sits between chord frame border
+                        // (chordBaseRO = max(48, round(700+z/K)-2)) and note
+                        // gems (_noteRO = max(50, round(700+z/K))) at the same
+                        // depth, so chord frames never overdraw the label and
+                        // the label never overdraw gems.
+                        sp.renderOrder = Math.max(49, Math.round(700 + z / K) - 1);
                         // Scale grows linearly from 2× at max lookahead to 1× at hit line,
                         // combined with natural perspective attenuation the label starts
                         // visibly larger and converges to the row-label size at z=0.
@@ -9385,10 +9965,10 @@
 
                 let dtSec = 1 / 120;
                 if (_lookaheadCamPrevNow !== null) {
-                    const rawDt = bundle.currentTime - _lookaheadCamPrevNow;
+                    const rawDt = _frameNow - _lookaheadCamPrevNow;
                     if (rawDt > -1 && rawDt < 2) dtSec = Math.min(0.2, Math.max(1 / 960, rawDt));
                 }
-                _lookaheadCamPrevNow = bundle.currentTime;
+                _lookaheadCamPrevNow = _frameNow;
                 const dBlend = Math.min(0.2, Math.max(1e-4, dtSec));
                 const lowBlendFs = 1 - Math.pow(1 - CAM_FOCUS_BLEND_RATE, dBlend);
 
@@ -9590,6 +10170,31 @@
                     _diagPrevOpacity = Math.max(0, _diagPrevStartOpacity * (1 - fadedT / DIAG_CROSSFADE_S));
                 }
             }
+            // ── Finalise InstancedMesh batches ────────────────────────────────
+            // Flush all 6 IMs: set visible instance count and mark buffers dirty.
+            // Must run after all drawNote() / chord-loop writes are done.
+            if (imPMTech) {
+                imPMTech.count = _imPMTechCount;
+                if (_imPMTechCount > 0) {
+                    imPMTech.instanceMatrix.needsUpdate = true;
+                    imPMTech.geometry.getAttribute('instanceAlpha').needsUpdate = true;
+                }
+            }
+            if (imFHTech) {
+                imFHTech.count = _imFHTechCount;
+                if (_imFHTechCount > 0) {
+                    imFHTech.instanceMatrix.needsUpdate = true;
+                    imFHTech.geometry.getAttribute('instanceAlpha').needsUpdate = true;
+                }
+            }
+            // These IMs are kept alive but always empty (count=0) — rendering
+            // is now handled by the pPMXFill / pMuteXLines / pFHXFill / pFHXLines
+            // pools which support per-chord Z-proportional renderOrder.
+            if (imPMXFill)  imPMXFill.count  = 0;
+            if (imPMXLines) imPMXLines.count = 0;
+            if (imFHXFill)  imFHXFill.count  = 0;
+            if (imFHXLines) imFHXLines.count = 0;
+
             pbEnd(5);
             pbEnd(0);
             pbReportTick();
@@ -9710,7 +10315,8 @@
         }
         // skipLabel: don't draw per-note connector label (repeated fret)
         // skipBody:  don't draw the 3D note mesh (repeat chord — still shows projection)
-        function drawNote(n, now, openX, skipLabel, skipBody, linger = 0.10, openChordBoxWidth, fromChord = false, chordId, susTrailMatchArpFrame = false, arpBounds = null, prevOnsetT = -Infinity) {
+        // showDropLine: draw a white vertical drop line from note to below board (arpeggio / synth chord notes)
+        function drawNote(n, now, openX, skipLabel, skipBody, linger = 0.10, openChordBoxWidth, fromChord = false, chordId, susTrailMatchArpFrame = false, arpBounds = null, prevOnsetT = -Infinity, showDropLine = false) {
             const s = n.s;
             // Belt + suspenders: callers already gate via validString(),
             // but drawNote is also entered through { ...cn } chord-note
@@ -10027,6 +10633,10 @@
                 const _ndVerdict = (_ndCs && (_ndState === 'miss' || _ndGood))
                     || !!_ndMatchedMark;
                 outline.material = (n.ac && !_ndVerdict) ? mAccentOutline[s] : _ndOutline;
+                // outline + core share the pNote pool, so set geometry explicitly
+                // each frame (a recycled mesh may carry a gradient geometry from a
+                // prior core use). Outline always uses the plain box.
+                outline.geometry = gNote;
                 outline.renderOrder = _noteRO;
                 outline.position.set(x, y + techniqueYNow, noteZ);
                 outline.rotation.z = approachRot;
@@ -10067,6 +10677,8 @@
                 // Body always keeps the string colour. Verdict feedback is
                 // carried by the outline shell and lateral face fill.
                 core.material = n.ac ? mAccentCore[s] : mStr[s];
+                // Gradient gem body for strings 0..5; flat box otherwise.
+                core.geometry = (!n.ac && gNoteGrad[s]) ? gNoteGrad[s] : gNote;
                 core.renderOrder = _noteRO + 1;
                 core.position.set(x, y + techniqueYNow, noteZ + 0.001);
                 core.rotation.z = approachRot;
@@ -10153,27 +10765,26 @@
                             : _ndGood ? (mHitBright[s] ?? mHitSusOutline)
                             : mSusOutline;
                         const emitSusStrip = (xCenter, segLen, zCenter) => {
+                            // Depth-based renderOrder mirrors the chord-frame formula
+                            // (max(48, round(700 + z/K) - 2)) minus 0.001 so that at
+                            // the same depth a chord frame always wins, but trail
+                            // segments closer to the camera beat farther chord frames.
+                            // Math.min(0, zCenter) clamps past-note Z (> 0) to 0 so
+                            // lingering trails get max RO ≈ 697.999 instead of going
+                            // above 700 (which would intrude into the note-gem range).
+                            const _ro = Math.max(47.999, Math.round(700 + Math.min(0, zCenter) / K) - 2) - 0.001;
                             for (let i = 0; i < offsets.length; i++) {
                                 const xOff = xCenter + offsets[i];
-                                // Outline renders first (lower renderOrder), body on top.
-                                // On hit/miss the body uses mGlow[s] (opaque + emissive,
-                                // opacity:1) — the body retains string identity and the
-                                // outline-fringe extending past the body edges carries the
-                                // verdict colour (outline-only verdict doctrine).
-                                // On neutral the body is semi-transparent (mSus, opacity:0.35)
-                                // which lets the neutral white outline bleed slightly — same
-                                // look as before the hit/miss feature was added.
-                                const trOut = pSusOutline.get();
-                                trOut.material = _susOlMat;
-                                trOut.renderOrder = 12; // outline first — below body
-                                trOut.position.set(xOff, y, zCenter);
-                                trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
+                                if (!_leanSus) {
+                                    const trOut = pSusOutline.get();
+                                    trOut.material = _susOlMat;
+                                    trOut.renderOrder = _ro;
+                                    trOut.position.set(xOff, y, zCenter);
+                                    trOut.scale.set(tw + 0.4 * K, th + 0.4 * K, segLen);
+                                }
                                 const tr = pSus.get();
-                                // Any verdict (hit or miss): opaque string-colour body
-                                // covers the outline center completely. Neutral: original
-                                // semi-transparent look (mSus), no verdict border applied.
                                 tr.material = _ndState ? mGlow[s] : mSus[s];
-                                tr.renderOrder = 13; // body on top — covers outline center
+                                tr.renderOrder = _ro + 0.0005;
                                 tr.position.set(xOff, y, zCenter);
                                 tr.scale.set(tw, th, segLen);
                             }
@@ -10183,23 +10794,29 @@
                             const zPos = dZ(susStart - now) - len / 2;
                             emitSusStrip(x, len, zPos);
                         } else {
+                            // Same depth-based RO as box trail — ribbon center
+                            // at susStart + sliceDur/2, minus 0.001 so chord
+                            // frame wins at identical depth but closer ribbon
+                            // segments beat farther chord frames.
+                            const _ribDt = Math.max(0, susStart + sliceDur / 2 - now);
+                            const _ribRO = Math.max(47.999, Math.round(700 - _ribDt * 200) - 2) - 0.001;
                             for (let si = 0; si < offsets.length; si++) {
                                 const strandX = x + offsets[si];
-                                // Outline first (12), body on top (13) — same
-                                // cover-the-center logic as the box-trail path.
-                                const olMesh = pSusRibbonOl.get();
-                                olMesh.renderOrder = 12; // outline first — below body
-                                olMesh.scale.set(1, 1, 1);
-                                olMesh.rotation.set(0, 0, 0);
-                                olMesh.position.set(0, 0, 0);
-                                olMesh.material = _susOlMat;
-                                slideRibbonUpdatePositions(
-                                    olMesh.geometry, strandX,
-                                    tw + 0.4 * K, th + 0.4 * K,
-                                    y, sliceDur, susStart, now, n, slideSt,
-                                );
+                                if (!_leanSus) {
+                                    const olMesh = pSusRibbonOl.get();
+                                    olMesh.renderOrder = _ribRO;
+                                    olMesh.scale.set(1, 1, 1);
+                                    olMesh.rotation.set(0, 0, 0);
+                                    olMesh.position.set(0, 0, 0);
+                                    olMesh.material = _susOlMat;
+                                    slideRibbonUpdatePositions(
+                                        olMesh.geometry, strandX,
+                                        tw + 0.4 * K, th + 0.4 * K,
+                                        y, sliceDur, susStart, now, n, slideSt,
+                                    );
+                                }
                                 const body = pSusRibbon.get();
-                                body.renderOrder = 13; // body on top — covers outline center
+                                body.renderOrder = _ribRO + 0.0005;
                                 body.scale.set(1, 1, 1);
                                 body.rotation.set(0, 0, 0);
                                 body.position.set(0, 0, 0);
@@ -10286,28 +10903,22 @@
                 }
                 // Tremolo label ('~~~') removed — trail shape already conveys it visually.
                 if (n.pm || n.mt || n.fhm) {
-                    // Muted notes: on-body X overlay — PlaneGeometry mesh so it
-                    // rotates with the gem (approachRot) instead of billboarding.
-                    // Palm mute = black X / white border; fret-hand mute = inverse.
-                    // `mt` (string mute) and `fhm` (fret-hand mute) both render the
-                    // fret-hand X; only a palm-mute-only note gets the inverse.
-                    const fretHandMute = !!(n.mt || n.fhm);
-                    const muteSprite = fretHandMute
-                        ? fretHandMuteXSpriteMat()
-                        : palmMuteXSpriteMat();
-                    const muteMark = pTechPlane.get();
-                    muteMark.material = _spriteMat2MeshMat(muteMark, muteSprite);
-                    muteMark.material.opacity = hit ? 1.0 : 0.8;
-                    // Arms cover 62.5% of canvas (pad=outerW/√2 for square caps).
-                    // Scale by 1/0.625 = 1.60 to map arm tips to gem corners.
-                    const muteScaleX = n.f === 0
-                        ? NW * 1.60 * openWScale
-                        : NW * 1.60;
-                    const muteScaleY = NH * 1.60;
-                    muteMark.scale.set(muteScaleX, muteScaleY, 1);
-                    muteMark.position.set(x, y + techniqueYNow, noteZ + K);
-                    muteMark.rotation.z = approachRot;
-                    muteMark.renderOrder = TECH_RO;
+                    // Muted notes: pool-based plane with per-note Z-proportional
+                    // renderOrder (TECH_RO = _noteRO + 2).  The previous InstancedMesh
+                    // approach used a fixed RO (702/700), which made PM/FH markers from
+                    // far notes overdraw chord frames and gems of nearer chords.
+                    // PM = black X / white border; FH/MT = inverse.
+                    const _fhm = !!(n.mt || n.fhm);
+                    const _pmSprite = _fhm ? fretHandMuteXSpriteMat() : palmMuteXSpriteMat();
+                    const _pmMark = pTechPlane.get();
+                    _pmMark.material = _spriteMat2MeshMat(_pmMark, _pmSprite);
+                    _pmMark.material.opacity = _showHit ? 1.0 : 0.8;
+                    // Arms cover 62.5% of canvas → scale 1/0.625 = 1.60.
+                    const _sx = n.f === 0 ? NW * 1.60 * openWScale : NW * 1.60;
+                    _pmMark.scale.set(_sx, NH * 1.60, 1);
+                    _pmMark.position.set(x, y + techniqueYNow, noteZ + K);
+                    _pmMark.rotation.z = approachRot;
+                    _pmMark.renderOrder = TECH_RO;
                 }
                 // hm / hp — PlaneGeometry overlay sized like the palm-mute X,
                 // so the symbol only appears on the front face and matches
@@ -10332,28 +10943,112 @@
                     // the note hits (dt = 0).  No pre-hit fade-out — removing it
                     // eliminates the "label disappears before the note arrives" artifact.
                     const alpha = dt >= 0 ? Math.min(1.0, (AHEAD - dt) / 0.35) : 0;
+                    // Arpeggio notes get +1 over non-arp at the same depth so their
+                    // labels stay above non-arp connector lines of the same chord.
+                    const _isArpNote = arpBounds !== null;
 
-                    const fretLabel  = pNoteFretLabel.get();
-                    const cachedMat  = txtMat(n.f, FRET_LABEL_GOLD_HEX, false, 'noteFret');
-                    if (fretLabel.material.map !== cachedMat.map) {
-                        fretLabel.material.map = cachedMat.map;
-                        fretLabel.material.needsUpdate = true;
+                    // String-coloured connector line — standalone notes only.
+                    // Arpeggio and chord notes already have a drop line to the board.
+                    if (!fromChord) {
+                        const line = pConnectorLine.get();
+                        line.position.set(x, labelY, noteZ);
+                        // Half-length (50% shorter), anchored at the fret-label end.
+                        line.scale.set(1, (y - labelY) * 0.5, 1);
+                        // Tint the line with the incoming note's string colour.
+                        // mStr is white for gradient strings, so use the canonical
+                        // flat palette colour instead of the material's .color.
+                        if (activePalette[s] != null) line.material.color.setHex(activePalette[s]);
+                        // Use _noteRO-based value so the line is always above the chord
+                        // frame border of the same note (chordBaseRO = _noteRO - 2).
+                        // Arpeggio notes get +1 to stay above non-arp lines of the same Z.
+                        line.renderOrder = _isArpNote ? _noteRO : _noteRO - 1;
+                        line.material.opacity = alpha * 0.8;
                     }
-                    fretLabel.position.set(x, labelY, noteZ);
-                    // Render above beat lines so the label is never washed out by the
-                    // beat-line transparency pass.
-                    fretLabel.renderOrder = 5;
-                    // Same scale ramp as fret column markers: 2× base at max lookahead,
-                    // converging to 1× at hit line.  Final size matches row labels.
-                    const flS = 7.0 * K * (1 + 0.4 * Math.max(0, dt) / AHEAD) * _textSizeMul * fretLabelScaleForFret(n.f);
-                    fretLabel.scale.set(flS, flS, 1);
-                    fretLabel.material.opacity = alpha;
 
-                    const line = pConnectorLine.get();
-                    line.position.set(x, labelY, noteZ);
-                    line.scale.set(1, y - labelY, 1);
-                    line.material.opacity = alpha * 0.8;
+                    // Regular chord notes (fromChord=true, arpBounds=null) never show
+                    // fret labels — only standalone notes and arpeggio note-stream notes
+                    // (fromChord=true with arpBounds!=null) show labels.
+                    // Key uses 40 ms buckets (same formula as _buildFretLabelSet) so
+                    // the lookup matches exactly, even if the note's time drifts ±20 ms.
+                    // Frame-dedup prevents multiple strings at the same onset/fret from
+                    // stacking duplicate labels.
+                    const _flFrameKey = Math.round(n.t * 25) * 100 + n.f;
+                    const _showNum = (!fromChord || arpBounds !== null)
+                        && _fretLabelAllowed.has(_flFrameKey)
+                        && !_frameLabeledKeys.has(_flFrameKey);
+                    if (_showNum) {
+                        _frameLabeledKeys.add(_flFrameKey);
+                        const fretLabel  = pNoteFretLabel.get();
+                        const cachedMat  = txtMat(n.f, FRET_LABEL_GOLD_HEX, false, 'noteFret');
+                        if (fretLabel.material.map !== cachedMat.map) {
+                            fretLabel.material.map = cachedMat.map;
+                            fretLabel.material.needsUpdate = true;
+                        }
+                        fretLabel.position.set(x, labelY, noteZ);
+                        // _noteRO-based: always above the chord frame border (chordBaseRO =
+                        // _noteRO - 2) of the same note so the gold label is never overdrawn
+                        // by a chord frame edge.  Arpeggio notes get +1 extra over non-arp.
+                        fretLabel.renderOrder = _isArpNote ? _noteRO + 1 : _noteRO;
+                        // Same scale ramp as fret column markers: 2× base at max lookahead,
+                        // converging to 1× at hit line.  Final size matches row labels.
+                        const flS = 7.0 * K * (1 + 0.4 * Math.max(0, dt) / AHEAD) * _textSizeMul * fretLabelScaleForFret(n.f);
+                        fretLabel.scale.set(flS, flS, 1);
+                        fretLabel.material.opacity = alpha;
+                    }
                 }
+            }
+
+            // ── Fret number for synthetic chord notes rendered with skipBody=true ──
+            // suppressSynthChord paths skip the !skipBody block entirely, so their
+            // fret label never fires from inside it. Handle them here, outside the
+            // gate. Applies the same measure-based + frame-dedup rules so that if
+            // the corresponding standalone arpeggio note already showed a label this
+            // frame, we don't duplicate it.
+            if (skipBody && fromChord && !skipLabel && n.f > 0 && dt >= 0) {
+                const _fl2FrameKey = Math.round(n.t * 25) * 100 + n.f;
+                if (_fretLabelAllowed.has(_fl2FrameKey)
+                    && !_frameLabeledKeys.has(_fl2FrameKey)) {
+                    _frameLabeledKeys.add(_fl2FrameKey);
+                    const _minStrY2 = Math.min(sY(0), sY(nStr - 1));
+                    const _labelY2  = _minStrY2 - S_GAP * 0.8;
+                    const _alpha2   = Math.min(1.0, (AHEAD - dt) / 0.35);
+                    const _isArp2   = arpBounds !== null;
+                    const fl2 = pNoteFretLabel.get();
+                    const cm2 = txtMat(n.f, FRET_LABEL_GOLD_HEX, false, 'noteFret');
+                    if (fl2.material.map !== cm2.map) {
+                        fl2.material.map = cm2.map;
+                        fl2.material.needsUpdate = true;
+                    }
+                    fl2.position.set(x, _labelY2, noteZ);
+                    // Same _noteRO-based contract as the primary fret label above.
+                    fl2.renderOrder = _isArp2 ? _noteRO + 1 : _noteRO;
+                    const _flS2 = 7.0 * K * (1 + 0.4 * dt / AHEAD) * _textSizeMul * fretLabelScaleForFret(n.f);
+                    fl2.scale.set(_flS2, _flS2, 1);
+                    fl2.material.opacity = _alpha2;
+                }
+            }
+
+            // ── Drop line for chord / arpeggio notes ──────────────────────────
+            // Styled to match the standalone single-note connector: tinted with
+            // the incoming note's string colour and 50% length (anchored at the
+            // fret-label end), instead of a full-height white line to the board.
+            const _wantDropLine = pDropLine && n.f > 0 && dt >= 0 && fromChord && showDropLine && !skipBody;
+            if (_wantDropLine) {
+                const _minStrY = Math.min(sY(0), sY(nStr - 1));
+                const _dropY = _minStrY - S_GAP * 0.8;
+                const _alpha = Math.min(1.0, (AHEAD - dt) / 0.35);
+                const dl = pDropLine.get();
+                dl.position.set(x, _dropY, noteZ);
+                // Half-length, anchored at the label end (matches single notes).
+                dl.scale.set(1, (y - _dropY) * 0.5, 1);
+                // String-colour tint (palette is canonical; mStr is white for
+                // gradient strings).
+                if (activePalette[s] != null) dl.material.color.setHex(activePalette[s]);
+                // _noteRO - 1: above chord frame border (chordBaseRO = _noteRO - 2)
+                // but below the gem outline (_noteRO) so the gem stays dominant.
+                dl.renderOrder = _noteRO - 1;
+                dl.material.depthTest = false;
+                dl.material.opacity = _alpha * 0.8;
             }
 
             // ── Board ghost: filled rim at Z=0 (always drawn for isNext) ─
@@ -10704,6 +11399,25 @@
             gSusRailBloom?.dispose?.(); mSusRailBloomBase?.dispose?.(); _bloomGaussTex?.dispose?.();
             gSusRailBloom = null; mSusRailBloomBase = null; _bloomGaussTex = null; pSusRailBloom = null;
             gTechPlane?.dispose?.(); gTechPlane = null; pTechPlane = null;
+            // InstancedMesh disposal — .dispose() releases instanceMatrix / instanceColor
+            // GPU buffers. Geometry and material are disposed separately below.
+            imPMTech?.dispose?.(); imPMTech = null;
+            imFHTech?.dispose?.(); imFHTech = null;
+            imPMXFill?.dispose?.(); imPMXFill = null;
+            imPMXLines?.dispose?.(); imPMXLines = null;
+            imFHXFill?.dispose?.(); imFHXFill = null;
+            imFHXLines?.dispose?.(); imFHXLines = null;
+            // Geometry clones for PM/FH tech IMs (own instanceAlpha attribute).
+            _imGPMTech?.dispose?.(); _imGPMTech = null;
+            _imGFHTech?.dispose?.(); _imGFHTech = null;
+            // ShaderMaterials for all 6 IMs.
+            _imPMTechMat?.dispose?.();  _imPMTechMat = null;
+            _imFHTechMat?.dispose?.();  _imFHTechMat = null;
+            _imPMXFillMat?.dispose?.(); _imPMXFillMat = null;
+            _imPMXLinesMat?.dispose?.(); _imPMXLinesMat = null;
+            _imFHXFillMat?.dispose?.(); _imFHXFillMat = null;
+            _imFHXLinesMat?.dispose?.(); _imFHXLinesMat = null;
+            _imM4 = _imPos = _imSca = _imQ = _imAZ = _imColor = null;
             gHaloBar?.dispose?.(); gHaloBar = null;
             gArpBracket?.dispose?.(); gArpBracket = null;
             for (const m of mStr) m?.dispose?.();
@@ -10761,7 +11475,7 @@
             if (ren) { ren.dispose(); ren = null; }
             scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
             ambLight = dirLight = null;
-            mStr = []; mGlow = []; mSus = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; _accentShellsByString = []; mWhiteOutline = mSusOutline = null; mMissOutline = null; mHitSusOutline = null; stringLines = []; stringLineGlows = [];
+            mStr = []; mGlow = []; mSus = []; mStrHitOutline = []; mAccentOutline = []; mAccentCore = []; mAccentHaloNear = []; mAccentHaloMid = []; mAccentHaloFar = []; _accentShellsByString = []; mWhiteOutline = mSusOutline = null; mMissOutline = null; mHitSusOutline = null; stringLines = []; stringLineGlows = []; fretWireMats = [];
             for (const m of _inlayMats) m?.dispose?.(); _inlayMats = []; _inlayLabels = [];
             // mTapChevron: dispose explicitly — if no tap marker ever
             // spawned a pooled mesh, the scene.traverse() pass above never
@@ -10804,6 +11518,7 @@
             _lookaheadCamPrevNow = null;
             _lookaheadLowBonusU = 0;
             _lookaheadHiNeckLatch = false;
+            _clkAudioT = NaN; _clkPerf = NaN; _clkRate = 1; _frameNow = 0;
             prevLowFretBonus = 0;
             prevLockActive = false;
             _camSnapped = false;
@@ -10975,7 +11690,7 @@
                     }
                 }
 
-                ren.render(scene, cam);
+                pbBeg(6); ren.render(scene, cam); pbEnd(6);
                 if (lyricsCtx && lyricsCanvas) {
                     lyricsCtx.clearRect(0, 0, lyricsCanvas.width, lyricsCanvas.height);
                     // Capture the actual lyrics-banner bottom so overlay cards
