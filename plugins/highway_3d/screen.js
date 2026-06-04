@@ -310,7 +310,7 @@
     const N_RAD = 1.5 * K;
     const SW = 2 * K, SH = 1.5 * K;
 
-    const CAM_H_BASE = 175 * K;
+    const CAM_H_BASE = 180 * K;
     const CAM_DIST_BASE = 240 * K;
     const REF_ASPECT = 16 / 9;
     const FOCUS_D = 600 * K;
@@ -8091,6 +8091,15 @@
                     _lookaheadCamPrevNow = null;
                     _lookaheadLowBonusU = 0;
                     _lookaheadHiNeckLatch = false;
+                    // Drop the previous song's measure-start cache. Otherwise
+                    // lookaheadEndTime() would size the lookahead window off the
+                    // old measure grid (with the new song's now reset to ~0 this
+                    // yields a wrong/huge tEnd) until the new beats arrive and
+                    // rebuild it — the resulting huge fret span over-zooms the
+                    // first-data snap and stays latched. Clearing it falls back
+                    // to the seconds window for this frame; the rebuild repopulates
+                    // it next frame once bundle.beats is the new array.
+                    _measureStarts = []; _measureStartsRef = null;
                     // Drop the clock anchor so the new song's currentTime
                     // re-anchors cleanly instead of measuring a bogus rate
                     // across the seek-to-0 discontinuity.
@@ -11579,6 +11588,7 @@
             _lookaheadCamPrevNow = null;
             _lookaheadLowBonusU = 0;
             _lookaheadHiNeckLatch = false;
+            _measureStarts = []; _measureStartsRef = null;
             _clkAudioT = NaN; _clkPerf = NaN; _clkRate = 1; _frameNow = 0;
             prevLowFretBonus = 0;
             prevLockActive = false;

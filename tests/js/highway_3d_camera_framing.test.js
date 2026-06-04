@@ -111,6 +111,17 @@ test('fret-bounds scan drives its window off lookaheadEndTime, not fixed seconds
     );
 });
 
+test('measure-start cache is invalidated on song change', () => {
+    // The song-change reset (reconnect path) resets _camSnapped; it must also
+    // drop the measure-start cache, otherwise lookaheadEndTime sizes the window
+    // off the previous song's measure grid and over-zooms the first-data snap.
+    assert.match(
+        src,
+        /_camSnapped\s*=\s*false\s*;[\s\S]*?_measureStarts\s*=\s*\[\]\s*;\s*_measureStartsRef\s*=\s*null\s*;/,
+        'song-change reset must clear _measureStarts / _measureStartsRef alongside _camSnapped',
+    );
+});
+
 // ── Debug hook stayed removed ───────────────────────────────────────────────
 
 test('temporary camera debug hook is not present', () => {
