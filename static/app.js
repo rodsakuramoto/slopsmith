@@ -6544,7 +6544,15 @@ function _ensureSectionPracticeDom() {
     bar.className = 'section-practice-bar section-practice-bar--hidden';
     bar.setAttribute('aria-label', 'Section practice');
     bar.innerHTML = _sectionPracticeBarInnerHtml();
-    controls.insertBefore(bar, controls.firstChild);
+    // Mount in #player-footer (the sibling wrapper directly above
+    // #player-controls), NOT inside #player-controls: nesting the bar's chip
+    // <button>s there makes plugin injectors that anchor on
+    // `#player-controls > button:last-of-type` match a nested node and throw on
+    // insertBefore (see static/index.html). Fall back to the legacy spot only
+    // if the footer is somehow absent.
+    const footer = document.getElementById('player-footer');
+    if (footer) footer.insertBefore(bar, controls);
+    else controls.insertBefore(bar, controls.firstChild);
     return bar;
 }
 

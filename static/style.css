@@ -32,7 +32,11 @@ html { scroll-behavior: smooth; }
    the bottom controls bar would silently sit underneath the canvas
    and become click-through invisible.
    Folds in the fix from byrongamatos/slopsmith#99. */
-#player-controls { position: relative; z-index: 10; margin-top: auto; }
+/* The footer pins the section-practice bar + transport row to the bottom of
+   #player. margin-top:auto lives here (not on #player-controls) so the bar,
+   which now sits outside #player-controls, stays directly above the row. */
+#player-footer { position: relative; z-index: 10; margin-top: auto; }
+#player-controls { position: relative; }
 
 #section-practice-bar {
     flex: 0 0 100%;

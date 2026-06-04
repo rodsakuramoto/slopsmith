@@ -10824,7 +10824,10 @@
                 const sz = target === canvas ? rect : target.getBoundingClientRect();
                 if (sz.width > 0 && sz.height > 0) return { w: sz.width, h: sz.height };
             }
-            const ch = document.getElementById('player-controls')?.offsetHeight || 50;
+            // Reserve the full bottom area: #player-footer wraps the Section
+            // Practice bar + #player-controls. Fall back to #player-controls.
+            const ch = (document.getElementById('player-footer')
+                || document.getElementById('player-controls'))?.offsetHeight || 50;
             return { w: innerWidth, h: innerHeight - ch };
         }
 

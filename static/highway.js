@@ -2607,7 +2607,11 @@ function createHighway() {
                 w = rect.width;
                 h = rect.height;
             } else {
-                const controls = document.getElementById('player-controls');
+                // Measure #player-footer (Section Practice bar + transport row)
+                // so the canvas doesn't draw under the practice bar; fall back
+                // to #player-controls if the footer wrapper isn't present.
+                const controls = document.getElementById('player-footer')
+                    || document.getElementById('player-controls');
                 const controlsH = controls ? controls.offsetHeight : 50;
                 w = document.documentElement.clientWidth;
                 h = document.documentElement.clientHeight - controlsH;
