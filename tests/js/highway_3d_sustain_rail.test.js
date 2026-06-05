@@ -35,14 +35,15 @@ test('sustain rails pick arpeggio color for arpeggio frames, teal otherwise', ()
     );
 });
 
-test('sustain-rail pool meshes keep renderOrder 16 so note gems (20/21) stay on top', () => {
-    // renderOrder 11 sits above the chord frame edges but below note
-    // outline/core. Bumping it past the notes would let the rails
-    // occlude flying gems.
+test('sustain-rail pool meshes keep renderOrder 5 so strings (7) stay on top', () => {
+    // renderOrder 5 sits below string-line glows (7) so strings render on top
+    // of the rail. Chord frame edges are Z-proportional [48,698] and note gems
+    // are Z-proportional [50,700], so the flat seed value does not conflict —
+    // emitSusStrip() assigns its own Z-proportional RO per segment at draw time.
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
     assert.match(
         src,
-        /pSusRail\s*=\s*pool\([^)]*,\s*\(\)\s*=>\s*\{[\s\S]*?m\.renderOrder\s*=\s*11\s*;[\s\S]*?\}\s*\)/,
-        'pSusRail pool must seed meshes with renderOrder = 11',
+        /pSusRail\s*=\s*pool\([^)]*,\s*\(\)\s*=>\s*\{[\s\S]*?m\.renderOrder\s*=\s*5\s*;[\s\S]*?\}\s*\)/,
+        'pSusRail pool must seed meshes with renderOrder = 5',
     );
 });

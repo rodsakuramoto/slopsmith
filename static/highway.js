@@ -613,6 +613,18 @@ function createHighway() {
             currentTime,
             songInfo,
             isReady: ready,
+            // True while the chart clock is actively advancing; false when
+            // audio is paused / stalled / mid-seek (setTime has kept getting
+            // the same t for > _CHART_MAX_INTERP_MS). This is the same
+            // predicate getTime() uses to decide raw-vs-interpolated, and the
+            // no-anchor boot state reads as not-playing — matching getTime()
+            // returning raw chartTime there. Renderers that run their own
+            // sub-frame clock (highway_3d's smoothNow) gate on this to fall
+            // back to raw instead of extrapolating forward against a frozen
+            // audio sample. Undefined on downlevel hosts → those renderers
+            // keep their own staleness-based fallback.
+            isPlaying: !Number.isNaN(_chartAnchorPerfNow)
+                && (performance.now() - _chartLastAdvanceAt) <= _CHART_MAX_INTERP_MS,
 
             // Chart content (filter-aware — difficulty-filtered arrays
             // preferred; raw arrays are the fallback when no ladder data).

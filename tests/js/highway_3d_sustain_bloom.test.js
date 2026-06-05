@@ -37,13 +37,13 @@ test('the bloom rail material uses additive blending', () => {
     );
 });
 
-test('the bloom pool seeds meshes at renderOrder 14, behind the core rail (16)', () => {
-    // renderOrder 10 keeps the bloom behind the core sustain rail (11) so the
+test('the bloom pool seeds meshes at renderOrder 4, behind the core rail (5)', () => {
+    // renderOrder 4 keeps the bloom behind the core sustain rail (5) so the
     // glow reads as a trail rather than occluding the rail.
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
     assert.match(
         src,
-        /pSusRailBloom\s*=\s*pool\([^)]*,\s*\(\)\s*=>\s*\{[\s\S]*?m\.renderOrder\s*=\s*10\s*;[\s\S]*?\}\s*\)/,
-        'pSusRailBloom pool must seed meshes with renderOrder = 10',
+        /pSusRailBloom\s*=\s*pool\([^)]*,\s*\(\)\s*=>\s*\{[\s\S]*?m\.renderOrder\s*=\s*4\s*;[\s\S]*?\}\s*\)/,
+        'pSusRailBloom pool must seed meshes with renderOrder = 4',
     );
 });
