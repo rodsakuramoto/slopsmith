@@ -7301,6 +7301,20 @@
         function smoothNow(bundle) {
             const raw = bundle.currentTime;
             const p = performance.now();
+            // Host pause signal (slopsmith core's bundle.isPlaying): when the
+            // chart clock isn't advancing (paused / stalled / mid-seek), don't
+            // extrapolate forward against a frozen audio sample — that creeps
+            // the highway ahead by up to the interp cap and then snaps back
+            // when dt finally crosses 0.1. Re-anchor to raw so the next
+            // playing frame resumes from a clean segment. `=== false` so
+            // downlevel hosts (isPlaying undefined) fall through to the
+            // staleness-based cap below, preserving prior behavior there.
+            if (bundle.isPlaying === false) {
+                _clkAudioT = raw;
+                _clkPerf = p;
+                _clkRate = 1;
+                return (_frameNow = raw);
+            }
             if (raw !== _clkAudioT) {
                 // New audio sample — re-anchor and refine the rate estimate.
                 if (!Number.isNaN(_clkPerf)) {
