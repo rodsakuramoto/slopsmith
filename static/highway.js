@@ -461,7 +461,13 @@ function createHighway() {
             : 1;
         if (alpha <= 0) return null;
         const color = (raw && typeof raw === 'object' && typeof raw.color === 'string') ? raw.color : null;
-        return { state, alpha, color };
+        // Pass through the provider's `live` flag: note_detect tags its
+        // ring-tracking 'active' responses with live:true so a renderer can
+        // treat them as authoritative (extinguish on mute, relight on
+        // re-strike) instead of latching them for the whole chart sustain.
+        // Renderers that don't care simply ignore it.
+        const live = (raw && typeof raw === 'object' && raw.live === true);
+        return { state, alpha, color, live };
     }
 
     // Stable bundle accessor for the registered provider — see

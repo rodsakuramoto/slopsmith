@@ -1966,6 +1966,15 @@
         // Built in initScene() after mGlow. Array share the same material
         // instances so outline and face fill always match exactly.
         let mHitBright = [], mHitBrightArrays = [];
+        // [verdict glow] Per-frame accumulation of the note-state provider's
+        // alpha (note_detect drives this from the live input level for held
+        // sustains, and as a time-fade for fresh strikes). Applied at the top of
+        // update() to scale the verdict-glow materials' emissiveIntensity so the
+        // gem brightness tracks how hard the string is actually ringing. Stays
+        // at "no provider" (vg = 1, unchanged brightness) for the legacy event
+        // path or when note_detect is off.
+        let _ndVerdictMaxAlpha = 0;
+        let _ndVerdictSawAlpha = false;
         // Magenta-red face fill for miss — see initScene() for construction
         // (uses mMissOutline ×4 + mEdgeTransparent ×2).
         let mMissEdgeArrays = null;
@@ -2316,7 +2325,9 @@
         // provider stops returning state; the latch re-injects the last verdict
         // so the green/red color stays alive until susEnd.
         // Key: Math.round(n.t * 1e4) * 10 + n.s  (matches _ghostPrevBuf scheme)
-        // Value: 'hit' | 'miss'
+        // Value: 'hit' | 'hit-live' | 'miss'  ('hit-live' = a live provider hit,
+        // tagged live:true, which is NOT re-injected once the provider goes
+        // silent — see the live-latch handling in the per-gem loop below).
         let _susVerdictLatch = new Map();
 
         // Object pools
@@ -7340,6 +7351,23 @@
         /* ── Per-frame rendering ─────────────────────────────────────────── */
         function update(bundle) {
             pbBeg(0);
+            // [verdict glow] Apply the level-driven verdict brightness captured
+            // last frame (1-frame lag is imperceptible), then reset for this
+            // frame's capture in the gem path below. vg = 1 when no provider
+            // alpha was seen (legacy event path / note_detect off), leaving the
+            // authored 4.0/0.7 × glowMul brightness from _applyGlow() untouched.
+            // Only the verdict-only materials (mHitBright + its face-fill arrays,
+            // and the hit sustain outline) are scaled — never mStrHitOutline,
+            // which is the default rim for every fretted note.
+            {
+                const vg = _ndVerdictSawAlpha ? _ndVerdictMaxAlpha : 1;
+                for (let s = 0; s < mHitBright.length; s++) {
+                    if (mHitBright[s]) mHitBright[s].emissiveIntensity = 4.0 * glowMul * vg;
+                }
+                if (mHitSusOutline) mHitSusOutline.emissiveIntensity = 0.7 * glowMul * vg;
+                _ndVerdictMaxAlpha = 0;
+                _ndVerdictSawAlpha = false;
+            }
             // Lean sustain rendering is the default (see declaration above):
             // the trail/ribbon outline always draws; only the additive rail
             // bloom halo is dropped. The full look (with bloom) is an opt-out.
@@ -10556,6 +10584,16 @@
                 }
             }
 
+            // [verdict glow] feed the provider alpha into the per-frame max so
+            // update()'s top scales the verdict-glow brightness by live level
+            // (note_detect returns alpha = live input level for held sustains,
+            // and a time-fade for fresh strikes). Only object responses carry an
+            // alpha; the latch/legacy string responses leave brightness at full.
+            if (_ndGood && _ndCsIsObj && _ndCs && typeof _ndCs.alpha === 'number') {
+                _ndVerdictSawAlpha = true;
+                if (_ndCs.alpha > _ndVerdictMaxAlpha) _ndVerdictMaxAlpha = _ndCs.alpha;
+            }
+
             // ── Sustain verdict latch ────────────────────────────────────
             // note_detect's hitGlowDuration (~0.5 s) and the legacy mark
             // TTL (500 ms) both expire before a long chart sustain ends.
@@ -10589,7 +10627,14 @@
                 }
                 if (_lv_cur) {
                     // Fresh verdict (provider or legacy mark) — save to latch.
-                    _susVerdictLatch.set(_sk, _lv_good ? 'hit' : 'miss');
+                    // Distinguish a *live* provider hit (note_detect tags its
+                    // ring-tracking 'active' responses with live:true) from a
+                    // legacy/brief one: a live hit must NOT be re-injected once
+                    // the provider goes silent (that kept muted sustains lit),
+                    // whereas the legacy event path still needs the latch to
+                    // bridge its ~0.5 s mark TTL across a long hold.
+                    const _live = _ndCsIsObj && _ndCs && _ndCs.live === true;
+                    _susVerdictLatch.set(_sk, _lv_good ? (_live ? 'hit-live' : 'hit') : 'miss');
                     // If the verdict came from a legacy mark (provider was
                     // silent — _ndState was null before the scan), propagate
                     // it to _ndState/_ndGood/_ndCs now so the sustain trail
@@ -10611,8 +10656,18 @@
                     // inherit a latch from a previous play-through).
                     const _lv = _susVerdictLatch.get(_sk);
                     if (_lv === 'hit') {
+                        // Legacy/brief provider or event-path hit: bridge the
+                        // gap across the hold (the mark/glow TTL expires before a
+                        // long chart sustain ends).
                         _ndState = 'active'; _ndGood = true;
                         _ndCs = 'active'; _ndCsIsObj = false;
+                    } else if (_lv === 'hit-live') {
+                        // Live provider is authoritative for the active glow: it
+                        // returns 'active' only while the string is actually
+                        // ringing, and null once muted / decayed. Don't re-inject
+                        // a stale 'active' (that kept a muted sustain lit) — leave
+                        // the gem un-lit when the provider is silent; a re-strike
+                        // relights it via the provider on the next frame.
                     } else if (_lv === 'miss') {
                         _ndState = 'miss';
                         _ndCs = 'miss'; _ndCsIsObj = false;

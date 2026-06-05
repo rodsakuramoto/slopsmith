@@ -85,7 +85,8 @@ test('_noteState normalizes provider output as documented', () => {
     assert.match(fn, /state\s*!==\s*['"]hit['"]\s*&&\s*state\s*!==\s*['"]active['"]\s*&&\s*state\s*!==\s*['"]miss['"]/, 'must reject states other than hit/active/miss');
     assert.match(fn, /Math\.max\(\s*0\s*,\s*Math\.min\(\s*1\s*,\s*raw\.alpha\s*\)\s*\)/, 'must clamp alpha to [0,1]');
     assert.match(fn, /if\s*\(\s*alpha\s*<=\s*0\s*\)\s*return\s+null/, 'must return null when alpha resolves to <= 0');
-    assert.match(fn, /return\s*\{\s*state\s*,\s*alpha\s*,\s*color\s*\}/, 'must return the normalized { state, alpha, color }');
+    assert.match(fn, /const\s+live\s*=\s*\(raw\s*&&\s*typeof\s+raw\s*===\s*['"]object['"]\s*&&\s*raw\.live\s*===\s*true\)/, 'must pass through the provider live flag');
+    assert.match(fn, /return\s*\{\s*state\s*,\s*alpha\s*,\s*color\s*,\s*live\s*\}/, 'must return the normalized { state, alpha, color, live }');
 });
 
 test('default 2D renderer threads note state into drawNote / drawSustains / chord path', () => {
