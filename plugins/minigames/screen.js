@@ -128,18 +128,75 @@
     const yinD      = new Float32Array(yinHalfN);
     const yinCmnd   = new Float32Array(yinHalfN);
     let ringWrite   = 0;
+    // Desktop-engine bridge path. On slopsmith-desktop the native JUCE engine
+    // owns the input device (often an exclusive ASIO device the browser's
+    // getUserMedia can't see), so a renderer getUserMedia stream lands on the
+    // wrong/silent Windows-default device. When the bridge is present we pull
+    // post-noise-gate frames from the engine instead — same device the player
+    // and note_detect read from. getUserMedia stays as the web fallback.
+    let bridgePoll       = null;   // setTimeout handle for the engine poll loop
+    let usingBridge      = false;
+    let bridgeGotFrame   = false;  // first non-empty frame seen (vs downlevel addon)
+    let bridgeSampleRate = 48000;  // queried once from the engine
 
     const handle = {
       on(event, cb) { (handlers[event] || (handlers[event] = [])).push(cb); return handle; },
       stop,
-      isRunning: () => !stopped && !!audioCtx,
+      isRunning: () => !stopped && (!!audioCtx || usingBridge),
     };
 
     function emit(event, payload) {
       (handlers[event] || []).forEach(cb => { try { cb(payload); } catch (e) { console.error(e); } });
     }
 
-    async function start() {
+    // Shared analysis used by both the mic and engine-bridge sources. `win` is a
+    // ringSize-length Float32Array (oldest→newest); `dtMs` is the elapsed time
+    // since the previous frame, driving the log-freq EMA smoothing. RMS-gate →
+    // YIN → smooth → emit('pitch'). Keeping this single function guarantees the
+    // two sources emit byte-identical frame shapes to consumers.
+    function analyzeWindow(win, sampleRate, dtMs) {
+      let rms = 0;
+      for (let i = 0; i < ringSize; i++) rms += win[i] * win[i];
+      rms = Math.sqrt(rms / ringSize);
+      // -60 dBFS RMS gate (≈ 0.001 full-scale): on silence YIN's difference
+      // function collapses and reports a spurious high-freq lock, so skip it.
+      const res = (rms > 0.001)
+        ? yinDetect(win, sampleRate, { minHz: 70, maxHz: 1500 }, yinD, yinCmnd)
+        : null;
+      const nowMs = performance.now();
+      if (res && res.confidence > 0.3) {
+        const alpha = Math.min(1, (dtMs > 0 ? dtMs : 1) / smoothingMs);
+        if (lastFreq > 0) {
+          lastFreq = Math.exp(Math.log(lastFreq) * (1 - alpha) + Math.log(res.freqHz) * alpha);
+        } else {
+          lastFreq = res.freqHz;
+        }
+        lastConf = res.confidence;
+      } else {
+        // Fade confidence rather than zeroing — lets the consumer gate "no
+        // input" on confidence falling below its own threshold.
+        lastConf *= 0.85;
+      }
+      const freq = lastFreq;
+      const midiFloat = freq > 0 ? 69 + 12 * Math.log2(freq / 440) : 0;
+      const cents = (expectedBaseFreqHz && freq > 0)
+        ? 1200 * Math.log2(freq / expectedBaseFreqHz)
+        : 0;
+      emit('pitch', {
+        freqHz: freq,
+        midiFloat,
+        cents,
+        confidence: lastConf,
+        tMs: nowMs,
+        expectedBaseFreqHz,
+      });
+    }
+
+    // getUserMedia source — used on the web build, and on desktop only when the
+    // engine bridge is absent. NOTE: on desktop this lands on the Windows-default
+    // device, which is usually NOT the guitar (see the bridge path above); the
+    // dispatcher in start() prefers the bridge for that reason.
+    async function startMic() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -186,45 +243,8 @@
           for (let i = 0; i < ringSize; i++) {
             yinWindow[i] = ring[(ringWrite + i) % ringSize];
           }
-          // Energy gate: on silence/near-silence (all-zero or near-zero buffer)
-          // YIN's difference function is 0 → cmnd drops to 0 → tauEstimate=tauMin
-          // → conf=1 at ~maxHz. Gate on RMS before running YIN so silent input
-          // decays confidence rather than emitting a spurious high-freq pitch.
-          // -60 dBFS RMS threshold (≈ 0.001 full-scale).
-          let rms = 0;
-          for (let i = 0; i < ringSize; i++) rms += yinWindow[i] * yinWindow[i];
-          rms = Math.sqrt(rms / ringSize);
-          const res = (rms > 0.001)
-            ? yinDetect(yinWindow, audioCtx.sampleRate, { minHz: 70, maxHz: 1500 }, yinD, yinCmnd)
-            : null;
-          const nowMs = performance.now();
-          if (res && res.confidence > 0.3) {
-            // EMA smoothing in log-freq space.
-            const alpha = Math.min(1, (bufSize / audioCtx.sampleRate * 1000) / smoothingMs);
-            if (lastFreq > 0) {
-              lastFreq = Math.exp(Math.log(lastFreq) * (1 - alpha) + Math.log(res.freqHz) * alpha);
-            } else {
-              lastFreq = res.freqHz;
-            }
-            lastConf = res.confidence;
-          } else {
-            // Fade confidence rather than zeroing — lets the consumer
-            // gate "no input" on confidence falling below its own threshold.
-            lastConf *= 0.85;
-          }
-          const freq = lastFreq;
-          const midiFloat = freq > 0 ? 69 + 12 * Math.log2(freq / 440) : 0;
-          const cents = (expectedBaseFreqHz && freq > 0)
-            ? 1200 * Math.log2(freq / expectedBaseFreqHz)
-            : 0;
-          emit('pitch', {
-            freqHz: freq,
-            midiFloat,
-            cents,
-            confidence: lastConf,
-            tMs: nowMs,
-            expectedBaseFreqHz,
-          });
+          // Mic frame interval ≈ bufSize/sampleRate; feed it as the EMA dt.
+          analyzeWindow(yinWindow, audioCtx.sampleRate, bufSize / audioCtx.sampleRate * 1000);
         };
         source.connect(processor);
         // Must connect processor → destination for onaudioprocess to fire.
@@ -246,6 +266,8 @@
     function stop() {
       if (stopped) return;
       stopped = true;
+      if (bridgePoll) { try { clearTimeout(bridgePoll); } catch (e) {} bridgePoll = null; }
+      usingBridge = false;
       try { if (processor) processor.disconnect(); } catch (e) {}
       try { if (source) source.disconnect(); } catch (e) {}
       try { if (mediaStream) mediaStream.getTracks().forEach(t => t.stop()); } catch (e) {}
@@ -254,6 +276,83 @@
       emit('end', startError
         ? { reason: 'error', error: startError }
         : { reason: 'stopped' });
+    }
+
+    // Desktop source: pull post-noise-gate frames from the native JUCE engine
+    // (the device the user actually plays through) and run the same YIN. Polled
+    // via a self-rescheduling setTimeout — NOT setInterval — so a slow IPC
+    // round-trip can't stack callbacks. Falls back to the mic path if the addon
+    // is downlevel (getRawAudioFrame resolves an empty array).
+    async function startBridge(audio) {
+      try {
+        // The minigame needs live input; make sure the engine is capturing.
+        if (typeof audio.isAudioRunning === 'function') {
+          const running = await audio.isAudioRunning();
+          if (!running && typeof audio.startAudio === 'function') await audio.startAudio();
+        }
+      } catch (e) { /* best-effort; poll anyway */ }
+      try {
+        const sr = await audio.getSampleRate();
+        if (typeof sr === 'number' && sr > 0) bridgeSampleRate = sr;
+      } catch (e) { /* keep 48000 default */ }
+      if (stopped) return;
+      usingBridge = true;
+      let lastT = performance.now();
+      const bridgeStartT = performance.now();
+      const POLL_MS = 25;             // ~40 Hz — matches the mic path's cadence
+      const BRIDGE_WARMUP_MS = 1500;  // grace for startAudio()/device spin-up
+                                      // before concluding there's no frame tap
+
+      const tick = async () => {
+        if (stopped) return;
+        let frame = null;
+        try { frame = await audio.getRawAudioFrame(ringSize); } catch (e) { /* transient IPC hiccup */ }
+        if (stopped) return;
+        if (!frame || frame.length === 0) {
+          // Empty/failed poll. startAudio() above may still be spinning the
+          // input device up, so the first frames can legitimately be empty —
+          // only conclude the addon has no engine frame tap (downlevel) after a
+          // warm-up grace during which no frame ever arrived. A thrown poll is
+          // transient and simply retries until that grace elapses.
+          if (!bridgeGotFrame && (performance.now() - bridgeStartT) > BRIDGE_WARMUP_MS) {
+            usingBridge = false;
+            console.warn('[minigames] engine frame tap unavailable — using getUserMedia');
+            startMic();
+            return;
+          }
+        } else {
+          bridgeGotFrame = true;
+          // Copy the newest ringSize samples into yinWindow (left-zero-pad if the
+          // engine handed back fewer, e.g. a cold-start partial ring).
+          const n = frame.length;
+          if (n >= ringSize) {
+            for (let i = 0; i < ringSize; i++) yinWindow[i] = frame[n - ringSize + i];
+          } else {
+            const pad = ringSize - n;
+            for (let i = 0; i < pad; i++) yinWindow[i] = 0;
+            for (let i = 0; i < n; i++) yinWindow[pad + i] = frame[i];
+          }
+          const now = performance.now();
+          const dt = now - lastT;
+          lastT = now;
+          analyzeWindow(yinWindow, bridgeSampleRate, dt);
+        }
+        // Guard the reschedule: a consumer's 'pitch' handler can call stop()
+        // synchronously inside analyzeWindow, so re-check before re-arming.
+        if (!stopped) bridgePoll = setTimeout(tick, POLL_MS);
+      };
+      tick();
+    }
+
+    // Prefer the desktop engine bridge (correct, user-configured input device);
+    // fall back to getUserMedia on the web build or a downlevel addon.
+    function start() {
+      const audio = window.slopsmithDesktop && window.slopsmithDesktop.audio;
+      if (audio && typeof audio.getRawAudioFrame === 'function') {
+        startBridge(audio);
+      } else {
+        startMic();
+      }
     }
 
     start();
