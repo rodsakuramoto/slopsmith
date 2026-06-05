@@ -2109,6 +2109,14 @@
         let _laneRailBoundsRefTpl = null;
         let _laneRailBoundsRefNotes = null;
         let _lastHwW = 0, _lastHwH = 0;
+        // Last logical (CSS px) size handed to applySize(). #highway is a
+        // flex:1 item, so its real rendered box (canvasSize()) can change as
+        // the player layout settles after a song opens WITHOUT the backing
+        // store (canvas.width) changing — which the _lastHwW/H check below
+        // would miss. Tracking the applied logical size lets draw() detect
+        // that CSS-box drift and re-frame, instead of the user having to
+        // un/re-maximize the window.
+        let _appliedW = 0, _appliedH = 0;
         let mBeatM = null, mBeatQ = null;
         let txtCache = {};
         // Cloned sprite materials cached on individual sprite instances
@@ -11408,6 +11416,7 @@
             cam.aspect = w / h;
             cam.updateProjectionMatrix();
             aspectScale = Math.max(1, REF_ASPECT / Math.max(cam.aspect, 0.5));
+            _appliedW = w; _appliedH = h;
         }
 
         /* ── Teardown ────────────────────────────────────────────────────── */
@@ -11738,14 +11747,29 @@
                     const s = canvasSize(highwayCanvas);
                     if (s.w > 0 && s.h > 0) applySize(s.w, s.h);
                 }
-                // Auto-resize lyricsCanvas when the highway canvas changes size.
-                // In splitscreen the hw.resize override resizes the canvas element
-                // but does not call renderer.resize(), so we detect the change here.
-                if (highwayCanvas && (highwayCanvas.width !== _lastHwW || highwayCanvas.height !== _lastHwH)) {
-                    _lastHwW = highwayCanvas.width;
-                    _lastHwH = highwayCanvas.height;
-                    const s = canvasSize(highwayCanvas);
-                    if (s.w > 0 && s.h > 0) applySize(s.w, s.h);
+                // Keep the render matched to the highway canvas's real box.
+                // Two independent drifts to catch each frame:
+                //  1. Backing store (canvas.width/height) changed out from under
+                //     us — e.g. the splitscreen hw.resize override resizes the
+                //     element but never calls renderer.resize(). Also re-sizes
+                //     the lyrics overlay canvas via applySize().
+                //  2. The CSS box (canvasSize()) drifted while the backing store
+                //     held. #highway is flex:1, so its rendered height changes as
+                //     the player layout settles right after a song opens — with
+                //     no backing-store change and no window 'resize' event, so the
+                //     check above never fires. Without this the camera stays framed
+                //     for the pre-settle (too-tall) size and crops the near strings
+                //     / fret numbers until the user un/re-maximizes the window.
+                if (highwayCanvas) {
+                    const box = canvasSize(highwayCanvas);
+                    if (highwayCanvas.width !== _lastHwW || highwayCanvas.height !== _lastHwH) {
+                        _lastHwW = highwayCanvas.width;
+                        _lastHwH = highwayCanvas.height;
+                        if (box.w > 0 && box.h > 0) applySize(box.w, box.h);
+                    } else if (box.w > 0 && box.h > 0 &&
+                            (Math.abs(box.w - _appliedW) > 1 || Math.abs(box.h - _appliedH) > 1)) {
+                        applySize(box.w, box.h);
+                    }
                 }
                 update(bundle);
                 camUpdate(bundle);
@@ -11920,6 +11944,7 @@
             destroy() {
                 _destroyed = true; _isReady = false; _diagChord = null; _diagPrev = null; _diagLastKey = null; _diagRenderCache.clear();
                 _lastHwW = 0; _lastHwH = 0;
+                _appliedW = 0; _appliedH = 0;
                 _unsubscribeFocus(); teardown();
                 highwayCanvas = null;
             },
